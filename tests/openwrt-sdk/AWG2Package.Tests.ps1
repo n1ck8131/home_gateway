@@ -106,9 +106,19 @@ Describe 'pinned AWG2 OpenWrt packages' {
     It 'pins official kernel and tools source versions and hashes' {
         $script:Kernel | Should -Match 'PKG_VERSION:=1\.0\.20260611'
         $script:Kernel | Should -Match 'PKG_HASH:=e062ecc9f1d89eeafa9f56a29473372a1d796ee061eaa8c7b61eeb51c38b80d6'
-        $script:Tools | Should -Match 'PKG_VERSION:=1\.0\.20260618-2'
+        $script:Tools | Should -Match '(?m)^PKG_SOURCE_VERSION:=1\.0\.20260618-2$'
+        $script:Tools | Should -Match '(?m)^PKG_SOURCE:=v\$\(PKG_SOURCE_VERSION\)\.tar\.gz$'
+        $script:Tools | Should -Match '(?m)^PKG_SOURCE_URL:=https://github\.com/amnezia-vpn/amneziawg-tools/archive/refs/tags/$'
+        $script:Tools | Should -Match '(?m)^PKG_BUILD_DIR:=\$\(BUILD_DIR\)/\$\(PKG_NAME\)-\$\(PKG_SOURCE_VERSION\)$'
         $script:Tools | Should -Match 'PKG_HASH:=cbda09c90d0740b6c3d39622da9f96cfdc2b83459d45973aadd7bf77518fdf10'
         "$script:Kernel`n$script:Tools`n$script:Build" | Should -Not -Match '(?i)latest'
+    }
+
+    It 'emits an APK-compatible tools package version' {
+        $packageVersion = [regex]::Match($script:Tools, '(?m)^PKG_VERSION:=(?<Value>[^\r\n]+)$')
+
+        $packageVersion.Success | Should -BeTrue
+        $packageVersion.Groups['Value'].Value | Should -Be '1.0.20260618.2'
     }
 
     It 'declares the required package contracts' {

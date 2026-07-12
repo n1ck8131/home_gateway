@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 lock="$root/manifest/versions.lock.yaml"
 url="$(jq -er '.artifacts.openwrt_sdk.url' "$lock")"
 expected="$(jq -er '.artifacts.openwrt_sdk.sha256' "$lock")"

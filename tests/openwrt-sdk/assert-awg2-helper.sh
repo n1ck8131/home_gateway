@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 helper="$root/packaging/openwrt-awg2/amneziawg-tools/files/amneziawg.sh"
 
 for key in awg_s3 awg_s4 awg_i1 awg_i2 awg_i3 awg_i4 awg_i5; do
@@ -30,7 +30,10 @@ else
 fi
 printf '#!/bin/sh\nexit 0\n' > "$tmp/awg"
 chmod +x "$tmp/awg"
+# Runtime variables must remain literal in these generated command fixtures.
+# shellcheck disable=SC2016
 printf '#!/bin/sh\nprintf "%%s\\n" "$0 $*" >> "$TRACE"\n' > "$tmp/ip"
+# shellcheck disable=SC2016
 printf '#!/bin/sh\nprintf "%%s\\n" "$0 $*" >> "$TRACE"\n' > "$tmp/modprobe"
 chmod +x "$tmp/ip" "$tmp/modprobe"
 TRACE="$tmp/trace" PATH="$tmp:$PATH" INCLUDE_ONLY=1 WG="$tmp/awg" sh -c '. "$1"; proto_amneziawg_teardown awg-test' sh "$helper"

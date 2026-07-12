@@ -17,7 +17,10 @@ fi
 }
 
 proto_amneziawg_init_config() {
+	# netifd consumes these protocol globals after initialization returns.
+	# shellcheck disable=SC2034
 	renew_handler=1
+	# shellcheck disable=SC2034
 	peer_detect=1
 	proto_config_add_string "private_key"
 	proto_config_add_int "listen_port"
@@ -40,7 +43,9 @@ proto_amneziawg_init_config() {
 	proto_config_add_string "awg_i3"
 	proto_config_add_string "awg_i4"
 	proto_config_add_string "awg_i5"
+	# shellcheck disable=SC2034
 	available=1
+	# shellcheck disable=SC2034
 	no_proto_task=1
 }
 
@@ -216,7 +221,7 @@ proto_amneziawg_setup() {
 	if [ "${nohostroute}" != "1" ]; then
 		"${WG}" show "${config}" endpoints | \
 			sed -E 's/\[?([0-9.:a-f]+)\]?:([0-9]+)/\1 \2/' | \
-			while IFS=$'\t ' read -r key address port; do
+			while IFS=$'\t ' read -r _ address port; do
 				[ -n "${port}" ] || continue
 				proto_add_host_dependency "${config}" "${address}" "${tunlink}"
 			done

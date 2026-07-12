@@ -98,6 +98,7 @@ case "$mode" in
 		case "$tools" in *[!A-Za-z0-9._+-]*) exit 2 ;; esac
 		test "$kernel_abi" = 'kernel-6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1'
 		read_owner
+		status=0
 		trap 'status=$?; trap - EXIT INT TERM; cleanup_owned || status=1; exit "$status"' EXIT
 		trap 'exit 130' INT TERM
 		cd "$work"

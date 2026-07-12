@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)"
 lock="$root/manifest/versions.lock.yaml"
 locked_epoch="$(jq -er '.openwrt.source_date_epoch' "$lock")"
 if [ "${SOURCE_DATE_EPOCH+x}" = x ] && [ "$SOURCE_DATE_EPOCH" != "$locked_epoch" ]; then
@@ -18,7 +18,7 @@ esac
 rm -rf "$output_dir"
 mkdir -p "$output_dir"
 
-sdk="$($root/scripts/openwrt/fetch-sdk.sh)"
+sdk="$("$root/scripts/openwrt/fetch-sdk.sh")"
 rm -rf "$sdk/package/home-gateway"
 mkdir -p "$sdk/package/home-gateway"
 cp -a "$root/packaging/openwrt-awg2/." "$sdk/package/home-gateway/"
@@ -47,12 +47,16 @@ test "$kernel" = '6.12.94'
 test "$vermagic" = '5a6c1f71be683ae9980b15d3ce73e24d'
 test "$architecture" = 'aarch64_cortex-a53'
 
-set -- $(find "$sdk/bin" -type f -name 'kmod-amneziawg-*.apk')
-test "$#" -eq 1
-kmod_apk="$1"
-set -- $(find "$sdk/bin" -type f -name 'amneziawg-tools-*.apk')
-test "$#" -eq 1
-tools_apk="$1"
+find_single_apk() {
+	apk_matches="$(find "$sdk/bin" -type f -name "$1")"
+	case "$apk_matches" in
+		'' | *'
+'*) return 1 ;;
+	esac
+	printf '%s\n' "$apk_matches"
+}
+kmod_apk="$(find_single_apk 'kmod-amneziawg-*.apk')"
+tools_apk="$(find_single_apk 'amneziawg-tools-*.apk')"
 apk_host="$sdk/staging_dir/host/bin/apk"
 test -x "$apk_host"
 kmod_dump="$($apk_host adbdump "$kmod_apk")"

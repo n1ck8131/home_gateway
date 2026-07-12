@@ -8,7 +8,19 @@ $required = @(
     'DECISIONS.md',
     '.editorconfig',
     '.gitattributes',
-    '.gitignore'
+    '.gitignore',
+    'docs/SECURITY.md',
+    'docs/COMPATIBILITY.md',
+    'docs/ACCEPTANCE_MATRIX.md',
+    'docs/adr/ADR-0001-supported-platform.md',
+    'docs/adr/ADR-0002-vpn-transports.md',
+    'docs/adr/ADR-0003-routing-ownership-and-marks.md',
+    'docs/adr/ADR-0004-dns-and-precedence.md',
+    'docs/adr/ADR-0005-transaction-model.md',
+    'docs/adr/ADR-0006-state-secrets-backup.md',
+    'docs/adr/ADR-0007-mobile-peer-lifecycle.md',
+    'docs/adr/ADR-0008-cisco-discovery.md',
+    'docs/adr/ADR-0009-supply-chain-signing.md'
 )
 $missing = @($required | Where-Object {
     -not (Test-Path -LiteralPath (Join-Path $root $_))

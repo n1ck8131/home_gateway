@@ -32,3 +32,4 @@ make PWSH=./.tools/pwsh/pwsh verify
 - [Development plan](PLAN.md)
 - [Current status](STATUS.md)
 - [Accepted decisions](DECISIONS.md)
+- [Security model](docs/SECURITY.md)

@@ -1,0 +1,91 @@
+# Acceptance Matrix
+
+Each requirement has one owning phase and one evidence type.
+
+## §30.1 Routing
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| Ordinary Russian site uses WAN IP | P3 | hardware |
+| `vpn` domain uses VPN IP | P3 | hardware |
+| Manual `direct` overrides an external VPN source | P2 | automated |
+| `auto-cisco` applies only to `work-pc` | P7 | external-service |
+| Cisco gateway always uses WAN | P7 | field-soak |
+| Internal work portal remains available through Cisco | P7 | external-service |
+| Public work portal sees Russian WAN or corporate egress | P7 | external-service |
+| VPS switching does not break Cisco by changing its egress | P9 | field-soak |
+| HTTP/3 and UDP route correctly | P3 | hardware |
+
+## §30.2 Failure modes
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| AWG stop does not leak VPN domains to WAN | P3 | hardware |
+| Direct and Cisco traffic continue during AWG failure | P7 | external-service |
+| Auto-failover selects a healthy reserve server | P9 | external-service |
+| Failover does not flap | P9 | field-soak |
+| Corrupted list update is rejected | P6 | automated |
+| Last-known-good source remains active | P6 | automated |
+| Invalid nft or DNS configuration rolls back automatically | P2 | automated |
+| Router reboot restores the last applied revision | P3 | hardware |
+
+## §30.3 IPv6 and DNS
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| VPN domains have no IPv6 leak | P3 | hardware |
+| Client DNS passes through the router | P3 | hardware |
+| A, AAAA and CNAME answers populate sets | P2 | automated |
+| Browser DoH conflict is diagnosed | P5 | automated |
+| Mobile full tunnel does not use mobile-operator DNS | P8 | hardware |
+
+## §30.4 Mobile
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| New profile imports into AmneziaWG | P8 | hardware |
+| Profile connects over a cellular network | P8 | hardware |
+| Mobile client shows VPS egress | P8 | hardware |
+| Peer is visible in the panel | P8 | hardware |
+| Revoke stops access | P8 | hardware |
+| Private key cannot be downloaded after one-time token expiry | P8 | automated |
+| One device can be revoked without changing other devices | P8 | automated |
+
+## §30.5 Backup
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| Encrypted backup is created | P11 | automated |
+| Backup is verified | P11 | automated |
+| Backup restores to a clean test installation | P11 | hardware |
+| Secrets are not visible without decryption | P11 | automated |
+| Sanitized export is safe for Git | P11 | automated |
+
+## §30.6 Security
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| Panel is unavailable from WAN, Guest and VPN peers | P5 | automated |
+| Server admin API does not listen on a public HTTP port | P3 | hardware |
+| SSH password and root login are disabled after bootstrap | P3 | hardware |
+| Support bundle excludes private keys and passwords | P12 | automated |
+| External list input cannot execute commands | P6 | automated |
+| Release artifacts include checksums, signatures and SBOM | P12 | automated |
+
+## §30.7 Performance
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| Direct Ethernet approaches 500 Mbps and reaches target | P12 | hardware |
+| VPN benchmark is documented | P12 | hardware |
+| CPU and RAM remain within target | P12 | hardware |
+| 100k-list apply reaches target or produces an optimization decision | P6 | hardware |
+
+## §30.8 Cisco stability
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| Cisco connection remains stable under router routing | P7 | field-soak |
+| Cisco endpoint remains direct | P7 | field-soak |
+| Blocked non-work resources use router VPN | P7 | field-soak |
+| Work portals do not see VPN country | P7 | field-soak |

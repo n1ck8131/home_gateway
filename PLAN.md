@@ -30,7 +30,7 @@
 
 ## 1. Статус входных данных
 
-- Канонический input: `HOME_GATEWAY_CODEX_SPEC.md`, версия 1.0 от 2026-07-11.
+- Канонический input: `SPEC.md`, версия 1.0 от 2026-07-11.
 - Репозиторий пока содержит только спецификацию; Git не инициализирован.
 - На текущей Windows-машине есть Git 2.52.0, Docker client 29.2.0 и WSL2; Docker daemon остановлен, отдельный Linux lab не подтверждён.
 - Локально не обнаружены Go, PowerShell 7 и GNU Make. Windows PowerShell 5.1 остаётся доступным runtime для совместимого bootstrap path.
@@ -194,7 +194,7 @@ Evidence bundle для gate содержит `nft` counters, `ip rule/route` dum
 
 **Files:**
 
-- Rename: `HOME_GATEWAY_CODEX_SPEC.md` → `SPEC.md` после approval этого master plan.
+- Canonical specification: `SPEC.md`; repository baseline already uses this name.
 - Create: `README.md`, `STATUS.md`, `DECISIONS.md`, `.gitignore`, `Makefile`, `go.work`, root Go module files.
 - Create: `docs/adr/ADR-0001` … `ADR-0009`, `docs/SECURITY.md`, `docs/COMPATIBILITY.md`.
 - Create: `configs/defaults.yaml`, `configs/inventory.example.yaml`, `configs/routerd.example.yaml`, `configs/builtin-sources.yaml`.

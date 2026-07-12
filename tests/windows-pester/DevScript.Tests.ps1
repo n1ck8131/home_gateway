@@ -26,6 +26,48 @@ Describe 'scripts/dev.ps1' {
         $conflicts | Should -BeNullOrEmpty
     }
 
+    It 'uses repository-aware gitleaks scanning for lint and verify' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:Dev,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $lint = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Invoke-Lint'
+        }, $true))
+        $verify = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Invoke-Verify'
+        }, $true))
+
+        $parseErrors | Should -BeNullOrEmpty
+        $lint.Count | Should -Be 1
+        $verify.Count | Should -Be 1
+
+        $gitleaksCalls = @($lint[0].Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Invoke-CheckedNative' -and
+                $node.Extent.Text -match '\$gitleaks'
+        }, $true))
+        $verifyLintCalls = @($verify[0].Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Invoke-Lint'
+        }, $true))
+
+        $gitleaksCalls.Count | Should -Be 1
+        $gitleaksCalls[0].Extent.Text | Should -Match "-Arguments\s+@\(\s*'git'\s*,\s*'--no-banner'\s*,\s*'--redact'\s*,\s*'\.'\s*\)"
+        $gitleaksCalls[0].Extent.Text | Should -Not -Match "'dir'"
+        $gitleaksCalls[0].Extent.Text | Should -Not -Match '\$root'
+        $verifyLintCalls.Count | Should -Be 1
+    }
+
     It 'rejects an unknown command' {
         { & $script:Dev -Command invalid } | Should -Throw
     }

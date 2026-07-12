@@ -106,7 +106,7 @@ function Invoke-Lint {
     Invoke-CheckedNative -FilePath $go -Arguments @('tool', 'govulncheck', './...')
     $gitleaks = Join-Path $root ".tools/bin/gitleaks$suffix"
     $actionlint = Join-Path $root ".tools/bin/actionlint$suffix"
-    Invoke-CheckedNative -FilePath $gitleaks -Arguments @('dir', '--no-banner', '--redact', $root)
+    Invoke-CheckedNative -FilePath $gitleaks -Arguments @('git', '--no-banner', '--redact', '.')
     Invoke-CheckedNative -FilePath $actionlint
     if (-not $windowsPlatform) {
         $shellcheck = Join-Path $root '.tools/bin/shellcheck'

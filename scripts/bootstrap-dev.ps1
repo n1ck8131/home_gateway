@@ -6,13 +6,17 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 
+function Test-WindowsPlatform {
+    return [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+}
+
 function Invoke-CurlDownload {
     param(
         [Parameter(Mandatory)][string]$CurlPath,
         [Parameter(Mandatory)][string]$Uri,
         [Parameter(Mandatory)][string]$Partial
     )
-    & $CurlPath @(
+    $arguments = @(
         '--fail',
         '--location',
         '--continue-at', '-',
@@ -25,6 +29,7 @@ function Invoke-CurlDownload {
         $Uri,
         '--output', $Partial
     )
+    & $CurlPath @arguments
     if ($LASTEXITCODE -ne 0) {
         throw "curl download failed for $Uri with exit code $LASTEXITCODE"
     }
@@ -35,10 +40,11 @@ function Invoke-ArtifactDownload {
         [Parameter(Mandatory)][string]$Uri,
         [Parameter(Mandatory)][string]$Partial
     )
-    $curlName = if ($env:OS -eq 'Windows_NT') { 'curl.exe' } else { 'curl' }
+    $curlName = if (Test-WindowsPlatform) { 'curl.exe' } else { 'curl' }
     $curl = Get-Command -Name $curlName -ErrorAction SilentlyContinue
     if ($curl) {
-        Invoke-CurlDownload -CurlPath $curl.Source -Uri $Uri -Partial $Partial
+        $curlPath = if ($curl.Path) { $curl.Path } elseif ($curl.Source) { $curl.Source } else { $curl.Definition }
+        Invoke-CurlDownload -CurlPath $curlPath -Uri $Uri -Partial $Partial
         return
     }
     if ((Test-Path -LiteralPath $Partial) -and (Get-Item -LiteralPath $Partial).Length -ne 0) {
@@ -321,7 +327,7 @@ function Invoke-Bootstrap {
         throw 'versions lock missing'
     }
     $lock = (Get-Content -LiteralPath $lockPath -Raw) | ConvertFrom-Json
-    $isWindows = $env:OS -eq 'Windows_NT'
+    $isWindows = Test-WindowsPlatform
     $platform = if ($isWindows) { 'windows_amd64' } else { 'linux_amd64' }
     $selections = @(Get-PlatformArtifactNames -Platform $platform -IncludePowerShell:$IncludePowerShell)
     if ($WhatIf) {

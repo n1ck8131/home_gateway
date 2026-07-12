@@ -23,7 +23,7 @@ Describe 'scripts/bootstrap-dev.ps1' {
 
     It 'fails closed for a corrupt cached artifact' {
         $lock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'manifest/versions.lock.yaml') -Raw | ConvertFrom-Json
-        $isWindows = $env:OS -eq 'Windows_NT'
+        $isWindows = Test-WindowsPlatform
         $platform = if ($isWindows) { 'windows_amd64' } else { 'linux_amd64' }
         $artifact = $lock.artifacts.PSObject.Properties["go_$platform"].Value
         $filename = Get-ArtifactFilename -Artifact $artifact
@@ -49,6 +49,24 @@ Describe 'scripts/bootstrap-dev.ps1' {
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
     }
 
+    It 'uses the application Path when Source is empty' {
+        $partial = Join-Path $script:FixtureRoot 'artifact.partial'
+        $priorOS = $env:OS
+        Remove-Item Env:OS -ErrorAction SilentlyContinue
+        Mock Get-Command { [pscustomobject]@{ Path = 'C:\Windows\System32\curl.exe'; Source = ''; Definition = '' } } -ParameterFilter { $Name -eq 'curl.exe' }
+        Mock Invoke-CurlDownload { }
+
+        try {
+            Invoke-ArtifactDownload -Uri 'https://example.invalid/artifact.zip' -Partial $partial
+        } finally {
+            if ($null -ne $priorOS) {
+                $env:OS = $priorOS
+            }
+        }
+
+        Should -Invoke Invoke-CurlDownload -ParameterFilter { $CurlPath -eq 'C:\Windows\System32\curl.exe' } -Times 1 -Exactly
+    }
+
     It 'performs zero downloads and replacements on a second valid invocation' {
         $script:Installed = $false
         Mock Test-InstalledComponent { return $script:Installed }
@@ -60,7 +78,7 @@ Describe 'scripts/bootstrap-dev.ps1' {
         Invoke-Bootstrap -Root $script:FixtureRoot | Out-Null
         Invoke-Bootstrap -Root $script:FixtureRoot | Out-Null
 
-        $expected = if ($env:OS -eq 'Windows_NT') { 4 } else { 5 }
+        $expected = if (Test-WindowsPlatform) { 4 } else { 5 }
         Should -Invoke Get-VerifiedArtifact -Times $expected -Exactly
         Should -Invoke Install-ToolComponent -Times $expected -Exactly
     }

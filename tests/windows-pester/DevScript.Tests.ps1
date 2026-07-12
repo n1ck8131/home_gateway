@@ -45,7 +45,7 @@ Describe 'scripts/dev.ps1' {
     }
 
     It 'builds the exact target tuples and Windows program contracts' {
-        $go = Join-Path $script:Root ".tools/go/bin/go$(if ($env:OS -eq 'Windows_NT') { '.exe' } else { '' })"
+        $go = Join-Path $script:Root ".tools/go/bin/go$(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { '.exe' } else { '' })"
         $targets = @(
             @{ Path = 'build/routerd_linux_arm64'; GOOS = 'linux'; GOARCH = 'arm64' },
             @{ Path = 'build/server-agent_linux_amd64'; GOOS = 'linux'; GOARCH = 'amd64' },
@@ -60,7 +60,7 @@ Describe 'scripts/dev.ps1' {
             $text | Should -Match "GOARCH=$($target.GOARCH)"
             $text | Should -Match 'CGO_ENABLED=0'
         }
-        if ($env:OS -eq 'Windows_NT') {
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
             $ciscoOutput = & (Join-Path $script:Root 'build/cisco-discovery_windows_amd64.exe') version --json
             $ciscoExitCode = $LASTEXITCODE
             $ciscoExitCode | Should -Be 0

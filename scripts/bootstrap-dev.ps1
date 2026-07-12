@@ -6,6 +6,58 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:RepositoryRoot = Split-Path -Parent $PSScriptRoot
 
+function Invoke-CurlDownload {
+    param(
+        [Parameter(Mandatory)][string]$CurlPath,
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$Partial
+    )
+    & $CurlPath @(
+        '--fail',
+        '--location',
+        '--continue-at', '-',
+        '--retry', '3',
+        '--retry-all-errors',
+        '--connect-timeout', '30',
+        '--max-time', '900',
+        '--proto', '=https',
+        '--tlsv1.2',
+        $Uri,
+        '--output', $Partial
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl download failed for $Uri with exit code $LASTEXITCODE"
+    }
+}
+
+function Invoke-ArtifactDownload {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [Parameter(Mandatory)][string]$Partial
+    )
+    $curlName = if ($env:OS -eq 'Windows_NT') { 'curl.exe' } else { 'curl' }
+    $curl = Get-Command -Name $curlName -ErrorAction SilentlyContinue
+    if ($curl) {
+        Invoke-CurlDownload -CurlPath $curl.Source -Uri $Uri -Partial $Partial
+        return
+    }
+    if ((Test-Path -LiteralPath $Partial) -and (Get-Item -LiteralPath $Partial).Length -ne 0) {
+        throw "Partial download requires curl resume support: $Partial"
+    }
+    foreach ($attempt in 1..2) {
+        try {
+            Invoke-WebRequest -UseBasicParsing -TimeoutSec 900 -Uri $Uri -OutFile $Partial
+            return
+        } catch {
+            if ($attempt -eq 2) {
+                throw
+            }
+            Remove-Item -LiteralPath $Partial -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
 function Get-VerifiedArtifact {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -16,7 +68,7 @@ function Get-VerifiedArtifact {
     $partial = "$final.partial"
     New-Item -ItemType Directory -Force -Path $DownloadDirectory | Out-Null
     if (-not (Test-Path -LiteralPath $final)) {
-        Invoke-WebRequest -UseBasicParsing -Uri $Artifact.url -OutFile $partial
+        Invoke-ArtifactDownload -Uri $Artifact.url -Partial $partial
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $partial).Hash.ToLowerInvariant()
         if ($actual -ne $Artifact.sha256) {
             Remove-Item -LiteralPath $partial -Force
@@ -185,7 +237,7 @@ function Test-InstalledComponent {
             default {
                 $path = Join-Path $Root ".tools/bin/$Component$suffix"
                 if (-not (Test-Path -LiteralPath $path)) { return $false }
-                $arguments = if ($Component -eq 'actionlint') { @('-version') } else { @('version') }
+                [string[]]$arguments = if ($Component -eq 'actionlint') { '-version' } else { 'version' }
                 $output = @(& $path @arguments 2>&1)
                 if ($LASTEXITCODE -ne 0) { return $false }
                 $expected = switch ($Component) {
@@ -193,7 +245,8 @@ function Test-InstalledComponent {
                     'actionlint' { '1.7.12' }
                     'shellcheck' { '0.11.0' }
                 }
-                return ($output -join ' ') -match [regex]::Escape($expected)
+                $pattern = [regex]::Escape($expected)
+                return ($output -join ' ') -match $pattern
             }
         }
     } catch {

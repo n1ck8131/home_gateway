@@ -36,6 +36,19 @@ Describe 'scripts/bootstrap-dev.ps1' {
         Should -Invoke Invoke-WebRequest -Times 0 -Exactly
     }
 
+    It 'resumes an existing partial with bounded curl' {
+        $partial = Join-Path $script:FixtureRoot 'artifact.partial'
+        Set-Content -LiteralPath $partial -Value 'partial'
+        Mock Get-Command { [pscustomobject]@{ Source = 'curl.exe' } } -ParameterFilter { $Name -in @('curl.exe', 'curl') }
+        Mock Invoke-CurlDownload { }
+        Mock Invoke-WebRequest { throw 'Invoke-WebRequest must not restart a partial' }
+
+        Invoke-ArtifactDownload -Uri 'https://example.invalid/artifact.zip' -Partial $partial
+
+        Should -Invoke Invoke-CurlDownload -Times 1 -Exactly
+        Should -Invoke Invoke-WebRequest -Times 0 -Exactly
+    }
+
     It 'performs zero downloads and replacements on a second valid invocation' {
         $script:Installed = $false
         Mock Test-InstalledComponent { return $script:Installed }

@@ -213,6 +213,19 @@ function Install-ToolComponent {
     }
 }
 
+function Get-ToolVersionArguments {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('gitleaks', 'actionlint', 'shellcheck')]
+        [string]$Component
+    )
+    switch ($Component) {
+        'actionlint' { return '-version' }
+        'shellcheck' { return '--version' }
+        default { return 'version' }
+    }
+}
+
 function Test-InstalledComponent {
     param(
         [Parameter(Mandatory)][string]$Component,
@@ -243,7 +256,7 @@ function Test-InstalledComponent {
             default {
                 $path = Join-Path $Root ".tools/bin/$Component$suffix"
                 if (-not (Test-Path -LiteralPath $path)) { return $false }
-                [string[]]$arguments = if ($Component -eq 'actionlint') { '-version' } else { 'version' }
+                [string[]]$arguments = Get-ToolVersionArguments -Component $Component
                 $output = @(& $path @arguments 2>&1)
                 if ($LASTEXITCODE -ne 0) { return $false }
                 $expected = switch ($Component) {

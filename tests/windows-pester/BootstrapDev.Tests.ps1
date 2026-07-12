@@ -96,6 +96,12 @@ Describe 'scripts/bootstrap-dev.ps1' {
         Should -Invoke Install-ToolComponent -ParameterFilter { $Component -eq 'go' } -Times 1 -Exactly
     }
 
+    It 'uses each tool native version argument' {
+        Get-ToolVersionArguments -Component shellcheck | Should -Be '--version'
+        Get-ToolVersionArguments -Component actionlint | Should -Be '-version'
+        Get-ToolVersionArguments -Component gitleaks | Should -Be 'version'
+    }
+
     It 'selects mutually exclusive Windows and Linux artifacts' {
         $windows = @(Get-PlatformArtifactNames -Platform windows_amd64 | ForEach-Object ArtifactKey)
         $linux = @(Get-PlatformArtifactNames -Platform linux_amd64 | ForEach-Object ArtifactKey)

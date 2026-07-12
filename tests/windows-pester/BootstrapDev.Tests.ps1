@@ -51,20 +51,14 @@ Describe 'scripts/bootstrap-dev.ps1' {
 
     It 'uses the application Path when Source is empty' {
         $partial = Join-Path $script:FixtureRoot 'artifact.partial'
-        $priorOS = $env:OS
-        Remove-Item Env:OS -ErrorAction SilentlyContinue
-        Mock Get-Command { [pscustomobject]@{ Path = 'C:\Windows\System32\curl.exe'; Source = ''; Definition = '' } } -ParameterFilter { $Name -eq 'curl.exe' }
+        $curlName = if (Test-WindowsPlatform) { 'curl.exe' } else { 'curl' }
+        $curlPath = if (Test-WindowsPlatform) { 'C:\Windows\System32\curl.exe' } else { '/usr/bin/curl' }
+        Mock Get-Command { [pscustomobject]@{ Path = $curlPath; Source = ''; Definition = '' } } -ParameterFilter { $Name -eq $curlName }
         Mock Invoke-CurlDownload { }
 
-        try {
-            Invoke-ArtifactDownload -Uri 'https://example.invalid/artifact.zip' -Partial $partial
-        } finally {
-            if ($null -ne $priorOS) {
-                $env:OS = $priorOS
-            }
-        }
+        Invoke-ArtifactDownload -Uri 'https://example.invalid/artifact.zip' -Partial $partial
 
-        Should -Invoke Invoke-CurlDownload -ParameterFilter { $CurlPath -eq 'C:\Windows\System32\curl.exe' } -Times 1 -Exactly
+        Should -Invoke Invoke-CurlDownload -ParameterFilter { $CurlPath -eq $curlPath } -Times 1 -Exactly
     }
 
     It 'performs zero downloads and replacements on a second valid invocation' {

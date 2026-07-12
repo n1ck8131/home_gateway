@@ -5,11 +5,13 @@ Release level: planning-approved
 
 ## P0A Foundation
 
-- State: not-started
+- State: blocked
+- Missing evidence: clean Linux verification with `CAP_NET_ADMIN` and the network-lab prerequisites.
 
 ## P0B Compatibility
 
-- State: not-started
+- State: blocked
+- Missing evidence: clean OpenWrt 25.12.5 SDK build for the pinned AWG2 packages and userspace contingency measurements.
 
 ## External gates
 
@@ -20,4 +22,5 @@ Release level: planning-approved
 
 ## Blockers
 
-- None at plan approval.
+- Linux verification with `CAP_NET_ADMIN` has not run.
+- The pinned AWG2 packages have not completed a clean OpenWrt 25.12.5 SDK build.

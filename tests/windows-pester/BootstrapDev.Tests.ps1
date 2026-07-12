@@ -70,7 +70,6 @@ Describe 'scripts/bootstrap-dev.ps1' {
     It 'performs zero downloads and replacements on a second valid invocation' {
         $script:Installed = $false
         Mock Test-InstalledComponent { return $script:Installed }
-        Mock Use-PinnedSystemGo { return $false }
         Mock Get-VerifiedArtifact { return 'fixture.archive' }
         Mock Install-ToolComponent { }
         Mock Assert-BootstrapVersions { $script:Installed = $true }
@@ -83,17 +82,18 @@ Describe 'scripts/bootstrap-dev.ps1' {
         Should -Invoke Install-ToolComponent -Times $expected -Exactly
     }
 
-    It 'reuses an exact system Go toolchain without downloading its archive' {
+    It 'installs the locked Go archive even when a matching system Go exists' {
         Mock Test-InstalledComponent { return $false }
-        Mock Use-PinnedSystemGo { return $true }
+        Mock Get-Command { [pscustomobject]@{ Source = 'C:\system\go.exe' } } -ParameterFilter { $Name -eq 'go' }
         Mock Get-VerifiedArtifact { return 'fixture.archive' }
         Mock Install-ToolComponent { }
         Mock Assert-BootstrapVersions { }
 
         Invoke-Bootstrap -Root $script:FixtureRoot | Out-Null
 
-        Should -Invoke Use-PinnedSystemGo -Times 1 -Exactly
-        Should -Invoke Get-VerifiedArtifact -ParameterFilter { $Name -like 'go*' } -Times 0 -Exactly
+        Should -Invoke Get-Command -ParameterFilter { $Name -eq 'go' } -Times 0 -Exactly
+        Should -Invoke Get-VerifiedArtifact -ParameterFilter { $Name -like 'go*' } -Times 1 -Exactly
+        Should -Invoke Install-ToolComponent -ParameterFilter { $Component -eq 'go' } -Times 1 -Exactly
     }
 
     It 'selects mutually exclusive Windows and Linux artifacts' {

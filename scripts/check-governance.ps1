@@ -42,7 +42,7 @@ foreach ($relativePath in $adrPaths) {
     if (-not (Test-Path -LiteralPath $path)) {
         continue
     }
-    $raw = Get-Content -LiteralPath $path -Raw
+    $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
     $accepted = $raw -match '(?mi)^Status:\s*Accepted\s*$'
     $hasPlaceholder = $raw -match '(?i)\b(TODO|TBD|PLACEHOLDER|FIXME|XXX)\b'
     if ($accepted -and $hasPlaceholder) {
@@ -52,7 +52,7 @@ foreach ($relativePath in $adrPaths) {
 
 $decisionsPath = Join-Path $Root 'DECISIONS.md'
 if (Test-Path -LiteralPath $decisionsPath) {
-    $decisions = Get-Content -LiteralPath $decisionsPath -Raw
+    $decisions = Get-Content -LiteralPath $decisionsPath -Raw -Encoding UTF8
     foreach ($relativePath in $adrPaths) {
         $filename = Split-Path -Leaf $relativePath
         if ($decisions -notmatch [regex]::Escape($filename)) {
@@ -63,9 +63,9 @@ if (Test-Path -LiteralPath $decisionsPath) {
 
 $matrixPath = Join-Path $Root 'docs/ACCEPTANCE_MATRIX.md'
 if (Test-Path -LiteralPath $matrixPath) {
-    $matrix = Get-Content -LiteralPath $matrixPath -Raw
+    $matrix = Get-Content -LiteralPath $matrixPath -Raw -Encoding UTF8
     foreach ($section in 1..8) {
-        $heading = "§30.$section"
+        $heading = "$([char]0x00A7)30.$section"
         $pattern = '(?m)^##\s+' + [regex]::Escape($heading) + '(\s|$)'
         if ($matrix -notmatch $pattern) {
             $errors.Add("ACCEPTANCE_MATRIX.md missing heading: $heading")

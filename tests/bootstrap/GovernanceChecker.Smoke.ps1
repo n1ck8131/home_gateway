@@ -17,6 +17,7 @@ $adrPaths = @(
     'docs/adr/ADR-0009-supply-chain-signing.md'
 )
 $encoding = New-Object System.Text.UTF8Encoding($false)
+$sectionSign = [char]0x00A7
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("home-gateway-governance-$([guid]::NewGuid().ToString('N'))")
 $validRoot = Join-Path $tempRoot 'valid'
 
@@ -44,8 +45,14 @@ function Assert-CheckerFailure {
         [Parameter(Mandatory)][string]$FixtureRoot,
         [Parameter(Mandatory)][string[]]$ExpectedDiagnostics
     )
-    $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $checker -Root $FixtureRoot 2>&1)
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $checker -Root $FixtureRoot 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($exitCode -eq 0) {
         throw "Expected governance checker failure for $FixtureRoot"
     }
@@ -69,7 +76,7 @@ try {
         Set-FixtureFile -FixtureRoot $validRoot -RelativePath $relativePath -Content "# $filename`n`nStatus: Accepted`n`n## Context`n`nComplete.`n"
     }
     Set-FixtureFile -FixtureRoot $validRoot -RelativePath 'DECISIONS.md' -Content (($decisionLines -join "`n") + "`n")
-    $matrix = (1..8 | ForEach-Object { "## §30.$_ Evidence`n`n| Requirement | Owner phase | Evidence type |`n|---|---|---|`n| Fixture | P$_ | automated |" }) -join "`n`n"
+    $matrix = (1..8 | ForEach-Object { "## ${sectionSign}30.$_ Evidence`n`n| Requirement | Owner phase | Evidence type |`n|---|---|---|`n| Fixture | P$_ | automated |" }) -join "`n`n"
     Set-FixtureFile -FixtureRoot $validRoot -RelativePath 'docs/ACCEPTANCE_MATRIX.md' -Content ($matrix + "`n")
 
     $validOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $checker -Root $validRoot 2>&1)
@@ -101,10 +108,10 @@ try {
 
     $missingRow = New-DefectCase -Name 'missing-section'
     $matrixPath = Join-Path $missingRow 'docs/ACCEPTANCE_MATRIX.md'
-    $missingMatrix = (Get-Content -LiteralPath $matrixPath -Raw).Replace('## §30.4 Evidence', '### Removed section 30.4')
+    $missingMatrix = (Get-Content -LiteralPath $matrixPath -Raw -Encoding UTF8).Replace("## ${sectionSign}30.4 Evidence", '### Removed section 30.4')
     Set-FixtureFile -FixtureRoot $missingRow -RelativePath 'docs/ACCEPTANCE_MATRIX.md' -Content $missingMatrix
     Assert-CheckerFailure -FixtureRoot $missingRow -ExpectedDiagnostics @(
-        'ACCEPTANCE_MATRIX.md missing heading: §30.4'
+        "ACCEPTANCE_MATRIX.md missing heading: ${sectionSign}30.4"
     )
 
     $aggregate = New-DefectCase -Name 'aggregate'

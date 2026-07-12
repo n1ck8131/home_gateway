@@ -66,7 +66,7 @@
 - Python: `str | None` вместо `Optional[str]`.
 - User-visible строки хранить в `labels.py` или `constants.py`.
 - В конце фазы: `ruff check .`, `ruff format --check .` и все существующие tests. Если Python-файлов нет, записать `RUFF_NOT_APPLICABLE_NO_PYTHON`.
-- Вся конфигурация Codex находится только в `C:\Users\vsevo\AI-core\.Codex\`; не создавать `C:\Users\vsevo\.Codex\`.
+- Вся глобальная конфигурация Codex находится только в `C:\Users\vsevo\.codex\`; не использовать `C:\Users\vsevo\AI-core\.Codex\` как активный `CODEX_HOME`.
 
 ## P0 commands после bootstrap
 

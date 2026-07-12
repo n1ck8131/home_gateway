@@ -1,0 +1,30 @@
+schema_version: 1
+project:
+  name: home-gateway
+  timezone: Europe/Kaliningrad
+router:
+  model: glinet_gl-mt6000
+  address: 192.168.10.1
+  admin_hostname: router.home.arpa
+  openwrt_version: 25.12.5
+  wan:
+    mode: dhcp
+    vlan_id: null
+workstation:
+  id: work-pc
+  hostname: SET_DURING_INSTALL
+  reserved_ip: 192.168.10.10
+  allow_repeater: false
+  identities:
+    - kind: ethernet
+      mac: SET_DURING_INSTALL
+    - kind: flint-wifi
+      mac: SET_DURING_INSTALL
+servers:
+  - id: primary-1
+    host: SET_DURING_INSTALL
+    ssh_user: bootstrap
+    country: SET_DURING_INSTALL
+    priority: 10
+    transports:
+      - amneziawg2

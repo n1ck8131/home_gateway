@@ -1,0 +1,14 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Home Gateway Local API",
+    "version": "0.0.0-p0",
+    "description": "P0 contract boundary. P4 owns endpoint definitions."
+  },
+  "servers": [
+    {
+      "url": "https://router.home.arpa:8443"
+    }
+  ],
+  "paths": {}
+}

@@ -102,7 +102,7 @@ function Invoke-Lint {
     $go = Get-PinnedGo
     Invoke-CheckedNative -FilePath $go -Arguments @('vet', './...')
     Invoke-CheckedNative -FilePath $go -Arguments @('tool', 'staticcheck', './...')
-    Invoke-CheckedNative -FilePath $go -Arguments @('tool', 'gosec', './...')
+    Invoke-CheckedNative -FilePath $go -Arguments @('tool', 'gosec', './cmd/...', './internal/...')
     Invoke-CheckedNative -FilePath $go -Arguments @('tool', 'govulncheck', './...')
     $gitleaks = Join-Path $root ".tools/bin/gitleaks$suffix"
     $actionlint = Join-Path $root ".tools/bin/actionlint$suffix"

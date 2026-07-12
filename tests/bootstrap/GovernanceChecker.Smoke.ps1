@@ -5,6 +5,15 @@ if (-not (Test-Path -LiteralPath $checker)) {
     throw 'scripts/check-governance.ps1 missing'
 }
 
+try {
+    $powerShellExecutable = (Get-Process -Id $PID -ErrorAction Stop).Path
+} catch {
+    throw "Unable to resolve the current PowerShell executable: $($_.Exception.Message)"
+}
+if ([string]::IsNullOrWhiteSpace($powerShellExecutable) -or -not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf)) {
+    throw "Current PowerShell executable is not a file: $powerShellExecutable"
+}
+
 $adrPaths = @(
     'docs/adr/ADR-0001-supported-platform.md',
     'docs/adr/ADR-0002-vpn-transports.md',
@@ -48,7 +57,7 @@ function Assert-CheckerFailure {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $checker -Root $FixtureRoot 2>&1)
+        $output = @(& $powerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $checker -Root $FixtureRoot 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
@@ -79,7 +88,7 @@ try {
     $matrix = (1..8 | ForEach-Object { "## ${sectionSign}30.$_ Evidence`n`n| Requirement | Owner phase | Evidence type |`n|---|---|---|`n| Fixture | P$_ | automated |" }) -join "`n`n"
     Set-FixtureFile -FixtureRoot $validRoot -RelativePath 'docs/ACCEPTANCE_MATRIX.md' -Content ($matrix + "`n")
 
-    $validOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $checker -Root $validRoot 2>&1)
+    $validOutput = @(& $powerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $checker -Root $validRoot 2>&1)
     if ($LASTEXITCODE -ne 0 -or ($validOutput -join "`n") -notmatch 'GOVERNANCE_CHECK_PASS') {
         throw "Valid fixture rejected: $($validOutput -join "`n")"
     }
@@ -122,7 +131,7 @@ try {
         "accepted ADR contains placeholder: $($adrPaths[4])"
     )
 
-    $repositoryOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $checker -Root $root 2>&1)
+    $repositoryOutput = @(& $powerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $checker -Root $root 2>&1)
     if ($LASTEXITCODE -ne 0 -or ($repositoryOutput -join "`n") -notmatch 'GOVERNANCE_CHECK_PASS') {
         throw "Real repository governance rejected: $($repositoryOutput -join "`n")"
     }

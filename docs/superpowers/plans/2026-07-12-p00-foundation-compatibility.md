@@ -148,7 +148,8 @@ Run:
 git --version
 if ($LASTEXITCODE -ne 0) { throw 'git --version failed' }
 $inside = git rev-parse --is-inside-work-tree 2>$null
-if ($LASTEXITCODE -eq 0 -and $inside -eq 'true') {
+$insideExitCode = $LASTEXITCODE
+if ($insideExitCode -eq 0 -and $inside -eq 'true') {
     throw 'Repository is already initialized'
 }
 if (Test-Path -LiteralPath .git) {
@@ -168,11 +169,17 @@ Run:
 ~~~powershell
 git init -b main
 if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
-if (-not (git config user.name)) {
+$userName = git config user.name
+$userNameExitCode = $LASTEXITCODE
+if ($userNameExitCode -ne 0 -and $userNameExitCode -ne 1) { throw 'git config user.name query failed' }
+if ($userNameExitCode -eq 1 -or [string]::IsNullOrWhiteSpace(($userName -join [Environment]::NewLine))) {
     git config user.name "Codex"
     if ($LASTEXITCODE -ne 0) { throw 'git config user.name failed' }
 }
-if (-not (git config user.email)) {
+$userEmail = git config user.email
+$userEmailExitCode = $LASTEXITCODE
+if ($userEmailExitCode -ne 0 -and $userEmailExitCode -ne 1) { throw 'git config user.email query failed' }
+if ($userEmailExitCode -eq 1 -or [string]::IsNullOrWhiteSpace(($userEmail -join [Environment]::NewLine))) {
     git config user.email "codex@local.invalid"
     if ($LASTEXITCODE -ne 0) { throw 'git config user.email failed' }
 }
@@ -1234,8 +1241,14 @@ Describe 'scripts/dev.ps1' {
             $text | Should -Match 'CGO_ENABLED=0'
         }
         if ($env:OS -eq 'Windows_NT') {
-            (& (Join-Path $script:Root 'build/cisco-discovery_windows_amd64.exe') version --json | ConvertFrom-Json).program | Should -Be 'cisco-discovery'
-            (& (Join-Path $script:Root 'build/hgctl_windows_amd64.exe') version --json | ConvertFrom-Json).program | Should -Be 'hgctl'
+            $ciscoOutput = & (Join-Path $script:Root 'build/cisco-discovery_windows_amd64.exe') version --json
+            $ciscoExitCode = $LASTEXITCODE
+            $ciscoExitCode | Should -Be 0
+            ($ciscoOutput | ConvertFrom-Json).program | Should -Be 'cisco-discovery'
+            $hgctlOutput = & (Join-Path $script:Root 'build/hgctl_windows_amd64.exe') version --json
+            $hgctlExitCode = $LASTEXITCODE
+            $hgctlExitCode | Should -Be 0
+            ($hgctlOutput | ConvertFrom-Json).program | Should -Be 'hgctl'
         }
     }
 }
@@ -1267,7 +1280,10 @@ The script accepts Command values bootstrap, format, format-check, test, lint, b
 Each build sets CGO_ENABLED=0 and uses -trimpath -buildvcs=false. Before each target it captures whether GOOS, GOARCH and CGO_ENABLED existed and their values; a try/finally restores the exact prior values or removes variables that were originally absent. The build command removes stale build output, compiles all four targets twice into separate temporary directories, writes sorted relative SHA256SUMS for each run, compares the complete hash lists, promotes one verified run to build and removes the temporary directories. A mismatch is fatal and retains both runs for diagnosis. scripts/dev.ps1 computes metadata exactly as follows:
 
 ~~~powershell
-$commit = (git rev-parse HEAD).Trim()
+$commitOutput = git rev-parse HEAD
+$commitExitCode = $LASTEXITCODE
+if ($commitExitCode -ne 0) { throw 'git rev-parse HEAD failed' }
+$commit = ($commitOutput -join [Environment]::NewLine).Trim()
 $epoch = 1782737960
 $buildDate = [DateTimeOffset]::FromUnixTimeSeconds($epoch).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ')
 $ldflags = @(
@@ -1711,6 +1727,7 @@ Run from PowerShell:
 
 ~~~powershell
 wsl.exe -- sh -lc 'cd /mnt/c/Users/vsevo/AI-core/home_gateway && sudo tests/network-ns/check-prereqs.sh'
+if ($LASTEXITCODE -eq 0) { throw 'Expected Windows WSL prerequisite failure' }
 ~~~
 
 Expected in the current environment: a clear missing Linux distro/tool or missing-command failure. Record this as an environment prerequisite, not a product failure.
@@ -1735,7 +1752,9 @@ if ($LASTEXITCODE -ne 0) { throw 'git add executable network smoke failed' }
 git add -- tests/network-ns/README.md tests/openwrt-qemu/README.md
 if ($LASTEXITCODE -ne 0) { throw 'git add network lab docs failed' }
 $entry = git ls-files --stage tests/network-ns/check-prereqs.sh
-if ($LASTEXITCODE -ne 0 -or $entry -notmatch '^100755 ') { throw 'network smoke Git mode is not 100755' }
+$entryExitCode = $LASTEXITCODE
+if ($entryExitCode -ne 0) { throw 'network smoke Git mode inspection failed' }
+if ($entry -notmatch '^100755 ') { throw 'network smoke Git mode is not 100755' }
 git commit -m "test: add network lab prerequisite smoke"
 if ($LASTEXITCODE -ne 0) { throw 'network smoke commit failed' }
 ~~~
@@ -1847,7 +1866,9 @@ if ($LASTEXITCODE -ne 0) { throw 'git add executable SDK fetch failed' }
 git add -- tests/openwrt-sdk/LockMetadata.Smoke.ps1
 if ($LASTEXITCODE -ne 0) { throw 'git add SDK metadata smoke failed' }
 $entry = git ls-files --stage scripts/openwrt/fetch-sdk.sh
-if ($LASTEXITCODE -ne 0 -or $entry -notmatch '^100755 ') { throw 'SDK fetch Git mode is not 100755' }
+$entryExitCode = $LASTEXITCODE
+if ($entryExitCode -ne 0) { throw 'SDK fetch Git mode inspection failed' }
+if ($entry -notmatch '^100755 ') { throw 'SDK fetch Git mode is not 100755' }
 git commit -m "build: add verified OpenWrt SDK fetch"
 if ($LASTEXITCODE -ne 0) { throw 'SDK fetch commit failed' }
 ~~~
@@ -2018,6 +2039,7 @@ Run:
 ~~~powershell
 .\scripts\dev.ps1 -Command pester
 wsl.exe -- sh -lc 'cd /mnt/c/Users/vsevo/AI-core/home_gateway && tests/openwrt-sdk/assert-awg2-helper.sh'
+if ($LASTEXITCODE -ne 0) { throw 'AWG helper assertion failed' }
 ~~~
 
 Expected: all package tests and executable helper fixtures pass. On a non-Linux workstation the executable assertion is deferred to the mandatory Linux CI/lab run; it is not waived.
@@ -2085,7 +2107,10 @@ if ($LASTEXITCODE -ne 0) { throw 'git add executable AWG build/tests failed' }
 git add -- packaging/openwrt-awg2/kmod-amneziawg/Makefile packaging/openwrt-awg2/amneziawg-tools/Makefile tests/openwrt-sdk/AWG2Package.Tests.ps1
 if ($LASTEXITCODE -ne 0) { throw 'git add AWG package sources failed' }
 $entries = @(git ls-files --stage packaging/openwrt-awg2/amneziawg-tools/files scripts/openwrt/build-packages.sh tests/openwrt-sdk/assert-awg2-helper.sh)
-if ($LASTEXITCODE -ne 0 -or @($entries | Where-Object { $_ -notmatch '^100755 ' }).Count -ne 0) { throw 'AWG helper/build Git mode is not 100755' }
+$entriesExitCode = $LASTEXITCODE
+if ($entriesExitCode -ne 0) { throw 'AWG helper/build Git mode inspection failed' }
+$nonExecutableEntries = @($entries | Where-Object { $_ -notmatch '^100755 ' })
+if ($nonExecutableEntries.Count -ne 0) { throw 'AWG helper/build Git mode is not 100755' }
 git commit -m "build: package official AmneziaWG 2 for OpenWrt"
 if ($LASTEXITCODE -ne 0) { throw 'AWG package commit failed' }
 ~~~
@@ -2179,7 +2204,9 @@ if ($LASTEXITCODE -ne 0) { throw 'git add executable AWG Go build failed' }
 git add -- tests/openwrt-sdk/AWGGo.Tests.ps1 docs/COMPATIBILITY.md
 if ($LASTEXITCODE -ne 0) { throw 'git add AWG Go evidence failed' }
 $entry = git ls-files --stage scripts/openwrt/build-amneziawg-go.sh
-if ($LASTEXITCODE -ne 0 -or $entry -notmatch '^100755 ') { throw 'AWG Go build Git mode is not 100755' }
+$entryExitCode = $LASTEXITCODE
+if ($entryExitCode -ne 0) { throw 'AWG Go build Git mode inspection failed' }
+if ($entry -notmatch '^100755 ') { throw 'AWG Go build Git mode is not 100755' }
 git commit -m "build: add measured AWG userspace contingency"
 if ($LASTEXITCODE -ne 0) { throw 'AWG Go contingency commit failed' }
 ~~~
@@ -2318,13 +2345,22 @@ Expected: ShellCheck 0.11.0 exits 0.
 Run:
 
 ~~~powershell
+$discoveredShellFiles = @(rg --files scripts/openwrt tests/network-ns tests/openwrt-sdk packaging/openwrt-awg2 -g '*.sh')
+$rgExitCode = $LASTEXITCODE
+if ($rgExitCode -eq 1) {
+    $discoveredShellFiles = @()
+} elseif ($rgExitCode -ne 0) {
+    throw "rg --files shell scan failed with exit code $rgExitCode"
+}
 $shellFiles = @(
-    @(rg --files scripts/openwrt tests/network-ns tests/openwrt-sdk packaging/openwrt-awg2 -g '*.sh')
+    $discoveredShellFiles
     'packaging/openwrt-awg2/amneziawg-tools/files/amneziawg_watchdog'
 )
 foreach ($file in $shellFiles) {
     $entry = git ls-files --stage -- $file
-    if ($LASTEXITCODE -ne 0 -or -not $entry) { throw "$file is not tracked" }
+    $entryExitCode = $LASTEXITCODE
+    if ($entryExitCode -ne 0) { throw "git ls-files failed for $file" }
+    if (-not $entry) { throw "$file is not tracked" }
     $mode = $entry.Split()[0]
     if ($mode -ne '100755') { throw "$file is not executable in Git" }
 }
@@ -2495,7 +2531,9 @@ if ($LASTEXITCODE -ne 0) { throw 'git add executable remote smoke failed' }
 git add -- scripts/openwrt/smoke-awg2.ps1 tests/windows-pester/AWGHardwareSmoke.Tests.ps1
 if ($LASTEXITCODE -ne 0) { throw 'git add hardware smoke sources failed' }
 $entry = git ls-files --stage scripts/openwrt/smoke-awg2-remote.sh
-if ($LASTEXITCODE -ne 0 -or $entry -notmatch '^100755 ') { throw 'remote smoke Git mode is not 100755' }
+$entryExitCode = $LASTEXITCODE
+if ($entryExitCode -ne 0) { throw 'remote smoke Git mode inspection failed' }
+if ($entry -notmatch '^100755 ') { throw 'remote smoke Git mode is not 100755' }
 git commit -m "test: add rollback-safe AWG hardware smoke"
 if ($LASTEXITCODE -ne 0) { throw 'hardware smoke commit failed' }
 ~~~
@@ -2528,7 +2566,9 @@ try {
         git diff --exit-code
         if ($LASTEXITCODE -ne 0) { throw 'verification worktree has a diff' }
         $porcelain = @(git status --porcelain=v1 --untracked-files=all)
-        if ($LASTEXITCODE -ne 0 -or $porcelain.Count -ne 0) { throw 'clean verification worktree became dirty' }
+        $statusExitCode = $LASTEXITCODE
+        if ($statusExitCode -ne 0) { throw 'verification worktree git status failed' }
+        if ($porcelain.Count -ne 0) { throw 'clean verification worktree became dirty' }
     } finally {
         Pop-Location
     }
@@ -2586,6 +2626,12 @@ Run:
 
 ~~~powershell
 $pythonFiles = @(rg --files -g '*.py')
+$rgExitCode = $LASTEXITCODE
+if ($rgExitCode -eq 1) {
+    $pythonFiles = @()
+} elseif ($rgExitCode -ne 0) {
+    throw "rg --files Python scan failed with exit code $rgExitCode"
+}
 if ($pythonFiles.Count -eq 0) {
     'RUFF_NOT_APPLICABLE_NO_PYTHON'
 } else {
@@ -2609,18 +2655,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-governan
 if ($LASTEXITCODE -ne 0) { throw 'governance failed after evidence update' }
 git diff --check
 if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed after evidence update' }
-$changed = @(git diff --name-only | Sort-Object)
+$changed = @(git diff --name-only)
+$changedExitCode = $LASTEXITCODE
+if ($changedExitCode -ne 0) { throw 'git diff --name-only failed' }
+$changed = @($changed | Sort-Object)
 if (($changed -join ',') -ne ($expected -join ',')) { throw "unexpected closure files: $($changed -join ', ')" }
 git add -- docs/COMPATIBILITY.md docs/ACCEPTANCE_MATRIX.md STATUS.md
 if ($LASTEXITCODE -ne 0) { throw 'git add closure files failed' }
-$staged = @(git diff --cached --name-only | Sort-Object)
+$staged = @(git diff --cached --name-only)
+$stagedExitCode = $LASTEXITCODE
+if ($stagedExitCode -ne 0) { throw 'git diff --cached --name-only failed' }
+$staged = @($staged | Sort-Object)
 if (($staged -join ',') -ne ($expected -join ',')) { throw "unexpected staged files: $($staged -join ', ')" }
 git diff --cached --check
 if ($LASTEXITCODE -ne 0) { throw 'staged closure diff check failed' }
 git commit -m "docs: close P0 foundation and compatibility"
 if ($LASTEXITCODE -ne 0) { throw 'P0 closure commit failed' }
-git status --short
-if ($LASTEXITCODE -ne 0 -or (git status --porcelain=v1)) { throw 'worktree is not clean after closure commit' }
+$status = @(git status --short)
+$statusExitCode = $LASTEXITCODE
+if ($statusExitCode -ne 0) { throw 'git status failed after closure commit' }
+if ($status.Count -ne 0) { throw 'worktree is not clean after closure commit' }
+$status
 git log --oneline --decorate --max-count=20
 if ($LASTEXITCODE -ne 0) { throw 'git log failed' }
 ~~~

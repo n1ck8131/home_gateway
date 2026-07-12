@@ -254,6 +254,36 @@ function Test-InstalledComponent {
     }
 }
 
+function Use-PinnedSystemGo {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][bool]$IsWindows
+    )
+    $systemGo = Get-Command -Name go -CommandType Application -ErrorAction SilentlyContinue
+    if (-not $systemGo) { return $false }
+    $version = @(& $systemGo.Source version 2>&1)
+    if ($LASTEXITCODE -ne 0 -or ($version -join ' ') -notmatch '\bgo1\.26\.5\b') {
+        return $false
+    }
+    $goRootOutput = @(& $systemGo.Source env GOROOT 2>&1)
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $goRoot = ($goRootOutput -join [Environment]::NewLine).Trim()
+    $suffix = if ($IsWindows) { '.exe' } else { '' }
+    $systemGofmt = Join-Path $goRoot "bin/gofmt$suffix"
+    if (-not (Test-Path -LiteralPath $systemGofmt)) { return $false }
+    $destination = Join-Path $Root '.tools/go/bin'
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    foreach ($tool in @(
+        [pscustomobject]@{ Name = "go$suffix"; Target = $systemGo.Source },
+        [pscustomobject]@{ Name = "gofmt$suffix"; Target = $systemGofmt }
+    )) {
+        $link = Join-Path $destination $tool.Name
+        Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType SymbolicLink -Path $link -Target $tool.Target | Out-Null
+    }
+    return $true
+}
+
 function Assert-BootstrapVersions {
     param(
         [Parameter(Mandatory)][object[]]$Selections,
@@ -306,6 +336,9 @@ function Invoke-Bootstrap {
     $downloadDirectory = Join-Path $Root '.cache/downloads'
     foreach ($selection in $selections) {
         if (Test-InstalledComponent -Component $selection.Component -Root $Root -IsWindows $isWindows) {
+            continue
+        }
+        if ($selection.Component -eq 'go' -and (Use-PinnedSystemGo -Root $Root -IsWindows $isWindows)) {
             continue
         }
         $artifactProperty = $lock.artifacts.PSObject.Properties[$selection.ArtifactKey]

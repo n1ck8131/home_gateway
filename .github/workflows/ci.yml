@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - shell: powershell
+        run: .\scripts\bootstrap-dev.ps1
+      - shell: powershell
+        run: .\scripts\dev.ps1 -Command verify
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          cache: true
+      - shell: pwsh
+        run: ./scripts/bootstrap-dev.ps1 -IncludePowerShell
+      - run: make PWSH=./.tools/pwsh/pwsh verify
+      - run: cc --version && ld --version
+      - run: go test -race ./...
+      - run: sudo apt-get update && sudo apt-get install --yes dnsmasq-base iproute2 jq nftables
+      - run: sudo tests/network-ns/check-prereqs.sh

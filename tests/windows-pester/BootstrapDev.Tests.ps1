@@ -52,6 +52,7 @@ Describe 'scripts/bootstrap-dev.ps1' {
     It 'performs zero downloads and replacements on a second valid invocation' {
         $script:Installed = $false
         Mock Test-InstalledComponent { return $script:Installed }
+        Mock Use-PinnedSystemGo { return $false }
         Mock Get-VerifiedArtifact { return 'fixture.archive' }
         Mock Install-ToolComponent { }
         Mock Assert-BootstrapVersions { $script:Installed = $true }
@@ -62,6 +63,19 @@ Describe 'scripts/bootstrap-dev.ps1' {
         $expected = if ($env:OS -eq 'Windows_NT') { 4 } else { 5 }
         Should -Invoke Get-VerifiedArtifact -Times $expected -Exactly
         Should -Invoke Install-ToolComponent -Times $expected -Exactly
+    }
+
+    It 'reuses an exact system Go toolchain without downloading its archive' {
+        Mock Test-InstalledComponent { return $false }
+        Mock Use-PinnedSystemGo { return $true }
+        Mock Get-VerifiedArtifact { return 'fixture.archive' }
+        Mock Install-ToolComponent { }
+        Mock Assert-BootstrapVersions { }
+
+        Invoke-Bootstrap -Root $script:FixtureRoot | Out-Null
+
+        Should -Invoke Use-PinnedSystemGo -Times 1 -Exactly
+        Should -Invoke Get-VerifiedArtifact -ParameterFilter { $Name -like 'go*' } -Times 0 -Exactly
     }
 
     It 'selects mutually exclusive Windows and Linux artifacts' {

@@ -1,0 +1,45 @@
+name: openwrt-sdk
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          cache: true
+      - shell: pwsh
+        run: ./scripts/bootstrap-dev.ps1 -IncludePowerShell
+      - run: sudo apt-get update && sudo apt-get install --yes curl jq make tar xz-utils zstd
+      - name: Build and compare clean outputs
+        shell: sh
+        run: |
+          tests/openwrt-sdk/assert-awg2-helper.sh
+          OUTPUT_DIR="$PWD/artifacts/openwrt-run1" scripts/openwrt/build-packages.sh
+          rm -rf .cache/openwrt-sdk
+          OUTPUT_DIR="$PWD/artifacts/openwrt-run2" scripts/openwrt/build-packages.sh
+          diff -ru --no-dereference artifacts/openwrt-run1 artifacts/openwrt-run2
+          OUTPUT_DIR="$PWD/artifacts/awg-go-run1" scripts/openwrt/build-amneziawg-go.sh
+          OUTPUT_DIR="$PWD/artifacts/awg-go-run2" scripts/openwrt/build-amneziawg-go.sh
+          diff -ru --no-dereference artifacts/awg-go-run1 artifacts/awg-go-run2
+          .tools/bin/shellcheck scripts/openwrt/*.sh tests/network-ns/*.sh tests/openwrt-sdk/*.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: verified-openwrt-outputs
+          path: |
+            artifacts/openwrt-run2
+            artifacts/awg-go-run2
+          if-no-files-found: error
+          retention-days: 7

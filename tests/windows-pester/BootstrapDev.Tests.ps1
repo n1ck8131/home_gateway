@@ -23,8 +23,8 @@ Describe 'scripts/bootstrap-dev.ps1' {
 
     It 'fails closed for a corrupt cached artifact' {
         $lock = Get-Content -LiteralPath (Join-Path $script:FixtureRoot 'manifest/versions.lock.yaml') -Raw | ConvertFrom-Json
-        $isWindows = Test-WindowsPlatform
-        $platform = if ($isWindows) { 'windows_amd64' } else { 'linux_amd64' }
+        $windowsPlatform = Test-WindowsPlatform
+        $platform = if ($windowsPlatform) { 'windows_amd64' } else { 'linux_amd64' }
         $artifact = $lock.artifacts.PSObject.Properties["go_$platform"].Value
         $filename = Get-ArtifactFilename -Artifact $artifact
         $downloads = Join-Path $script:FixtureRoot '.cache/downloads'
@@ -100,6 +100,24 @@ Describe 'scripts/bootstrap-dev.ps1' {
         Get-ToolVersionArguments -Component shellcheck | Should -Be '--version'
         Get-ToolVersionArguments -Component actionlint | Should -Be '-version'
         Get-ToolVersionArguments -Component gitleaks | Should -Be 'version'
+    }
+
+    It 'does not bind the read-only IsWindows automatic variable' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:Bootstrap,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $conflicts = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.VariablePath.UserPath -ieq 'IsWindows'
+        }, $true))
+
+        $parseErrors | Should -BeNullOrEmpty
+        $conflicts | Should -BeNullOrEmpty
     }
 
     It 'selects mutually exclusive Windows and Linux artifacts' {

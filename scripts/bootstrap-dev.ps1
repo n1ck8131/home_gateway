@@ -162,7 +162,7 @@ function Install-ToolComponent {
         [Parameter(Mandatory)][string]$Component,
         [Parameter(Mandatory)][string]$Archive,
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][bool]$IsWindows
+        [Parameter(Mandatory)][bool]$WindowsPlatform
     )
     $tools = Join-Path $Root '.tools'
     $staging = Join-Path $tools (".staging-$Component-$([guid]::NewGuid().ToString('N'))")
@@ -189,7 +189,7 @@ function Install-ToolComponent {
                 Move-InstalledDirectory -Source $payload -Destination (Join-Path $tools 'pwsh')
             }
             default {
-                $suffix = if ($IsWindows) { '.exe' } else { '' }
+                $suffix = if ($WindowsPlatform) { '.exe' } else { '' }
                 $expectedName = "$Component$suffix"
                 $binary = Get-ChildItem -LiteralPath $payload -Recurse -File | Where-Object {
                     $_.Name -eq $expectedName
@@ -200,7 +200,7 @@ function Install-ToolComponent {
                 $binDirectory = Join-Path $tools 'bin'
                 New-Item -ItemType Directory -Force -Path $binDirectory | Out-Null
                 Copy-Item -LiteralPath $binary.FullName -Destination (Join-Path $binDirectory $expectedName) -Force
-                if (-not $IsWindows) {
+                if (-not $WindowsPlatform) {
                     & chmod +x (Join-Path $binDirectory $expectedName)
                     if ($LASTEXITCODE -ne 0) {
                         throw "chmod failed for $expectedName"
@@ -230,9 +230,9 @@ function Test-InstalledComponent {
     param(
         [Parameter(Mandatory)][string]$Component,
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][bool]$IsWindows
+        [Parameter(Mandatory)][bool]$WindowsPlatform
     )
-    $suffix = if ($IsWindows) { '.exe' } else { '' }
+    $suffix = if ($WindowsPlatform) { '.exe' } else { '' }
     try {
         switch ($Component) {
             'go' {
@@ -277,15 +277,15 @@ function Assert-BootstrapVersions {
     param(
         [Parameter(Mandatory)][object[]]$Selections,
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][bool]$IsWindows
+        [Parameter(Mandatory)][bool]$WindowsPlatform
     )
     foreach ($selection in $Selections) {
-        if (-not (Test-InstalledComponent -Component $selection.Component -Root $Root -IsWindows $IsWindows)) {
+        if (-not (Test-InstalledComponent -Component $selection.Component -Root $Root -WindowsPlatform $WindowsPlatform)) {
             throw "Installed version check failed for $($selection.Component)"
         }
     }
     $env:GOTOOLCHAIN = 'local'
-    $goSuffix = if ($IsWindows) { '.exe' } else { '' }
+    $goSuffix = if ($WindowsPlatform) { '.exe' } else { '' }
     $go = Join-Path $Root ".tools/go/bin/go$goSuffix"
     $goOutput = @(& $go version 2>&1)
     if ($LASTEXITCODE -ne 0 -or ($goOutput -join ' ') -notmatch '\bgo1\.26\.5\b') {
@@ -310,8 +310,8 @@ function Invoke-Bootstrap {
         throw 'versions lock missing'
     }
     $lock = (Get-Content -LiteralPath $lockPath -Raw) | ConvertFrom-Json
-    $isWindows = Test-WindowsPlatform
-    $platform = if ($isWindows) { 'windows_amd64' } else { 'linux_amd64' }
+    $windowsPlatform = Test-WindowsPlatform
+    $platform = if ($windowsPlatform) { 'windows_amd64' } else { 'linux_amd64' }
     $selections = @(Get-PlatformArtifactNames -Platform $platform -IncludePowerShell:$IncludePowerShell)
     if ($WhatIf) {
         foreach ($selection in $selections) {
@@ -319,12 +319,12 @@ function Invoke-Bootstrap {
         }
         return
     }
-    if ($isWindows) {
+    if ($windowsPlatform) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
     $downloadDirectory = Join-Path $Root '.cache/downloads'
     foreach ($selection in $selections) {
-        if (Test-InstalledComponent -Component $selection.Component -Root $Root -IsWindows $isWindows) {
+        if (Test-InstalledComponent -Component $selection.Component -Root $Root -WindowsPlatform $windowsPlatform) {
             continue
         }
         $artifactProperty = $lock.artifacts.PSObject.Properties[$selection.ArtifactKey]
@@ -334,9 +334,9 @@ function Invoke-Bootstrap {
         $artifact = $artifactProperty.Value
         $filename = Get-ArtifactFilename -Artifact $artifact
         $archive = Get-VerifiedArtifact -Name $filename -Artifact $artifact -DownloadDirectory $downloadDirectory
-        Install-ToolComponent -Component $selection.Component -Archive $archive -Root $Root -IsWindows $isWindows
+        Install-ToolComponent -Component $selection.Component -Archive $archive -Root $Root -WindowsPlatform $windowsPlatform
     }
-    Assert-BootstrapVersions -Selections $selections -Root $Root -IsWindows $isWindows
+    Assert-BootstrapVersions -Selections $selections -Root $Root -WindowsPlatform $windowsPlatform
     'BOOTSTRAP_DEV_PASS'
 }
 

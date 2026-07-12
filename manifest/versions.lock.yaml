@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "locked_at": "2026-07-12",
+  "go_modules": {
+    "govulncheck": "golang.org/x/vuln/cmd/govulncheck@v1.1.4",
+    "staticcheck": "honnef.co/go/tools/cmd/staticcheck@2026.1",
+    "gosec": "github.com/securego/gosec/v2/cmd/gosec@v2.27.1"
+  },
+  "actions": {
+    "checkout": "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+    "setup_go": "actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16",
+    "upload_artifact": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+  },
+  "openwrt": {
+    "version": "25.12.5",
+    "revision": "r33051-f5dae5ece4",
+    "target": "mediatek/filogic",
+    "profile": "glinet_gl-mt6000",
+    "package_arch": "aarch64_cortex-a53",
+    "kernel_version": "6.12.94",
+    "kernel_vermagic": "5a6c1f71be683ae9980b15d3ce73e24d",
+    "source_date_epoch": 1782737960
+  },
+  "amneziawg": {
+    "kernel_commit": "2a6e1a02ac024f54a23e18f894a279b7f870b8fb",
+    "tools_commit": "61e741780e8465a67a7d7fb6cffe14a8a15d624a",
+    "go_commit": "1cc94272ca8e9e223a5fe76382f5880f09d3c12d",
+    "openwrt_adapter_commit": "56bf9fed93df48d2b747edd6e7a7c5fbe2b01afe"
+  },
+  "artifacts": {
+    "go_windows_amd64": {
+      "url": "https://go.dev/dl/go1.26.5.windows-amd64.zip",
+      "sha256": "97e6b2a833b6d89f9ff17d25419ac0a7e3b482a044e9ab18cdef834bd834fd38"
+    },
+    "go_linux_amd64": {
+      "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
+      "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
+    },
+    "powershell_windows_amd64": {
+      "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.2/PowerShell-7.6.2-win-x64.zip",
+      "sha256": "32e0dd26752483ba3f0e40e9ae44150643cbff469c13210c93295d158bfd7b26"
+    },
+    "powershell_linux_amd64": {
+      "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.2/powershell-7.6.2-linux-x64.tar.gz",
+      "sha256": "6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292"
+    },
+    "pester": {
+      "filename": "Pester.6.0.0.nupkg",
+      "url": "https://www.powershellgallery.com/api/v2/package/Pester/6.0.0",
+      "sha256": "238d9aa37a55d7b4afcb66245f36fc7410774c067fec40084e00eea474de9862"
+    },
+    "gitleaks_windows_amd64": {
+      "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip",
+      "sha256": "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e"
+    },
+    "gitleaks_linux_amd64": {
+      "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz",
+      "sha256": "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    },
+    "shellcheck_linux_amd64": {
+      "url": "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz",
+      "sha256": "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+    },
+    "actionlint_windows_amd64": {
+      "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_windows_amd64.zip",
+      "sha256": "6e7241b51e6817ea6a047693d8e6fed13b31819c9a0dd6c5a726e1592d22f6e9"
+    },
+    "actionlint_linux_amd64": {
+      "url": "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz",
+      "sha256": "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+    },
+    "openwrt_sdk": {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/targets/mediatek/filogic/openwrt-sdk-25.12.5-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst",
+      "sha256": "ff4a38a397caa2cfe1c39e18f84ddede14878221b3593c3f2c4cfe24e3ec4c25"
+    },
+    "openwrt_factory": {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/targets/mediatek/filogic/openwrt-25.12.5-mediatek-filogic-glinet_gl-mt6000-squashfs-factory.bin",
+      "sha256": "d0c997128c3c775be10311f80b4c20c9f85bbc8c2ebb2601f5957b7290b71412"
+    },
+    "openwrt_sysupgrade": {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/targets/mediatek/filogic/openwrt-25.12.5-mediatek-filogic-glinet_gl-mt6000-squashfs-sysupgrade.bin",
+      "sha256": "4b506982cc4ae2e1ebdee85be637fdfd59ed7df83e9995e03ffd641c58954390"
+    },
+    "awg_kernel_source": {
+      "url": "https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/archive/refs/tags/v1.0.20260611.tar.gz",
+      "sha256": "e062ecc9f1d89eeafa9f56a29473372a1d796ee061eaa8c7b61eeb51c38b80d6"
+    },
+    "awg_tools_source": {
+      "url": "https://github.com/amnezia-vpn/amneziawg-tools/archive/refs/tags/v1.0.20260618-2.tar.gz",
+      "sha256": "cbda09c90d0740b6c3d39622da9f96cfdc2b83459d45973aadd7bf77518fdf10"
+    },
+    "awg_go_source": {
+      "url": "https://github.com/amnezia-vpn/amneziawg-go/archive/refs/tags/v0.2.19.tar.gz",
+      "sha256": "d2fde8df81199e2350b43f387fe79b3056a2278457504fa1f91cd170cb0f474b"
+    },
+    "awg_openwrt_adapter_source": {
+      "url": "https://github.com/amnezia-vpn/amneziawg-openwrt/archive/56bf9fed93df48d2b747edd6e7a7c5fbe2b01afe.tar.gz",
+      "sha256": "ad1f1c68efb4d4feb08e4a3df45dba2a22b0f33da2708826b02446362f39bff8"
+    }
+  }
+}

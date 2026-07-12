@@ -6,8 +6,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
-$suffix = if ($isWindows) { '.exe' } else { '' }
+$windowsPlatform = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+$suffix = if ($windowsPlatform) { '.exe' } else { '' }
 
 function Invoke-CheckedNative {
     param(
@@ -25,7 +25,7 @@ function Invoke-CheckedNative {
         $leaf
     }
     if ($failureName -and $failureName -eq $invocationName) {
-        if ($isWindows) {
+        if ($windowsPlatform) {
             & $env:ComSpec /d /c 'exit 17'
         } else {
             & /bin/sh -c 'exit 17'
@@ -108,7 +108,7 @@ function Invoke-Lint {
     $actionlint = Join-Path $root ".tools/bin/actionlint$suffix"
     Invoke-CheckedNative -FilePath $gitleaks -Arguments @('dir', '--no-banner', '--redact', $root)
     Invoke-CheckedNative -FilePath $actionlint
-    if (-not $isWindows) {
+    if (-not $windowsPlatform) {
         $shellcheck = Join-Path $root '.tools/bin/shellcheck'
         $shellFiles = @(Get-ChildItem -LiteralPath $root -Recurse -Filter '*.sh' -File | Select-Object -ExpandProperty FullName)
         if ($shellFiles.Count -ne 0) {

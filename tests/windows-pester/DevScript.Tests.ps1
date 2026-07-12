@@ -8,6 +8,24 @@ Describe 'scripts/dev.ps1' {
         $script:Dev | Should -Exist
     }
 
+    It 'does not bind the read-only IsWindows automatic variable' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:Dev,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $conflicts = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.VariablePath.UserPath -ieq 'IsWindows'
+        }, $true))
+
+        $parseErrors | Should -BeNullOrEmpty
+        $conflicts | Should -BeNullOrEmpty
+    }
+
     It 'rejects an unknown command' {
         { & $script:Dev -Command invalid } | Should -Throw
     }

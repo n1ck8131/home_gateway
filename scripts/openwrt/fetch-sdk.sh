@@ -10,10 +10,10 @@ mkdir -p "$root/.cache/downloads" "$root/.cache/openwrt-sdk"
 archive="$root/.cache/downloads/$(basename "$url")"
 if [ ! -f "$archive" ]; then
     curl --fail --location --proto '=https' --tlsv1.2 "$url" --output "$archive.partial"
-    echo "$expected  $archive.partial" | sha256sum --check -
+    echo "$expected  $archive.partial" | sha256sum --check - 1>&2
     mv "$archive.partial" "$archive"
 fi
-echo "$expected  $archive" | sha256sum --check -
+echo "$expected  $archive" | sha256sum --check - 1>&2
 content="$root/.cache/openwrt-sdk/$expected"
 marker="$content/.complete"
 valid_cache=false

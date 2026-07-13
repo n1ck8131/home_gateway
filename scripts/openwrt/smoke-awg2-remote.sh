@@ -104,14 +104,17 @@ assert_state() {
 	actual_tools=$(package_present amneziawg-tools) || return 1
 	actual_module=$(module_present) || return 1
 	actual_interface=$(interface_present) || return 1
-	for state_name in kmod tools module interface; do
-		eval "actual=\$actual_$state_name"
-		eval "expected=\$pre_$state_name"
-		if [ "$actual" != "$expected" ]; then
-			echo "cleanup state mismatch for $state_name: expected $expected, got $actual" >&2
-			return 1
-		fi
-	done
+	assert_state_value kmod "$actual_kmod" "$pre_kmod" || return 1
+	assert_state_value tools "$actual_tools" "$pre_tools" || return 1
+	assert_state_value module "$actual_module" "$pre_module" || return 1
+	assert_state_value interface "$actual_interface" "$pre_interface" || return 1
+}
+
+assert_state_value() {
+	if [ "$2" != "$3" ]; then
+		echo "cleanup state mismatch for $1: expected $3, got $2" >&2
+		return 1
+	fi
 }
 
 cleanup_owned() {
@@ -162,6 +165,7 @@ case "$mode" in
 		case "$tools" in *[!A-Za-z0-9._+-]*) exit 2 ;; esac
 		test "$kernel_abi" = 'kernel-6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1'
 		read_owner
+		smoke_status=0
 		trap 'smoke_status=$?; trap - EXIT INT TERM; cleanup_owned || smoke_status=1; exit "$smoke_status"' EXIT
 		trap 'exit 130' INT TERM
 		cd "$work"

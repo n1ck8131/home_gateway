@@ -351,6 +351,7 @@ func TestPlanMatchesGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(got, want) {
 		t.Fatalf("golden mismatch\ngot:\n%s\nwant:\n%s", got, want)
 	}

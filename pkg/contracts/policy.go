@@ -190,6 +190,9 @@ func (entry RouteEntry) Validate() error {
 	if !validOrigin(entry.Origin) {
 		return fmt.Errorf("entry %q has invalid origin %q", entry.ID, entry.Origin)
 	}
+	if entry.Origin != OriginManual && entry.Sequence != 0 {
+		return fmt.Errorf("entry %q sequence is only valid for manual origin", entry.ID)
+	}
 	if err := entry.Scope.Validate(); err != nil {
 		return fmt.Errorf("entry %q: %w", entry.ID, err)
 	}

@@ -188,12 +188,12 @@ func TestExplainSharedIPConflictPrefersDirect(t *testing.T) {
 		EvaluationTime: time.Unix(100, 0).UTC(),
 		Devices:        []contracts.Device{{ID: "home", Mode: contracts.DeviceModeAuto}},
 		Entries: []contracts.RouteEntry{
-			ipEntry("direct", "203.0.113.10", contracts.RouteClassDirect, contracts.OriginManual),
-			ipEntry("vpn", "203.0.113.10", contracts.RouteClassVPN, contracts.OriginManual),
+			ipEntry("direct", "8.8.8.8", contracts.RouteClassDirect, contracts.OriginManual),
+			ipEntry("vpn", "8.8.8.8", contracts.RouteClassVPN, contracts.OriginManual),
 		},
 	}
 
-	got, err := Explain(state, contracts.RouteQuery{Target: "203.0.113.10", DeviceID: "home"})
+	got, err := Explain(state, contracts.RouteQuery{Target: "8.8.8.8", DeviceID: "home"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,6 +254,20 @@ func TestExplainLocalTargetCannotRouteVPN(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Route != contracts.RouteClassLocal || got.WinnerEntryID != "local/reserved" {
+		t.Fatalf("decision = %#v", got)
+	}
+}
+
+func TestExplainReservedTargetCannotRouteVPN(t *testing.T) {
+	state := contracts.DesiredState{
+		EvaluationTime: time.Unix(100, 0).UTC(),
+		Entries:        []contracts.RouteEntry{ipEntry("vpn", "100.64.0.1", contracts.RouteClassVPN, contracts.OriginManual)},
+	}
+	got, err := Explain(state, contracts.RouteQuery{Target: "100.64.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Route != contracts.RouteClassLocal || got.Resolution != "local-reserved" {
 		t.Fatalf("decision = %#v", got)
 	}
 }
@@ -343,6 +357,9 @@ func TestPlanMatchesGolden(t *testing.T) {
 }
 
 func domainEntry(id, pattern string, match contracts.DomainMatch, route contracts.RouteClass, origin contracts.OriginTier, sequence uint64) contracts.RouteEntry {
+	if origin != contracts.OriginManual {
+		sequence = 0
+	}
 	return contracts.RouteEntry{ID: id, Pattern: pattern, Kind: contracts.EntryKindDomain, Match: match, Route: route, Origin: origin, Sequence: sequence, Scope: contracts.Scope{Type: contracts.ScopeGlobal}}
 }
 

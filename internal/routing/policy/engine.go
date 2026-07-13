@@ -157,11 +157,24 @@ func normalizeTarget(raw string) (string, netip.Addr, bool, error) {
 
 func isLocalTarget(target string, address netip.Addr, isAddress bool) bool {
 	if isAddress {
-		return address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() ||
+		return address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || isReservedAddress(address) ||
 			address.IsLinkLocalMulticast() || address.IsMulticast() || address.IsUnspecified()
 	}
 	return target == "home.arpa" || strings.HasSuffix(target, ".home.arpa") ||
 		target == "local" || strings.HasSuffix(target, ".local")
+}
+
+func isReservedAddress(address netip.Addr) bool {
+	for _, raw := range []string{
+		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
+		"2001:db8::/32",
+	} {
+		if netip.MustParsePrefix(raw).Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func collectCandidates(entries []contracts.RouteEntry, target string, address netip.Addr, isAddress bool, device contracts.Device) []candidate {

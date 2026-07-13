@@ -78,6 +78,13 @@ func TestRouteEntryRejectsUnknownEnum(t *testing.T) {
 	}
 }
 
+func TestRouteEntryRejectsSequenceForNonManualOrigin(t *testing.T) {
+	entry := RouteEntry{ID: "external", Pattern: "example.com", Kind: EntryKindDomain, Match: DomainMatchExact, Route: RouteClassVPN, Origin: OriginExternalVPN, Sequence: 1, Scope: Scope{Type: ScopeGlobal}}
+	if err := entry.Validate(); err == nil {
+		t.Fatal("Validate() error = nil")
+	}
+}
+
 func TestDesiredStateRejectsAutoCiscoForUnprotectedDevice(t *testing.T) {
 	state := DesiredState{
 		EvaluationTime: time.Unix(1, 0).UTC(),

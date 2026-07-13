@@ -83,10 +83,15 @@ require_single_dependency() {
 			error("malformed package dependencies: expected a dependency array")
 		elif (all($depends[]; schema_dependency) | not) then
 			error("malformed package dependencies: expected schema_dependency objects")
-		elif ([$depends[] | select(.name == $expected)] | length) != 1 then
-			error("expected exactly one dependency named \($expected)")
 		else
-			true
+			[$depends[] | select(.name == $expected)] as $matches |
+			if ($matches | length) != 1 then
+				error("expected exactly one dependency named \($expected)")
+			elif ($matches[0] | (has("version") or has("match"))) then
+				error("dependency named \($expected) must be unversioned and have no match field")
+			else
+				true
+			end
 		end
 	' >/dev/null
 }
@@ -131,13 +136,15 @@ kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec '
 	if length != 1 then
 		error("expected exactly one kernel dependency object")
 	else
-		.[0].version as $version |
-		if ($version | type) != "string" then
+		.[0] as $kernel_dependency |
+		if ($kernel_dependency | has("match")) then
+			error("kernel dependency must use equality without a match field")
+		elif ($kernel_dependency.version | type) != "string" then
 			error("kernel dependency is missing a string version")
-		elif ($version | test("^[0-9]+\\.[0-9]+\\.[0-9]+~[0-9a-f]{32}-r1$") | not) then
+		elif ($kernel_dependency.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+~[0-9a-f]{32}-r1$") | not) then
 			error("kernel dependency version has an unexpected format")
 		else
-			$version | capture("^(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
+			$kernel_dependency.version | capture("^(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
 		end
 	end
 ')"

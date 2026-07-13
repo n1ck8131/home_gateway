@@ -170,10 +170,19 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:Build | Should -Match 'malformed kmod dependencies: expected schema_dependency objects'
         $script:Build | Should -Match 'select\(\.name == \$expected\)'
         $script:Build | Should -Match 'select\(\.name == "kernel"\)'
-        $script:Build | Should -Match '\.\[0\]\.version as \$version'
         $script:Build | Should -Match 'has\("match"\) and \(\.match \| type\) != "number"'
         $script:Build | Should -Not -Match 'select\(startswith\("kernel="\)\)'
         $script:Build | Should -Not -Match 'all\(\$depends\[\]; type == "string"\)'
+    }
+
+    It 'rejects non-equality kernel and versioned tools dependencies' {
+        $script:Build | Should -Match '\$matches\[0\] \| \(has\("version"\) or has\("match"\)\)'
+        $script:Build | Should -Match 'dependency named \\\(\$expected\) must be unversioned and have no match field'
+        $script:Build | Should -Match '\.\[0\] as \$kernel_dependency'
+        $script:Build | Should -Match '\$kernel_dependency \| has\("match"\)'
+        $script:Build | Should -Match 'kernel dependency must use equality without a match field'
+        $script:Build | Should -Match '\$kernel_dependency\.version \| type'
+        $script:Build | Should -Match '\$kernel_dependency\.version \| test\("\^\[0-9\]\+'
     }
 
     It 'returns exactly one SDK path and sends checksum diagnostics to stderr' {

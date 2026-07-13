@@ -80,7 +80,7 @@ func dnsmasqDomains(binding nft.DomainBinding) ([]string, error) {
 		case contracts.DomainMatchSuffix:
 			domains = append(domains, domain)
 		case contracts.DomainMatchWildcard:
-			domains = append(domains, "*."+domain)
+			return nil, fmt.Errorf("wildcard domain %q cannot be represented by dnsmasq nftset without matching the apex", pattern)
 		default:
 			return nil, fmt.Errorf("unsupported domain match %q", binding.Match)
 		}

@@ -8,11 +8,10 @@ import (
 	"github.com/vsevo/home-gateway/pkg/contracts"
 )
 
-func TestRenderChunkingMatchSemanticsAndTimeoutAlignment(t *testing.T) {
+func TestRenderChunkingSuffixSemanticsAndTimeoutAlignment(t *testing.T) {
 	plan := contracts.PolicyPlan{Entries: []contracts.RouteEntry{
 		domainEntry("a", "a.example", contracts.DomainMatchSuffix, contracts.RouteClassVPN, contracts.OriginExternalVPN),
 		domainEntry("b", "b.example", contracts.DomainMatchSuffix, contracts.RouteClassVPN, contracts.OriginExternalVPN),
-		domainEntry("c", "wild.example", contracts.DomainMatchWildcard, contracts.RouteClassDirect, contracts.OriginManual),
 	}}
 	got, err := Render(plan, Options{ChunkSize: 1, SetTimeoutSeconds: nft.SetTimeout, CacheTTLSeconds: nft.SetTimeout})
 	if err != nil {
@@ -22,7 +21,6 @@ func TestRenderChunkingMatchSemanticsAndTimeoutAlignment(t *testing.T) {
 	for _, want := range []string{
 		"nftset=/a.example/",
 		"nftset=/b.example/",
-		"nftset=/*.wild.example/",
 		"4#inet#routerd#rd4_",
 		"6#inet#routerd#rd6_",
 	} {
@@ -30,7 +28,7 @@ func TestRenderChunkingMatchSemanticsAndTimeoutAlignment(t *testing.T) {
 			t.Fatalf("missing %q in config:\n%s", want, text)
 		}
 	}
-	if strings.Count(text, "nftset=") != 3 {
+	if strings.Count(text, "nftset=") != 2 {
 		t.Fatalf("unexpected chunk count:\n%s", text)
 	}
 	if _, err := Render(plan, Options{SetTimeoutSeconds: nft.SetTimeout - 1}); err == nil {
@@ -41,13 +39,17 @@ func TestRenderChunkingMatchSemanticsAndTimeoutAlignment(t *testing.T) {
 	}
 }
 
-func TestRenderRejectsExactDomainInsteadOfWideningIt(t *testing.T) {
-	plan := contracts.PolicyPlan{Entries: []contracts.RouteEntry{
-		domainEntry("exact", "login.example", contracts.DomainMatchExact, contracts.RouteClassVPN, contracts.OriginManual),
-	}}
-	_, err := Render(plan, Options{})
-	if err == nil || !strings.Contains(err.Error(), "cannot be represented") {
-		t.Fatalf("Render() error = %v, want exact-domain capability error", err)
+func TestRenderRejectsUnsupportedDomainMatchWithoutWideningIt(t *testing.T) {
+	for _, match := range []contracts.DomainMatch{contracts.DomainMatchExact, contracts.DomainMatchWildcard} {
+		t.Run(string(match), func(t *testing.T) {
+			plan := contracts.PolicyPlan{Entries: []contracts.RouteEntry{
+				domainEntry(string(match), "login.example", match, contracts.RouteClassVPN, contracts.OriginManual),
+			}}
+			_, err := Render(plan, Options{})
+			if err == nil || !strings.Contains(err.Error(), "cannot be represented") {
+				t.Fatalf("Render() error = %v, want domain capability error", err)
+			}
+		})
 	}
 }
 

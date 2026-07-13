@@ -36,7 +36,7 @@ func NormalizeDomain(raw string, match contracts.DomainMatch) (string, error) {
 	}
 	if match == contracts.DomainMatchWildcard {
 		if !strings.HasPrefix(value, "*.") {
-			return "", errors.New("wildcard domain must start with *.")
+			return "", errors.New("wildcard domain must start with a star label")
 		}
 		value = strings.TrimPrefix(value, "*.")
 	} else if strings.HasPrefix(value, "*.") {
@@ -46,7 +46,7 @@ func NormalizeDomain(raw string, match contracts.DomainMatch) (string, error) {
 		value = strings.TrimPrefix(value, ".")
 	}
 	if strings.Contains(value, "*") {
-		return "", errors.New("wildcard is only allowed as the leading *.")
+		return "", errors.New("wildcard is only allowed as the leading star label")
 	}
 
 	host, err := extractHost(value)
@@ -68,7 +68,7 @@ func NormalizeDomain(raw string, match contracts.DomainMatch) (string, error) {
 	if len(canonical) > 253 {
 		return "", errors.New("domain exceeds 253 bytes")
 	}
-	if strings.Contains(canonical, "..") || strings.HasPrefix(canonical, ".") {
+	if strings.Contains(canonical, "..") || strings.HasPrefix(canonical, ".") || strings.HasSuffix(canonical, ".") {
 		return "", errors.New("domain contains an empty label")
 	}
 	suffix, _ := publicsuffix.PublicSuffix(canonical)

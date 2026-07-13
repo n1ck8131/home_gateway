@@ -20,6 +20,7 @@ func TestNormalizeDomain(t *testing.T) {
 		{name: "suffix", raw: ".Login.Example.COM.", match: contracts.DomainMatchSuffix, want: "login.example.com"},
 		{name: "wildcard", raw: "*.Example.COM", match: contracts.DomainMatchWildcard, want: "example.com"},
 		{name: "bare suffix", raw: "co.uk", match: contracts.DomainMatchSuffix, wantErr: true},
+		{name: "multiple root dots", raw: "example.com..", match: contracts.DomainMatchSuffix, wantErr: true},
 		{name: "invalid wildcard", raw: "foo.*.example.com", match: contracts.DomainMatchWildcard, wantErr: true},
 	}
 

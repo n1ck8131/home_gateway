@@ -18,7 +18,7 @@ P0 is complete for its software scope. The hardware gates remain open and no P0 
 | Gate | State | Evidence |
 |---|---|---|
 | Policy contracts, normalization, precedence, explanation, and stable plans | automated-passed | [CI run 29280880251](https://github.com/n1ck8131/home_gateway/actions/runs/29280880251): Windows and Linux verification, `go test -race`, the `CAP_NET_ADMIN` prerequisite, and rollback smoke passed for commit `4bba257cff13203191c73843229d5e79db905d52` |
-| OpenWrt compatibility regression | automated-passed | [SDK run 29280263011](https://github.com/n1ck8131/home_gateway/actions/runs/29280263011): byte-identical clean outputs passed for the complete P1 product code at commit `92784c32c34eeea24d642f2814d4fffeaee702e6`; the follow-up commit changes only golden-test line ending normalization |
+| OpenWrt compatibility regression | automated-passed | [SDK run 29280879151](https://github.com/n1ck8131/home_gateway/actions/runs/29280879151): byte-identical clean outputs passed for commit `4bba257cff13203191c73843229d5e79db905d52` |
 
 P1 is complete for its pure software scope. DNS rendering/application, packet-policy enforcement, and hardware behavior remain owned by later phases.
 

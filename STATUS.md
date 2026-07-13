@@ -17,7 +17,7 @@ Release level: P1-software-verified
 
 - State: complete
 - Evidence: [CI run 29280880251](https://github.com/n1ck8131/home_gateway/actions/runs/29280880251) passed Windows and Linux verification, `go test -race`, the `CAP_NET_ADMIN` network prerequisite, and rollback smoke for commit `4bba257cff13203191c73843229d5e79db905d52`.
-- Compatibility regression: [OpenWrt SDK run 29280263011](https://github.com/n1ck8131/home_gateway/actions/runs/29280263011) reproduced byte-identical outputs for the complete P1 product code at commit `92784c32c34eeea24d642f2814d4fffeaee702e6`; the subsequent commit changes only cross-platform golden-test line ending handling.
+- Compatibility regression: [OpenWrt SDK run 29280879151](https://github.com/n1ck8131/home_gateway/actions/runs/29280879151) reproduced byte-identical outputs for commit `4bba257cff13203191c73843229d5e79db905d52`.
 - Local evidence: the complete `verify` batch passed, and both domain and CIDR normalization fuzz targets passed 15-second campaigns.
 
 ## Next phase

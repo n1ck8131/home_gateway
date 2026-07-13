@@ -72,31 +72,24 @@ require_apk_info_field() {
 
 require_single_dependency() {
 	expected="$1"
-	jq -e --arg mode 'package-dependency' --arg expected "$expected" -f "$apk_validator" >/dev/null
+	jq -e \
+		--arg mode 'package-dependency' \
+		--arg expected "$expected" \
+		-f "$apk_validator" >/dev/null
 }
 
 require_single_payload_file() {
-	directory="$1"
-	filename="$2"
-	jq -e --arg directory "$directory" --arg filename "$filename" '
-		.paths as $paths |
-		($paths | type) == "array" and
-		all($paths[];
-			type == "object" and
-			(.name | type) == "string" and
-			(.files | type) == "array" and
-			all(.files[]; type == "object" and (.name | type) == "string")
-		) and
-		([
-			$paths[] |
-			select(.name == $directory) |
-			.files[] |
-			select(.name == $filename)
-		] | length) == 1
-	' >/dev/null
+	expected="$1"
+	jq -e \
+		--arg mode 'payload' \
+		--arg expected "$expected" \
+		-f "$apk_validator" >/dev/null
 }
 
-kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec --arg mode 'kernel' --arg expected '' -f "$apk_validator")"
+kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec \
+	--arg mode 'kernel' \
+	--arg expected '' \
+	-f "$apk_validator")"
 kernel="$(printf '%s\n' "$kernel_tuple" | jq -er '.kernel | select(type == "string")')"
 vermagic="$(printf '%s\n' "$kernel_tuple" | jq -er '.vermagic | select(type == "string")')"
 test "$kernel" = '6.12.94'
@@ -107,10 +100,10 @@ printf '%s\n' "$tools_dump" | require_apk_info_field name 'amneziawg-tools'
 printf '%s\n' "$kmod_dump" | require_apk_info_field arch "$architecture"
 printf '%s\n' "$tools_dump" | require_apk_info_field arch "$architecture"
 printf '%s\n' "$tools_dump" | require_single_dependency 'kmod-amneziawg'
-printf '%s\n' "$kmod_dump" | require_single_payload_file "lib/modules/$kernel" 'amneziawg.ko'
-printf '%s\n' "$tools_dump" | require_single_payload_file 'usr/bin' 'awg'
-printf '%s\n' "$tools_dump" | require_single_payload_file 'usr/bin' 'amneziawg_watchdog'
-printf '%s\n' "$tools_dump" | require_single_payload_file 'lib/netifd/proto' 'amneziawg.sh'
+printf '%s\n' "$kmod_dump" | require_single_payload_file "lib/modules/$kernel/amneziawg.ko"
+printf '%s\n' "$tools_dump" | require_single_payload_file 'usr/bin/awg'
+printf '%s\n' "$tools_dump" | require_single_payload_file 'usr/bin/amneziawg_watchdog'
+printf '%s\n' "$tools_dump" | require_single_payload_file 'lib/netifd/proto/amneziawg.sh'
 
 cp "$kmod_apk" "$tools_apk" "$output_dir/"
 (cd "$output_dir" && sha256sum ./*.apk | sed 's#  \./#  #' | LC_ALL=C sort > SHA256SUMS)

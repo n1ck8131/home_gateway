@@ -164,6 +164,9 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:ApkValidator | Should -Match '\(\?<kernel>'
         $script:ApkValidator | Should -Match '\(\?<vermagic>\[0-9a-f\]\{32\}\)'
         $script:Build | Should -Match 'require_single_payload_file'
+        $script:Build | Should -Match "--arg mode 'payload'"
+        $script:ApkValidator | Should -Match 'missing APK payload file at'
+        $script:ApkValidator | Should -Match 'duplicate APK payload file at'
     }
 
     It 'uses APK v3 dependency strings' {
@@ -185,6 +188,17 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:ApkFixture | Should -Match "assert_rejected 'conflicting package dependency'"
         $script:ApkFixture | Should -Match "assert_rejected 'duplicate kernel dependency'"
         $script:ApkFixture | Should -Match "assert_rejected 'conflicting kernel dependency'"
+    }
+
+    It 'validates APK v3 payloads with optional root and parent fields' {
+        $script:ApkValidator | Should -Match 'present path names must be strings'
+        $script:ApkValidator | Should -Match 'present path files must be arrays'
+        $script:ApkValidator | Should -Match '\(\$path\.files\? // \[\]\)\[\]'
+        $script:ApkValidator | Should -Match '\(\$path\.name\? // ""\) == ""'
+        $script:ApkFixture | Should -Match 'payload_fixture='
+        $script:ApkFixture | Should -Match "assert_payload_rejected 'duplicate payload file'"
+        $script:ApkFixture | Should -Match "assert_payload_rejected 'missing payload file'"
+        $script:ApkFixture | Should -Match "assert_payload_rejected 'non-array payload files'"
     }
 
     It 'returns exactly one SDK path and sends checksum diagnostics to stderr' {

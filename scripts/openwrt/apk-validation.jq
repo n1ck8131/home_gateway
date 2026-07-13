@@ -53,10 +53,50 @@ def require_kernel_tuple:
 		$related[0] | capture("^kernel=(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
 	end;
 
+def require_payload_paths:
+	.paths as $paths |
+	if ($paths | type) != "array" then
+		error("malformed APK payload: expected a paths array")
+	elif (all($paths[]; type == "object") | not) then
+		error("malformed APK payload: expected path objects")
+	elif (all($paths[]; (has("name") | not) or (.name | type) == "string") | not) then
+		error("malformed APK payload: present path names must be strings")
+	elif (all($paths[]; (has("files") | not) or (.files | type) == "array") | not) then
+		error("malformed APK payload: present path files must be arrays")
+	elif (all($paths[]; all((.files? // [])[]; type == "object")) | not) then
+		error("malformed APK payload: expected file objects")
+	elif (all($paths[]; all((.files? // [])[]; has("name") and (.name | type) == "string")) | not) then
+		error("malformed APK payload: file names must be strings")
+	else
+		$paths
+	end;
+
+def require_single_payload_file($expected):
+	require_payload_paths |
+	[
+		.[] as $path |
+		($path.files? // [])[] |
+		if ($path.name? // "") == "" then
+			.name
+		else
+			"\($path.name)/\(.name)"
+		end |
+		select(. == $expected)
+	] as $matches |
+	if ($matches | length) == 0 then
+		error("missing APK payload file at \($expected)")
+	elif ($matches | length) > 1 then
+		error("duplicate APK payload file at \($expected)")
+	else
+		true
+	end;
+
 if $mode == "package-dependency" then
 	require_single_dependency($expected)
 elif $mode == "kernel" then
 	require_kernel_tuple
+elif $mode == "payload" then
+	require_single_payload_file($expected)
 else
 	error("unknown APK validation mode")
 end

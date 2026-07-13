@@ -1,7 +1,7 @@
 # Project Status
 
-Current phase: P1 Deterministic Policy Core
-Release level: P1-software-verified
+Current phase: P2 Production Dataplane planning
+Release level: P1-software-verified; P2-not-implemented
 
 ## P0A Foundation
 
@@ -20,9 +20,12 @@ Release level: P1-software-verified
 - Compatibility regression: [OpenWrt SDK run 29280879151](https://github.com/n1ck8131/home_gateway/actions/runs/29280879151) reproduced byte-identical outputs for commit `4bba257cff13203191c73843229d5e79db905d52`.
 - Local evidence: the complete `verify` batch passed, and both domain and CIDR normalization fuzz targets passed 15-second campaigns.
 
-## Next phase
+## P2 Production Dataplane
 
-- P2 DNS and Packet Policy: not-started; implementation is deferred to a separate phase chat.
+- State: planning
+- Plan: [P2 production dataplane implementation plan](docs/superpowers/plans/2026-07-13-p02-production-dataplane.md)
+- Implementation: awaiting explicit plan confirmation
+- Branch: `phase/p2-dataplane`, based on completed `phase/p1-policy-core`
 
 ## External gates
 
@@ -34,4 +37,5 @@ Release level: P1-software-verified
 ## Blockers
 
 - P1 software blockers: none
+- P2 planning blockers: none
 - Hardware evidence remains intentionally deferred to the phase gates above; P1 does not claim hardware compatibility or throughput.

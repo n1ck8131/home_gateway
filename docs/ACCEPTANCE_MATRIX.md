@@ -22,6 +22,17 @@ P0 is complete for its software scope. The hardware gates remain open and no P0 
 
 P1 is complete for its pure software scope. DNS rendering/application, packet-policy enforcement, and hardware behavior remain owned by later phases.
 
+## P2 production dataplane plan
+
+| Gate | State | Planned evidence |
+|---|---|---|
+| Deterministic nft, policy-routing and dnsmasq rendering | planned | focused Go tests and byte-stable golden fixtures |
+| Transactional apply, commit-confirm and last-known-good recovery | planned | state-machine unit tests plus invalid apply, crash and boot recovery integration tests |
+| Linux network namespace safety matrix | planned | `sudo tests/network-ns/run.sh`, packet captures/counters and 20 consecutive fault-injection loops |
+| OpenWrt x86_64 QEMU dataplane smoke | planned | pinned-image package/config, validation, rollback and reboot-persistence evidence |
+
+P2 implementation is not started until the phase plan is explicitly approved.
+
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
 | Domain, IDNA, public-suffix and CIDR normalization | P1 | automated |

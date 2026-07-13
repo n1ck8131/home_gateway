@@ -2,6 +2,17 @@
 
 Each requirement has one owning phase and one evidence type.
 
+## P0 closure evidence
+
+| Gate | State | Evidence |
+|---|---|---|
+| Foundation verification | automated-passed | [CI run 29273568922](https://github.com/n1ck8131/home_gateway/actions/runs/29273568922): Linux `make verify`, `go test -race`, `CAP_NET_ADMIN` network prerequisite, Windows bootstrap, and Windows dev verification passed for commit `cf1773955e3d796e425cb6d6b75053928d77de61` |
+| OpenWrt compatibility build | automated-passed | [SDK run 29273568884](https://github.com/n1ck8131/home_gateway/actions/runs/29273568884): pinned packages and `amneziawg-go` built twice from clean output trees and compared byte-identical for commit `cf1773955e3d796e425cb6d6b75053928d77de61`; durable output hashes are recorded in `docs/COMPATIBILITY.md` |
+| Exact Flint 2 kernel module/UAPI | hardware-not-run | P3 gate; P0 software evidence does not prove load/runtime compatibility |
+| Real router-to-VPS AWG2 handshake | hardware-not-run | P3 gate |
+
+P0 is complete for its software scope. The hardware gates remain open and no P0 claim is made for hardware success or 300 Mbps throughput.
+
 ## §30.1 Routing
 
 | Requirement | Owner phase | Evidence type |

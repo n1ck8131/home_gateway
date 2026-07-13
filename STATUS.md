@@ -1,26 +1,30 @@
 # Project Status
 
 Current phase: P0 Foundation and Compatibility
-Release level: planning-approved
+Release level: P0-software-verified
 
 ## P0A Foundation
 
-- State: blocked
-- Missing evidence: clean Linux verification with `CAP_NET_ADMIN` and the network-lab prerequisites.
+- State: complete
+- Evidence: [CI run 29273568922](https://github.com/n1ck8131/home_gateway/actions/runs/29273568922) passed Linux `make verify`, `go test -race`, the `CAP_NET_ADMIN` network prerequisite, Windows bootstrap, and Windows dev verification for commit `cf1773955e3d796e425cb6d6b75053928d77de61`.
 
 ## P0B Compatibility
 
-- State: blocked
-- Missing evidence: clean OpenWrt 25.12.5 SDK build for the pinned AWG2 packages and userspace contingency measurements.
+- State: complete
+- Evidence: [OpenWrt SDK run 29273568884](https://github.com/n1ck8131/home_gateway/actions/runs/29273568884) produced byte-identical outputs from two clean build trees for the pinned AWG2 packages and userspace contingency at commit `cf1773955e3d796e425cb6d6b75053928d77de61`.
+
+## Next phase
+
+- P1 Policy Core: not-started (explicitly deferred by the owner).
 
 ## External gates
 
-- GL-MT6000 hardware smoke: not-run
+- GL-MT6000 hardware smoke, including exact-kernel module/UAPI verification: not-run
 - Router-to-VPS AWG2 handshake: P3 gate
 - Second VPS failover: P9 gate
 - Cisco field test: P7 gate
 
 ## Blockers
 
-- Linux verification with `CAP_NET_ADMIN` has not run.
-- The pinned AWG2 packages have not completed a clean OpenWrt 25.12.5 SDK build.
+- P0 software blockers: none
+- Hardware evidence remains intentionally deferred to the phase gates above; P0 does not claim hardware compatibility or throughput.

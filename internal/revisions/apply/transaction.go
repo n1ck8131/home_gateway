@@ -35,12 +35,21 @@ type Transaction struct {
 	Journal        JournalStore
 	Clock          Clock
 	ConfirmTimeout time.Duration
+	Locker         Locker
+	Watchdog       Watchdog
 	mu             sync.Mutex
+	watchdogMu     sync.Mutex
+	watchdogCancel func()
 }
 
-func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
+func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultErr error) {
+	release, err := tx.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
 	if !validRevisionID(candidate.RevisionID) {
 		return errors.New("invalid revision ID")
 	}
@@ -80,6 +89,18 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) error {
 	if err := tx.Journal.Save(pending); err != nil {
 		return err
 	}
+	if err := tx.armWatchdog(pending.PendingDeadline); err != nil {
+		restoreJournalErr := tx.Journal.Save(current)
+		if restoreJournalErr != nil {
+			return errors.Join(fmt.Errorf("arm watchdog: %w", err), fmt.Errorf("restore journal: %w", restoreJournalErr))
+		}
+		return fmt.Errorf("arm watchdog: %w", err)
+	}
+	defer func() {
+		if resultErr != nil {
+			tx.cancelWatchdog()
+		}
+	}()
 	if err := tx.Runtime.Activate(ctx, candidate); err != nil {
 		return tx.rollbackAfterFailure(ctx, pending, "activate", err)
 	}
@@ -92,9 +113,17 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) error {
 	return nil
 }
 
-func (tx *Transaction) Confirm() error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
+func (tx *Transaction) Confirm() (resultErr error) {
+	release, err := tx.acquire(context.Background())
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
+	if tx.Journal == nil {
+		return errors.New("journal is required")
+	}
 	journal, err := tx.Journal.Load()
 	if err != nil {
 		return err
@@ -114,12 +143,24 @@ func (tx *Transaction) Confirm() error {
 	journal.LastKnownGoodRevision = journal.PendingRevision
 	journal.PendingRevision = ""
 	journal.PendingDeadline = time.Time{}
-	return tx.Journal.Save(journal)
+	if err := tx.Journal.Save(journal); err != nil {
+		return err
+	}
+	tx.cancelWatchdog()
+	return nil
 }
 
-func (tx *Transaction) Rollback(ctx context.Context) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
+func (tx *Transaction) Rollback(ctx context.Context) (resultErr error) {
+	release, err := tx.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
+	if tx.Runtime == nil || tx.Journal == nil {
+		return errors.New("runtime and journal are required")
+	}
 	journal, err := tx.Journal.Load()
 	if err != nil {
 		return err
@@ -127,12 +168,22 @@ func (tx *Transaction) Rollback(ctx context.Context) error {
 	if journal.State != StatePending {
 		return errors.New("no revision is pending confirmation")
 	}
-	return tx.restore(ctx, journal, "explicit rollback")
+	err = tx.restore(ctx, journal, "explicit rollback")
+	tx.cancelWatchdog()
+	return err
 }
 
-func (tx *Transaction) Recover(ctx context.Context) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
+func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
+	release, err := tx.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
+	if tx.Runtime == nil || tx.Journal == nil {
+		return errors.New("runtime and journal are required")
+	}
 	journal, err := tx.Journal.Load()
 	if err != nil {
 		return err
@@ -140,12 +191,22 @@ func (tx *Transaction) Recover(ctx context.Context) error {
 	if journal.State != StatePending {
 		return nil
 	}
-	return tx.restore(ctx, journal, "boot/crash recovery")
+	err = tx.restore(ctx, journal, "boot/crash recovery")
+	tx.cancelWatchdog()
+	return err
 }
 
-func (tx *Transaction) Expire(ctx context.Context) error {
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
+func (tx *Transaction) Expire(ctx context.Context) (resultErr error) {
+	release, err := tx.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, release())
+	}()
+	if tx.Runtime == nil || tx.Journal == nil {
+		return errors.New("runtime and journal are required")
+	}
 	journal, err := tx.Journal.Load()
 	if err != nil {
 		return err
@@ -160,7 +221,58 @@ func (tx *Transaction) Expire(ctx context.Context) error {
 	if clock.Now().Before(journal.PendingDeadline) {
 		return nil
 	}
-	return tx.restore(ctx, journal, "watchdog expiry")
+	err = tx.restore(ctx, journal, "watchdog expiry")
+	tx.cancelWatchdog()
+	return err
+}
+
+func (tx *Transaction) acquire(ctx context.Context) (func() error, error) {
+	tx.mu.Lock()
+	if tx.Locker == nil {
+		tx.mu.Unlock()
+		return nil, errors.New("operation locker is required")
+	}
+	unlock, err := tx.Locker.Lock(ctx)
+	if err != nil {
+		tx.mu.Unlock()
+		return nil, err
+	}
+	return func() error {
+		err := unlock()
+		tx.mu.Unlock()
+		return err
+	}, nil
+}
+
+func (tx *Transaction) armWatchdog(deadline time.Time) error {
+	watchdog := tx.Watchdog
+	if watchdog == nil {
+		watchdog = TimerWatchdog{}
+	}
+	cancel, err := watchdog.Arm(deadline, func() {
+		_ = tx.Expire(context.Background())
+	})
+	if err != nil {
+		return err
+	}
+	tx.watchdogMu.Lock()
+	previous := tx.watchdogCancel
+	tx.watchdogCancel = cancel
+	tx.watchdogMu.Unlock()
+	if previous != nil {
+		previous()
+	}
+	return nil
+}
+
+func (tx *Transaction) cancelWatchdog() {
+	tx.watchdogMu.Lock()
+	cancel := tx.watchdogCancel
+	tx.watchdogCancel = nil
+	tx.watchdogMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (tx *Transaction) rollbackAfterFailure(ctx context.Context, journal Journal, boundary string, cause error) error {

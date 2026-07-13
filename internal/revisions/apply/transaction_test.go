@@ -26,6 +26,47 @@ type fakeClock struct{ now time.Time }
 
 func (clock fakeClock) Now() time.Time { return clock.now }
 
+type fakeLocker struct {
+	fail     bool
+	locked   bool
+	unlocked bool
+}
+
+func (locker *fakeLocker) Lock(context.Context) (func() error, error) {
+	if locker.fail {
+		return nil, errors.New("lock failed")
+	}
+	if locker.locked && !locker.unlocked {
+		return nil, errors.New("lock already held")
+	}
+	locker.locked = true
+	locker.unlocked = false
+	return func() error {
+		locker.unlocked = true
+		return nil
+	}, nil
+}
+
+type fakeWatchdog struct {
+	calls    *[]string
+	action   func()
+	fail     bool
+	canceled bool
+}
+
+func (watchdog *fakeWatchdog) Arm(_ time.Time, action func()) (func(), error) {
+	if watchdog.fail {
+		return nil, errors.New("watchdog failed")
+	}
+	if watchdog.calls != nil {
+		*watchdog.calls = append(*watchdog.calls, "watchdog")
+	}
+	watchdog.action = action
+	return func() {
+		watchdog.canceled = true
+	}, nil
+}
+
 type fakeRuntime struct {
 	fail         string
 	calls        []string
@@ -58,7 +99,14 @@ func (runtime *fakeRuntime) Restore(context.Context, string) error {
 }
 
 func newTransaction(runtime *fakeRuntime, store *memoryJournal, now time.Time) *Transaction {
-	return &Transaction{Runtime: runtime, Journal: store, Clock: fakeClock{now}, ConfirmTimeout: time.Minute}
+	return &Transaction{
+		Runtime:        runtime,
+		Journal:        store,
+		Clock:          fakeClock{now},
+		ConfirmTimeout: time.Minute,
+		Locker:         &fakeLocker{},
+		Watchdog:       &fakeWatchdog{calls: &runtime.calls},
+	}
 }
 
 func TestApplyCompensatesEveryMutationBoundary(t *testing.T) {
@@ -93,6 +141,9 @@ func TestCommitRollbackExpiryCrashAndDegradedRecovery(t *testing.T) {
 		}
 		if store.value.State != StateCommitted || store.value.ActiveRevision != "next" {
 			t.Fatalf("journal=%+v", store.value)
+		}
+		if !tx.Watchdog.(*fakeWatchdog).canceled {
+			t.Fatal("confirmed transaction did not cancel watchdog")
 		}
 	})
 	t.Run("explicit rollback", func(t *testing.T) {
@@ -136,6 +187,66 @@ func TestCommitRollbackExpiryCrashAndDegradedRecovery(t *testing.T) {
 			t.Fatalf("journal=%+v", store.value)
 		}
 	})
+}
+
+func TestApplyArmsWatchdogBeforeActivationAndCancelsItOnFailure(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{fail: "activate"}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg"}}
+	tx := newTransaction(runtime, store, now)
+	err := tx.Apply(context.Background(), Candidate{RevisionID: "next"})
+	if err == nil {
+		t.Fatal("expected activation failure")
+	}
+	wantCalls := []string{"stage", "validate", "snapshot", "watchdog", "activate", "restore"}
+	if strings.Join(runtime.calls, ",") != strings.Join(wantCalls, ",") {
+		t.Fatalf("calls = %v, want %v", runtime.calls, wantCalls)
+	}
+	if !tx.Watchdog.(*fakeWatchdog).canceled {
+		t.Fatal("failed transaction did not cancel watchdog")
+	}
+}
+
+func TestApplyWatchdogArmFailureRestoresJournalWithoutActivation(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg", LastKnownGoodRevision: "lkg"}}
+	tx := newTransaction(runtime, store, now)
+	tx.Watchdog = &fakeWatchdog{fail: true}
+
+	err := tx.Apply(context.Background(), Candidate{RevisionID: "next"})
+	if err == nil || !strings.Contains(err.Error(), "arm watchdog") {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if store.value.State != StateCommitted || store.value.ActiveRevision != "lkg" || store.value.PendingRevision != "" {
+		t.Fatalf("journal = %+v", store.value)
+	}
+	if strings.Contains(strings.Join(runtime.calls, ","), "activate") {
+		t.Fatalf("runtime calls = %v", runtime.calls)
+	}
+}
+
+func TestTransactionRequiresAndReleasesOperationLock(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted}}
+	tx := newTransaction(runtime, store, now)
+	locker := tx.Locker.(*fakeLocker)
+	locker.fail = true
+	if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err == nil || !strings.Contains(err.Error(), "lock") {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if len(runtime.calls) != 0 {
+		t.Fatalf("runtime called without lock: %v", runtime.calls)
+	}
+
+	locker.fail = false
+	if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err != nil {
+		t.Fatal(err)
+	}
+	if !locker.unlocked {
+		t.Fatal("operation lock was not released")
+	}
 }
 
 func TestRejectsTraversalAndConcurrentPendingApply(t *testing.T) {

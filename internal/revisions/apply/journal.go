@@ -1,9 +1,11 @@
 package apply
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,41 +39,110 @@ type JournalStore interface {
 type FileJournal struct{ Path string }
 
 func (store FileJournal) Load() (Journal, error) {
-	data, err := os.ReadFile(store.Path)
+	if err := store.validatePath(); err != nil {
+		return Journal{}, err
+	}
+	data, err := readRegularFile(store.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Journal{State: StateIdle}, nil
 	}
 	if err != nil {
 		return Journal{}, fmt.Errorf("read journal: %w", err)
 	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var journal Journal
-	if err := json.Unmarshal(data, &journal); err != nil {
+	if err := decoder.Decode(&journal); err != nil {
 		return Journal{}, fmt.Errorf("decode journal: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return Journal{}, errors.New("decode journal: trailing JSON data")
+		}
+		return Journal{}, fmt.Errorf("decode journal trailing data: %w", err)
+	}
+	if err := validateJournal(journal); err != nil {
+		return Journal{}, fmt.Errorf("validate journal: %w", err)
 	}
 	return journal, nil
 }
 
 func (store FileJournal) Save(journal Journal) error {
-	if store.Path == "" || filepath.Base(store.Path) != "journal.json" {
-		return errors.New("journal path must end in journal.json")
+	if err := store.validatePath(); err != nil {
+		return err
+	}
+	if err := validateJournal(journal); err != nil {
+		return fmt.Errorf("validate journal: %w", err)
 	}
 	directory := filepath.Dir(store.Path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create journal directory: %w", err)
 	}
-	if info, err := os.Lstat(directory); err != nil || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("journal directory must exist and not be a symlink")
+	if err := requireDirectory(directory); err != nil {
+		return fmt.Errorf("journal directory must be a real directory: %w", err)
 	}
 	data, err := json.MarshalIndent(journal, "", "  ")
 	if err != nil {
 		return err
 	}
-	temporary := store.Path + ".tmp"
-	if err := os.WriteFile(temporary, append(data, '\n'), 0o600); err != nil {
-		return fmt.Errorf("write journal: %w", err)
-	}
-	if err := os.Rename(temporary, store.Path); err != nil {
+	if err := replaceRegularFile(store.Path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("replace journal: %w", err)
+	}
+	return nil
+}
+
+func (store FileJournal) validatePath() error {
+	if store.Path == "" || !filepath.IsAbs(store.Path) || filepath.Clean(store.Path) != store.Path || filepath.Base(store.Path) != "journal.json" {
+		return errors.New("journal path must be absolute, clean, and end in journal.json")
+	}
+	return nil
+}
+
+func validateJournal(journal Journal) error {
+	for label, revision := range map[string]string{
+		"active":          journal.ActiveRevision,
+		"last-known-good": journal.LastKnownGoodRevision,
+		"pending":         journal.PendingRevision,
+	} {
+		if revision != "" && !validRevisionID(revision) {
+			return fmt.Errorf("%s revision is invalid", label)
+		}
+	}
+	if journal.State != StatePending && (journal.PendingRevision != "" || !journal.PendingDeadline.IsZero()) {
+		return errors.New("only a pending journal may contain pending revision data")
+	}
+	switch journal.State {
+	case StateIdle:
+		if journal.ActiveRevision != "" || journal.LastKnownGoodRevision != "" || journal.RollbackResult != "" {
+			return errors.New("idle journal must not contain revision or rollback data")
+		}
+	case StatePending:
+		if journal.PendingRevision == "" || journal.PendingDeadline.IsZero() {
+			return errors.New("pending journal requires revision and deadline")
+		}
+		if journal.ActiveRevision != journal.LastKnownGoodRevision {
+			return errors.New("pending journal active and last-known-good revisions must match")
+		}
+		if journal.RollbackResult != "" {
+			return errors.New("pending journal must not contain a rollback result")
+		}
+	case StateCommitted:
+		if journal.ActiveRevision == "" || journal.ActiveRevision != journal.LastKnownGoodRevision {
+			return errors.New("committed journal requires one active last-known-good revision")
+		}
+		if journal.RollbackResult != "" {
+			return errors.New("committed journal must not contain a rollback result")
+		}
+	case StateRolledBack, StateDegraded:
+		if journal.ActiveRevision != journal.LastKnownGoodRevision {
+			return errors.New("recovery journal active and last-known-good revisions must match")
+		}
+		if journal.RollbackResult == "" {
+			return errors.New("recovery journal requires a rollback result")
+		}
+	default:
+		return fmt.Errorf("unknown journal state %q", journal.State)
 	}
 	return nil
 }

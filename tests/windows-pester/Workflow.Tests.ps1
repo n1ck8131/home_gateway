@@ -36,7 +36,7 @@ Describe 'pinned GitHub workflows' {
         $script:Ci | Should -Match './scripts/bootstrap-dev\.ps1 -IncludePowerShell'
         $script:Ci | Should -Match 'make PWSH=\./\.tools/pwsh/pwsh verify'
         $script:Ci | Should -Match 'cc --version && ld --version'
-        $script:Ci | Should -Match 'go test -race \./\.\.\.'
+        $script:Ci | Should -Match 'GOMAXPROCS=2 go test -p=1 -timeout=15m -race \./\.\.\.'
         $script:Ci | Should -Match 'sudo tests/network-ns/check-prereqs\.sh'
     }
 

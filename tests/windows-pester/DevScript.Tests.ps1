@@ -68,6 +68,26 @@ Describe 'scripts/dev.ps1' {
         $verifyLintCalls.Count | Should -Be 1
     }
 
+    It 'bounds Go test concurrency and duration' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:Dev,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $goTests = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Invoke-GoTests'
+        }, $true))
+
+        $parseErrors | Should -BeNullOrEmpty
+        $goTests.Count | Should -Be 1
+        $goTests[0].Extent.Text | Should -Match "GOMAXPROCS\s*=\s*'2'"
+        $goTests[0].Extent.Text | Should -Match "@\(\s*'test'\s*,\s*'-p=1'\s*,\s*'-timeout=10m'\s*,\s*'\./\.\.\.'\s*\)"
+    }
+
     It 'rejects an unknown command' {
         { & $script:Dev -Command invalid } | Should -Throw
     }

@@ -3,16 +3,15 @@ package dnsmasq
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
+	"github.com/vsevo/home-gateway/internal/routing/nft"
 	"github.com/vsevo/home-gateway/pkg/contracts"
 )
 
 const (
-	DefaultChunkSize  = 750
-	DefaultSetTimeout = 3600
-	DefaultCacheTTL   = 3600
+	DefaultChunkSize = 750
+	DefaultCacheTTL  = nft.SetTimeout
 )
 
 type Options struct {
@@ -26,7 +25,7 @@ func Render(plan contracts.PolicyPlan, options Options) ([]byte, error) {
 		options.ChunkSize = DefaultChunkSize
 	}
 	if options.SetTimeoutSeconds == 0 {
-		options.SetTimeoutSeconds = DefaultSetTimeout
+		options.SetTimeoutSeconds = nft.SetTimeout
 	}
 	if options.CacheTTLSeconds == 0 {
 		options.CacheTTLSeconds = DefaultCacheTTL
@@ -34,40 +33,57 @@ func Render(plan contracts.PolicyPlan, options Options) ([]byte, error) {
 	if options.ChunkSize < 1 || options.SetTimeoutSeconds < 1 || options.CacheTTLSeconds < 1 {
 		return nil, errors.New("chunk size and timeouts must be positive")
 	}
+	if options.SetTimeoutSeconds != nft.SetTimeout {
+		return nil, fmt.Errorf("dnsmasq nft timeout %d must equal rendered nft set timeout %d", options.SetTimeoutSeconds, nft.SetTimeout)
+	}
 	if options.CacheTTLSeconds > options.SetTimeoutSeconds {
 		return nil, errors.New("dns cache TTL cannot exceed nft set timeout")
 	}
-	bySet := map[string][]string{"direct": {}, "vpn": {}}
-	for _, entry := range plan.Entries {
-		if entry.Kind != contracts.EntryKindDomain {
-			continue
-		}
-		domain := strings.TrimPrefix(strings.TrimSuffix(entry.Pattern, "."), "*.")
-		bySet[string(entry.Route)] = append(bySet[string(entry.Route)], domain)
+
+	bindings, err := nft.DomainBindings(plan)
+	if err != nil {
+		return nil, err
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "# routerd managed; nft-timeout=%ds\ncache-rr=ANY\nmax-cache-ttl=%d\n", options.SetTimeoutSeconds, options.CacheTTLSeconds)
-	for _, route := range []string{"direct", "vpn"} {
-		domains := uniqueSorted(bySet[route])
+	for _, binding := range bindings {
+		domains, err := dnsmasqDomains(binding)
+		if err != nil {
+			return nil, err
+		}
 		for start := 0; start < len(domains); start += options.ChunkSize {
 			end := start + options.ChunkSize
 			if end > len(domains) {
 				end = len(domains)
 			}
-			joined := "/" + strings.Join(domains[start:end], "/") + "/"
-			fmt.Fprintf(&out, "nftset=%s4#inet#routerd#%s4,%s6#inet#routerd#%s6\n", joined, route, joined, route)
+			fmt.Fprintf(
+				&out,
+				"nftset=/%s/4#inet#%s#%s,6#inet#%s#%s\n",
+				strings.Join(domains[start:end], "/"),
+				nft.TableName,
+				binding.Set4,
+				nft.TableName,
+				binding.Set6,
+			)
 		}
 	}
 	return []byte(out.String()), nil
 }
 
-func uniqueSorted(values []string) []string {
-	sort.Strings(values)
-	out := values[:0]
-	for _, value := range values {
-		if value != "" && (len(out) == 0 || out[len(out)-1] != value) {
-			out = append(out, value)
+func dnsmasqDomains(binding nft.DomainBinding) ([]string, error) {
+	domains := make([]string, 0, len(binding.Patterns))
+	for _, pattern := range binding.Patterns {
+		domain := strings.TrimPrefix(strings.TrimSuffix(pattern, "."), "*.")
+		switch binding.Match {
+		case contracts.DomainMatchExact:
+			return nil, fmt.Errorf("exact domain %q cannot be represented by dnsmasq nftset without matching subdomains", pattern)
+		case contracts.DomainMatchSuffix:
+			domains = append(domains, domain)
+		case contracts.DomainMatchWildcard:
+			domains = append(domains, "*."+domain)
+		default:
+			return nil, fmt.Errorf("unsupported domain match %q", binding.Match)
 		}
 	}
-	return out
+	return domains, nil
 }

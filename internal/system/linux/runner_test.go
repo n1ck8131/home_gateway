@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"reflect"
 	"testing"
 	"time"
@@ -32,10 +31,8 @@ func TestExecRunnerHonorsCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	cmd := exec.Command(os.Args[0])
-	_ = cmd
 	t.Setenv("GO_WANT_CANCEL_PROCESS", "1")
-	_, err := (ExecRunner{}).Run(ctx, os.Args[0], "-test.run=TestExecRunnerHonorsCancellation")
+	_, err := (ExecRunner{}).Run(ctx, os.Args[0], "-test.run=^TestExecRunnerHonorsCancellation$")
 	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("Run() err=%v ctx=%v", err, ctx.Err())
 	}

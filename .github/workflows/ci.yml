@@ -48,7 +48,7 @@ jobs:
         run: ./scripts/bootstrap-dev.ps1 -IncludePowerShell
       - run: make PWSH=./.tools/pwsh/pwsh verify
       - run: cc --version && ld --version
-      - run: go test -race ./...
+      - run: GOMAXPROCS=2 go test -p=1 -timeout=15m -race ./...
       - run: sudo apt-get update && sudo apt-get install --yes dnsmasq-base iproute2 jq nftables
       - run: sudo tests/network-ns/check-prereqs.sh
       - run: sh tests/openwrt-sdk/assert-awg2-smoke-rollback.sh

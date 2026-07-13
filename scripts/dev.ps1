@@ -86,7 +86,19 @@ function Invoke-FormatCheck {
 
 function Invoke-GoTests {
     $go = Get-PinnedGo
-    Invoke-CheckedNative -FilePath $go -Arguments @('test', './...')
+    $priorGoMaxProcs = Get-Item -LiteralPath 'Env:GOMAXPROCS' -ErrorAction SilentlyContinue
+    try {
+        if (-not $priorGoMaxProcs) {
+            $env:GOMAXPROCS = '2'
+        }
+        Invoke-CheckedNative -FilePath $go -Arguments @('test', '-p=1', '-timeout=10m', './...')
+    } finally {
+        if ($priorGoMaxProcs) {
+            $env:GOMAXPROCS = $priorGoMaxProcs.Value
+        } else {
+            Remove-Item -LiteralPath 'Env:GOMAXPROCS' -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Invoke-PesterTests {

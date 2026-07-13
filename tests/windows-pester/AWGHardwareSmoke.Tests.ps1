@@ -4,7 +4,17 @@ BeforeAll {
     $script:RemotePath = Join-Path $script:Root 'scripts/openwrt/smoke-awg2-remote.sh'
     $script:Wrapper = Get-Content -LiteralPath $script:WrapperPath -Raw
     $script:Remote = Get-Content -LiteralPath $script:RemotePath -Raw
-    $script:Pwsh = (Get-Command -Name powershell.exe -CommandType Application).Source
+    $currentPowerShell = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Path
+    if ($currentPowerShell -and (Test-Path -LiteralPath $currentPowerShell -PathType Leaf)) {
+        $script:Pwsh = $currentPowerShell
+    } else {
+        $pwshCommand = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue
+        if ($pwshCommand) {
+            $script:Pwsh = $pwshCommand.Source
+        } else {
+            $script:Pwsh = (Get-Command -Name powershell.exe -CommandType Application -ErrorAction Stop).Source
+        }
+    }
 
 $script:NewIsolatedSmokeFixture = {
     param([Parameter(Mandatory)][string]$Root)
@@ -58,6 +68,9 @@ $script:NewFakeAwgTransport = {
     param([Parameter(Mandatory)][string]$Directory)
 
     New-Item -ItemType Directory -Force $Directory | Out-Null
+    $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+    $pwshForCmd = $script:Pwsh.Replace('%', '%%')
+    $pwshForShell = $script:Pwsh.Replace('\', '\\').Replace('"', '\"').Replace('$', '\$').Replace('`', '\`')
     @'
 begin {
 }
@@ -86,21 +99,37 @@ end {
     exit 99
 }
 '@ | Set-Content -LiteralPath (Join-Path $Directory 'ssh.ps1') -Encoding UTF8
-    @'
+    if ($isWindowsHost) {
+        @"
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssh.ps1" %*
+"$pwshForCmd" -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssh.ps1" %*
 exit /b %ERRORLEVEL%
-'@ | Set-Content -LiteralPath (Join-Path $Directory 'ssh.cmd') -Encoding ASCII
+"@ | Set-Content -LiteralPath (Join-Path $Directory 'ssh.cmd') -Encoding ASCII
+    } else {
+        @"
+#!/bin/sh
+exec "$pwshForShell" -NoProfile -ExecutionPolicy Bypass -File "`$(dirname "`$0")/ssh.ps1" "`$@"
+"@ | Set-Content -LiteralPath (Join-Path $Directory 'ssh') -Encoding UTF8
+        chmod +x (Join-Path $Directory 'ssh')
+    }
     @'
 Add-Content -LiteralPath $env:AWG_FAKE_LOG -Value ('SCP' + [char]31 + ($args -join [char]31))
 if ($env:AWG_FAKE_SCP_EXIT) { exit [int]$env:AWG_FAKE_SCP_EXIT }
 exit 0
 '@ | Set-Content -LiteralPath (Join-Path $Directory 'scp.ps1') -Encoding UTF8
-    @'
+    if ($isWindowsHost) {
+        @"
 @echo off
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scp.ps1" %*
+"$pwshForCmd" -NoProfile -ExecutionPolicy Bypass -File "%~dp0scp.ps1" %*
 exit /b %ERRORLEVEL%
-'@ | Set-Content -LiteralPath (Join-Path $Directory 'scp.cmd') -Encoding ASCII
+"@ | Set-Content -LiteralPath (Join-Path $Directory 'scp.cmd') -Encoding ASCII
+    } else {
+        @"
+#!/bin/sh
+exec "$pwshForShell" -NoProfile -ExecutionPolicy Bypass -File "`$(dirname "`$0")/scp.ps1" "`$@"
+"@ | Set-Content -LiteralPath (Join-Path $Directory 'scp') -Encoding UTF8
+        chmod +x (Join-Path $Directory 'scp')
+    }
 }
 
 $script:ConvertToPowerShellSingleQuotedLiteral = {

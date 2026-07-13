@@ -39,12 +39,8 @@ make -C "$sdk" package/kmod-amneziawg/compile V=s
 make -C "$sdk" package/amneziawg-tools/compile V=s
 
 revision="$(make -s -C "$sdk" val.REVISION)"
-kernel="$(make -s -C "$sdk" val.LINUX_VERSION)"
-vermagic="$(make -s -C "$sdk" val.LINUX_VERMAGIC)"
 architecture="$(make -s -C "$sdk" val.ARCH_PACKAGES)"
 test "$revision" = 'r33051-f5dae5ece4'
-test "$kernel" = '6.12.94'
-test "$vermagic" = '5a6c1f71be683ae9980b15d3ce73e24d'
 test "$architecture" = 'aarch64_cortex-a53'
 
 find_single_apk() {
@@ -59,16 +55,77 @@ kmod_apk="$(find_single_apk 'kmod-amneziawg-*.apk')"
 tools_apk="$(find_single_apk 'amneziawg-tools-*.apk')"
 apk_host="$sdk/staging_dir/host/bin/apk"
 test -x "$apk_host"
-kmod_dump="$($apk_host adbdump "$kmod_apk")"
-tools_dump="$($apk_host adbdump "$tools_apk")"
-printf '%s\n' "$kmod_dump" | grep -F 'aarch64_cortex-a53'
-printf '%s\n' "$tools_dump" | grep -F 'aarch64_cortex-a53'
-printf '%s\n' "$kmod_dump" | grep -F 'kernel=6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1'
-printf '%s\n' "$tools_dump" | grep -F 'kmod-amneziawg'
-printf '%s\n' "$kmod_dump" | grep -F '/lib/modules/6.12.94/amneziawg.ko'
-printf '%s\n' "$tools_dump" | grep -F '/usr/bin/awg'
-printf '%s\n' "$tools_dump" | grep -F '/usr/bin/amneziawg_watchdog'
-printf '%s\n' "$tools_dump" | grep -F '/lib/netifd/proto/amneziawg.sh'
+kmod_dump="$("$apk_host" adbdump --format json "$kmod_apk")"
+tools_dump="$("$apk_host" adbdump --format json "$tools_apk")"
+
+require_apk_info_field() {
+	field="$1"
+	expected="$2"
+	jq -e --arg field "$field" --arg expected "$expected" '
+		(.info | type) == "object" and
+		(.info[$field] | type) == "string" and
+		.info[$field] == $expected
+	' >/dev/null
+}
+
+require_single_dependency() {
+	expected="$1"
+	jq -e --arg expected "$expected" '
+		.info.depends as $depends |
+		($depends | type) == "array" and
+		all($depends[]; type == "string") and
+		([$depends[] | select(. == $expected)] | length) == 1
+	' >/dev/null
+}
+
+require_single_payload_file() {
+	directory="$1"
+	filename="$2"
+	jq -e --arg directory "$directory" --arg filename "$filename" '
+		.paths as $paths |
+		($paths | type) == "array" and
+		all($paths[];
+			type == "object" and
+			(.name | type) == "string" and
+			(.files | type) == "array" and
+			all(.files[]; type == "object" and (.name | type) == "string")
+		) and
+		([
+			$paths[] |
+			select(.name == $directory) |
+			.files[] |
+			select(.name == $filename)
+		] | length) == 1
+	' >/dev/null
+}
+
+kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec '
+	.info.depends as $depends |
+	if ($depends | type) != "array" or (all($depends[]; type == "string") | not) then
+		error("malformed kmod dependencies")
+	else
+		[$depends[] | select(startswith("kernel="))]
+	end |
+	if length != 1 then
+		error("expected exactly one kernel dependency")
+	else
+		.[0] | capture("^kernel=(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
+	end
+')"
+kernel="$(printf '%s\n' "$kernel_tuple" | jq -er '.kernel | select(type == "string")')"
+vermagic="$(printf '%s\n' "$kernel_tuple" | jq -er '.vermagic | select(type == "string")')"
+test "$kernel" = '6.12.94'
+test "$vermagic" = '5a6c1f71be683ae9980b15d3ce73e24d'
+
+printf '%s\n' "$kmod_dump" | require_apk_info_field name 'kmod-amneziawg'
+printf '%s\n' "$tools_dump" | require_apk_info_field name 'amneziawg-tools'
+printf '%s\n' "$kmod_dump" | require_apk_info_field arch "$architecture"
+printf '%s\n' "$tools_dump" | require_apk_info_field arch "$architecture"
+printf '%s\n' "$tools_dump" | require_single_dependency 'kmod-amneziawg'
+printf '%s\n' "$kmod_dump" | require_single_payload_file "lib/modules/$kernel" 'amneziawg.ko'
+printf '%s\n' "$tools_dump" | require_single_payload_file 'usr/bin' 'awg'
+printf '%s\n' "$tools_dump" | require_single_payload_file 'usr/bin' 'amneziawg_watchdog'
+printf '%s\n' "$tools_dump" | require_single_payload_file 'lib/netifd/proto' 'amneziawg.sh'
 
 cp "$kmod_apk" "$tools_apk" "$output_dir/"
 (cd "$output_dir" && sha256sum ./*.apk | sed 's#  \./#  #' | LC_ALL=C sort > SHA256SUMS)

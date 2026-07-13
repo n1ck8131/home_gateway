@@ -154,7 +154,13 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:Build | Should -Match '6\.12\.94'
         $script:Build | Should -Match '5a6c1f71be683ae9980b15d3ce73e24d'
         $script:Build | Should -Match 'aarch64_cortex-a53'
-        $script:Build | Should -Match 'adbdump'
+        $script:Build | Should -Match 'adbdump --format json'
+        $script:Build | Should -Not -Match 'val\.LINUX_(VERSION|VERMAGIC)'
+        $script:Build | Should -Match 'expected exactly one kernel dependency'
+        $script:Build | Should -Match 'capture\("\^kernel='
+        $script:Build | Should -Match '\(\?<kernel>'
+        $script:Build | Should -Match '\(\?<vermagic>\[0-9a-f\]\{32\}\)'
+        $script:Build | Should -Match 'require_single_payload_file'
     }
 
     It 'returns exactly one SDK path and sends checksum diagnostics to stderr' {

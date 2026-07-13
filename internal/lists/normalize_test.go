@@ -3,6 +3,7 @@ package lists
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/vsevo/home-gateway/pkg/contracts"
 )
@@ -61,6 +62,27 @@ func TestNormalizeEntriesIsIndependentOfInputOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(forward, reverse) || len(forward) != 1 || forward[0].ID != "a" {
+		t.Fatalf("forward = %#v, reverse = %#v", forward, reverse)
+	}
+}
+
+func TestNormalizeEntriesOrderIncludesAllPolicyFields(t *testing.T) {
+	expiresEarly := time.Unix(100, 0).UTC()
+	expiresLate := time.Unix(200, 0).UTC()
+	first := contracts.RouteEntry{ID: "same", Pattern: "a.example.com", Kind: contracts.EntryKindDomain, Match: contracts.DomainMatchExact, Route: contracts.RouteClassVPN, Origin: contracts.OriginManual, ServerID: "nl-1", ExpiresAt: &expiresLate, Scope: contracts.Scope{Type: contracts.ScopeGlobal}}
+	second := first
+	second.ServerID = "de-1"
+	second.ExpiresAt = &expiresEarly
+
+	forward, err := NormalizeEntries([]contracts.RouteEntry{first, second}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse, err := NormalizeEntries([]contracts.RouteEntry{second, first}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(forward, reverse) {
 		t.Fatalf("forward = %#v, reverse = %#v", forward, reverse)
 	}
 }

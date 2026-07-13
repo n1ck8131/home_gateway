@@ -149,29 +149,25 @@ func NormalizeEntries(entries []contracts.RouteEntry, limits Limits) ([]contract
 	}
 	normalized = unique
 
-	keep := make([]bool, len(normalized))
-	for i := range keep {
-		keep[i] = true
-	}
-	for childIndex := range normalized {
-		for parentIndex := range normalized {
-			if childIndex == parentIndex || !keep[childIndex] {
-				continue
-			}
-			child := normalized[childIndex]
-			parent := normalized[parentIndex]
-			if entrySemanticKey(child, false) != entrySemanticKey(parent, false) {
-				continue
-			}
-			if subsumes(parent, child) {
-				keep[childIndex] = false
-			}
+	indexes := make(map[string]*subsumptionIndex)
+	for _, entry := range normalized {
+		key := entrySemanticKey(entry, false)
+		index := indexes[key]
+		if index == nil {
+			index = &subsumptionIndex{domainSuffixes: make(map[string]struct{}), cidrs: make(map[string]struct{})}
+			indexes[key] = index
+		}
+		if entry.Kind == contracts.EntryKindDomain && entry.Match == contracts.DomainMatchSuffix {
+			index.domainSuffixes[entry.Pattern] = struct{}{}
+		}
+		if entry.Kind == contracts.EntryKindCIDR {
+			index.cidrs[entry.Pattern] = struct{}{}
 		}
 	}
 
 	result := make([]contracts.RouteEntry, 0, len(normalized))
-	for i, entry := range normalized {
-		if keep[i] {
+	for _, entry := range normalized {
+		if !isSubsumed(entry, indexes[entrySemanticKey(entry, false)]) {
 			result = append(result, entry)
 		}
 	}
@@ -213,28 +209,43 @@ func entrySemanticKey(entry contracts.RouteEntry, includePattern bool) string {
 }
 
 func entrySortKey(entry contracts.RouteEntry) string {
-	return strings.Join([]string{
-		string(entry.Kind), entry.Pattern, string(entry.Match), string(entry.Origin),
-		string(entry.Route), string(entry.Scope.Type), entry.Scope.DeviceID,
-		fmt.Sprintf("%020d", entry.Sequence), entry.ID,
-	}, "\x00")
+	return entrySemanticKey(entry, true) + "\x00" + entry.ID
 }
 
-func subsumes(parent, child contracts.RouteEntry) bool {
-	if parent.Kind != child.Kind || parent.Pattern == child.Pattern && parent.Match == child.Match {
+type subsumptionIndex struct {
+	domainSuffixes map[string]struct{}
+	cidrs          map[string]struct{}
+}
+
+func isSubsumed(entry contracts.RouteEntry, index *subsumptionIndex) bool {
+	if index == nil {
 		return false
 	}
-	switch parent.Kind {
-	case contracts.EntryKindDomain:
-		if parent.Match != contracts.DomainMatchSuffix {
+	if entry.Kind == contracts.EntryKindDomain {
+		for offset := strings.IndexByte(entry.Pattern, '.'); offset >= 0; {
+			parent := entry.Pattern[offset+1:]
+			if _, exists := index.domainSuffixes[parent]; exists {
+				return true
+			}
+			next := strings.IndexByte(parent, '.')
+			if next < 0 {
+				break
+			}
+			offset += next + 1
+		}
+		return false
+	}
+	if entry.Kind == contracts.EntryKindCIDR {
+		prefix, err := netip.ParsePrefix(entry.Pattern)
+		if err != nil {
 			return false
 		}
-		return child.Pattern != parent.Pattern && strings.HasSuffix(child.Pattern, "."+parent.Pattern)
-	case contracts.EntryKindCIDR:
-		parentPrefix, parentErr := netip.ParsePrefix(parent.Pattern)
-		childPrefix, childErr := netip.ParsePrefix(child.Pattern)
-		return parentErr == nil && childErr == nil && parentPrefix.Bits() <= childPrefix.Bits() && parentPrefix.Contains(childPrefix.Addr())
-	default:
-		return false
+		for bits := prefix.Bits() - 1; bits >= 0; bits-- {
+			parent := netip.PrefixFrom(prefix.Addr(), bits).Masked().String()
+			if _, exists := index.cidrs[parent]; exists {
+				return true
+			}
+		}
 	}
+	return false
 }

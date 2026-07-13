@@ -4,6 +4,8 @@ BeforeAll {
     $script:Tools = Get-Content -LiteralPath (Join-Path $script:Root 'packaging/openwrt-awg2/amneziawg-tools/Makefile') -Raw
     $script:Helper = Get-Content -LiteralPath (Join-Path $script:Root 'packaging/openwrt-awg2/amneziawg-tools/files/amneziawg.sh') -Raw
     $script:Build = Get-Content -LiteralPath (Join-Path $script:Root 'scripts/openwrt/build-packages.sh') -Raw
+    $script:ApkValidator = Get-Content -LiteralPath (Join-Path $script:Root 'scripts/openwrt/apk-validation.jq') -Raw
+    $script:ApkFixture = Get-Content -LiteralPath (Join-Path $script:Root 'tests/openwrt-sdk/assert-apk-dependencies.sh') -Raw
 
     $shellCommand = Get-Command sh -ErrorAction SilentlyContinue
     $script:Shell = if ($shellCommand) { $shellCommand.Source } else { $null }
@@ -156,33 +158,33 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:Build | Should -Match 'aarch64_cortex-a53'
         $script:Build | Should -Match 'adbdump --format json'
         $script:Build | Should -Not -Match 'val\.LINUX_(VERSION|VERMAGIC)'
-        $script:Build | Should -Match 'expected exactly one kernel dependency object'
-        $script:Build | Should -Match 'capture\("\^\(\?<kernel>'
-        $script:Build | Should -Match '\(\?<kernel>'
-        $script:Build | Should -Match '\(\?<vermagic>\[0-9a-f\]\{32\}\)'
+        $script:Build | Should -Match 'apk-validation\.jq'
+        $script:ApkValidator | Should -Match 'expected exactly one kernel dependency string'
+        $script:ApkValidator | Should -Match 'capture\("\^kernel=\(\?<kernel>'
+        $script:ApkValidator | Should -Match '\(\?<kernel>'
+        $script:ApkValidator | Should -Match '\(\?<vermagic>\[0-9a-f\]\{32\}\)'
         $script:Build | Should -Match 'require_single_payload_file'
     }
 
-    It 'uses APK v3 schema_dependency object fields' {
-        $script:Build | Should -Match 'malformed package dependencies: expected a dependency array'
-        $script:Build | Should -Match 'malformed package dependencies: expected schema_dependency objects'
-        $script:Build | Should -Match 'malformed kmod dependencies: expected a dependency array'
-        $script:Build | Should -Match 'malformed kmod dependencies: expected schema_dependency objects'
-        $script:Build | Should -Match 'select\(\.name == \$expected\)'
-        $script:Build | Should -Match 'select\(\.name == "kernel"\)'
-        $script:Build | Should -Match 'has\("match"\) and \(\.match \| type\) != "number"'
-        $script:Build | Should -Not -Match 'select\(startswith\("kernel="\)\)'
-        $script:Build | Should -Not -Match 'all\(\$depends\[\]; type == "string"\)'
+    It 'uses APK v3 dependency strings' {
+        $script:ApkValidator | Should -Match 'malformed \\\(\$context\) dependencies: expected a dependency array'
+        $script:ApkValidator | Should -Match 'malformed \\\(\$context\) dependencies: expected dependency strings'
+        $script:ApkValidator | Should -Match 'require_dependency_strings\("package"\)'
+        $script:ApkValidator | Should -Match 'require_dependency_strings\("kmod"\)'
+        $script:ApkValidator | Should -Match 'all\(\$depends\[\]; type == "string"\)'
+        $script:ApkValidator | Should -Not -Match 'select\(\.name =='
     }
 
-    It 'rejects non-equality kernel and versioned tools dependencies' {
-        $script:Build | Should -Match '\$matches\[0\] \| \(has\("version"\) or has\("match"\)\)'
-        $script:Build | Should -Match 'dependency named \\\(\$expected\) must be unversioned and have no match field'
-        $script:Build | Should -Match '\.\[0\] as \$kernel_dependency'
-        $script:Build | Should -Match '\$kernel_dependency \| has\("match"\)'
-        $script:Build | Should -Match 'kernel dependency must use equality without a match field'
-        $script:Build | Should -Match '\$kernel_dependency\.version \| type'
-        $script:Build | Should -Match '\$kernel_dependency\.version \| test\("\^\[0-9\]\+'
+    It 'rejects malformed, multiple and versioned dependency strings' {
+        $script:ApkValidator | Should -Match 'dependency named \\\(\$name\) must be an exact unversioned string'
+        $script:ApkValidator | Should -Match 'conflicting dependency named \\\(\$name\) is not allowed'
+        $script:ApkValidator | Should -Match 'expected exactly one unversioned dependency named'
+        $script:ApkValidator | Should -Match 'expected exactly one kernel dependency string'
+        $script:ApkValidator | Should -Match 'kernel dependency string has an unexpected format'
+        $script:ApkFixture | Should -Match "assert_rejected 'duplicate package dependency'"
+        $script:ApkFixture | Should -Match "assert_rejected 'conflicting package dependency'"
+        $script:ApkFixture | Should -Match "assert_rejected 'duplicate kernel dependency'"
+        $script:ApkFixture | Should -Match "assert_rejected 'conflicting kernel dependency'"
     }
 
     It 'returns exactly one SDK path and sends checksum diagnostics to stderr' {

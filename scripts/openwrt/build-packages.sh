@@ -54,7 +54,9 @@ find_single_apk() {
 kmod_apk="$(find_single_apk 'kmod-amneziawg-*.apk')"
 tools_apk="$(find_single_apk 'amneziawg-tools-*.apk')"
 apk_host="$sdk/staging_dir/host/bin/apk"
+apk_validator="$root/scripts/openwrt/apk-validation.jq"
 test -x "$apk_host"
+test -f "$apk_validator"
 kmod_dump="$("$apk_host" adbdump --format json "$kmod_apk")"
 tools_dump="$("$apk_host" adbdump --format json "$tools_apk")"
 
@@ -70,30 +72,7 @@ require_apk_info_field() {
 
 require_single_dependency() {
 	expected="$1"
-	jq -e --arg expected "$expected" '
-		def schema_dependency:
-			if type != "object" then false
-			elif (.name | type) != "string" then false
-			elif has("version") and (.version | type) != "string" then false
-			elif has("match") and (.match | type) != "number" then false
-			else true
-			end;
-		.info.depends as $depends |
-		if ($depends | type) != "array" then
-			error("malformed package dependencies: expected a dependency array")
-		elif (all($depends[]; schema_dependency) | not) then
-			error("malformed package dependencies: expected schema_dependency objects")
-		else
-			[$depends[] | select(.name == $expected)] as $matches |
-			if ($matches | length) != 1 then
-				error("expected exactly one dependency named \($expected)")
-			elif ($matches[0] | (has("version") or has("match"))) then
-				error("dependency named \($expected) must be unversioned and have no match field")
-			else
-				true
-			end
-		end
-	' >/dev/null
+	jq -e --arg mode 'package-dependency' --arg expected "$expected" -f "$apk_validator" >/dev/null
 }
 
 require_single_payload_file() {
@@ -117,37 +96,7 @@ require_single_payload_file() {
 	' >/dev/null
 }
 
-kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec '
-	def schema_dependency:
-		if type != "object" then false
-		elif (.name | type) != "string" then false
-		elif has("version") and (.version | type) != "string" then false
-		elif has("match") and (.match | type) != "number" then false
-		else true
-		end;
-	.info.depends as $depends |
-	if ($depends | type) != "array" then
-		error("malformed kmod dependencies: expected a dependency array")
-	elif (all($depends[]; schema_dependency) | not) then
-		error("malformed kmod dependencies: expected schema_dependency objects")
-	else
-		[$depends[] | select(.name == "kernel")]
-	end |
-	if length != 1 then
-		error("expected exactly one kernel dependency object")
-	else
-		.[0] as $kernel_dependency |
-		if ($kernel_dependency | has("match")) then
-			error("kernel dependency must use equality without a match field")
-		elif ($kernel_dependency.version | type) != "string" then
-			error("kernel dependency is missing a string version")
-		elif ($kernel_dependency.version | test("^[0-9]+\\.[0-9]+\\.[0-9]+~[0-9a-f]{32}-r1$") | not) then
-			error("kernel dependency version has an unexpected format")
-		else
-			$kernel_dependency.version | capture("^(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
-		end
-	end
-')"
+kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec --arg mode 'kernel' --arg expected '' -f "$apk_validator")"
 kernel="$(printf '%s\n' "$kernel_tuple" | jq -er '.kernel | select(type == "string")')"
 vermagic="$(printf '%s\n' "$kernel_tuple" | jq -er '.vermagic | select(type == "string")')"
 test "$kernel" = '6.12.94'

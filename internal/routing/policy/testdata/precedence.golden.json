@@ -1,0 +1,40 @@
+{
+  "evaluation_time": "1970-01-01T00:01:40Z",
+  "entries": [
+    {
+      "id": "direct",
+      "pattern": "login.example.com",
+      "kind": "domain",
+      "match": "suffix",
+      "route": "direct",
+      "scope": {
+        "type": "global"
+      },
+      "origin": "curated-direct"
+    },
+    {
+      "id": "vpn",
+      "pattern": "xn--bcher-kva.example",
+      "kind": "domain",
+      "match": "exact",
+      "route": "vpn",
+      "scope": {
+        "type": "global"
+      },
+      "origin": "manual",
+      "sequence": 1
+    }
+  ],
+  "server_routes": [
+    {
+      "server_id": "de-1",
+      "mark": 33554432,
+      "table": 10002
+    },
+    {
+      "server_id": "nl-1",
+      "mark": 16777216,
+      "table": 10001
+    }
+  ]
+}

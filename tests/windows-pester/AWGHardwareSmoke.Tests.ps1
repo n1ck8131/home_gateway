@@ -71,6 +71,7 @@ $script:NewFakeAwgTransport = {
     $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
     $pwshForCmd = $script:Pwsh.Replace('%', '%%')
     $pwshForShell = $script:Pwsh.Replace('\', '\\').Replace('"', '\"').Replace('$', '\$').Replace('`', '\`')
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     @'
 begin {
 }
@@ -106,11 +107,13 @@ end {
 exit /b %ERRORLEVEL%
 "@ | Set-Content -LiteralPath (Join-Path $Directory 'ssh.cmd') -Encoding ASCII
     } else {
-        @"
-#!/bin/sh
-exec "$pwshForShell" -NoProfile -ExecutionPolicy Bypass -File "`$(dirname "`$0")/ssh.ps1" "`$@"
-"@ | Set-Content -LiteralPath (Join-Path $Directory 'ssh') -Encoding UTF8
-        chmod +x (Join-Path $Directory 'ssh')
+        $sshPath = Join-Path $Directory 'ssh'
+        $sshShim = @(
+            '#!/bin/sh'
+            'exec "' + $pwshForShell + '" -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/ssh.ps1" "$@"'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText($sshPath, $sshShim + "`n", $utf8NoBom)
+        chmod +x $sshPath
     }
     @'
 Add-Content -LiteralPath $env:AWG_FAKE_LOG -Value ('SCP' + [char]31 + ($args -join [char]31))
@@ -124,11 +127,13 @@ exit 0
 exit /b %ERRORLEVEL%
 "@ | Set-Content -LiteralPath (Join-Path $Directory 'scp.cmd') -Encoding ASCII
     } else {
-        @"
-#!/bin/sh
-exec "$pwshForShell" -NoProfile -ExecutionPolicy Bypass -File "`$(dirname "`$0")/scp.ps1" "`$@"
-"@ | Set-Content -LiteralPath (Join-Path $Directory 'scp') -Encoding UTF8
-        chmod +x (Join-Path $Directory 'scp')
+        $scpPath = Join-Path $Directory 'scp'
+        $scpShim = @(
+            '#!/bin/sh'
+            'exec "' + $pwshForShell + '" -NoProfile -ExecutionPolicy Bypass -File "$(dirname "$0")/scp.ps1" "$@"'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText($scpPath, $scpShim + "`n", $utf8NoBom)
+        chmod +x $scpPath
     }
 }
 

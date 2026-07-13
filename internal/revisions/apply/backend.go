@@ -316,6 +316,49 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 	return nil
 }
 
+func (runtime LinuxRuntime) Reconcile(ctx context.Context, revision string) error {
+	if err := runtime.validateConfiguration(); err != nil {
+		return err
+	}
+	directory, err := runtime.revisionDirectory(revision)
+	if err != nil {
+		return err
+	}
+	candidate := Candidate{RevisionID: revision}
+	for name, target := range map[string]*[]byte{
+		nftArtifactName:   &candidate.NFT,
+		dnsArtifactName:   &candidate.DNS,
+		routeArtifactName: &candidate.Routes,
+	} {
+		data, err := readRegularFile(filepath.Join(directory, name))
+		if err != nil {
+			return fmt.Errorf("read active revision artifact %s: %w", name, err)
+		}
+		*target = data
+	}
+	active := filepath.Join(runtime.Root, "active")
+	if _, err := os.Lstat(active); err == nil {
+		if err := verifyArtifacts(active, candidateArtifacts(candidate)); err != nil {
+			return fmt.Errorf("active ownership metadata drift: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect active ownership metadata: %w", err)
+	}
+	if err := runtime.Validate(ctx, candidate); err != nil {
+		return fmt.Errorf("validate active revision: %w", err)
+	}
+	if err := runtime.Activate(ctx, candidate); err != nil {
+		return fmt.Errorf("activate active revision: %w", err)
+	}
+	if err := runtime.Reload(ctx); err != nil {
+		return fmt.Errorf("reload active revision: %w", err)
+	}
+	if err := runtime.PostCheck(ctx); err != nil {
+		return fmt.Errorf("post-check active revision: %w", err)
+	}
+	return nil
+}
+
 func containsTokenSequence(data []byte, expected []string) bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)

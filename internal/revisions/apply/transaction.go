@@ -22,6 +22,7 @@ type Runtime interface {
 	Activate(context.Context, Candidate) error
 	Reload(context.Context) error
 	PostCheck(context.Context) error
+	Reconcile(context.Context, string) error
 	Restore(context.Context, string) error
 }
 
@@ -188,12 +189,18 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	if journal.State != StatePending {
+	if journal.State == StatePending {
+		err = tx.restore(ctx, journal, "boot/crash recovery")
+		tx.cancelWatchdog()
+		return err
+	}
+	if journal.ActiveRevision == "" {
 		return nil
 	}
-	err = tx.restore(ctx, journal, "boot/crash recovery")
-	tx.cancelWatchdog()
-	return err
+	if err := tx.Runtime.Reconcile(ctx, journal.ActiveRevision); err != nil {
+		return fmt.Errorf("reconcile active revision %q: %w", journal.ActiveRevision, err)
+	}
+	return nil
 }
 
 func (tx *Transaction) Expire(ctx context.Context) (resultErr error) {

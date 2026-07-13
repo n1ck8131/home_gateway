@@ -68,9 +68,10 @@ func (watchdog *fakeWatchdog) Arm(_ time.Time, action func()) (func(), error) {
 }
 
 type fakeRuntime struct {
-	fail         string
-	calls        []string
-	restoreFails bool
+	fail              string
+	calls             []string
+	reconcileRevision string
+	restoreFails      bool
 }
 
 func (runtime *fakeRuntime) call(name string) error {
@@ -90,12 +91,78 @@ func (runtime *fakeRuntime) Activate(context.Context, Candidate) error {
 }
 func (runtime *fakeRuntime) Reload(context.Context) error    { return runtime.call("reload") }
 func (runtime *fakeRuntime) PostCheck(context.Context) error { return runtime.call("post-check") }
+func (runtime *fakeRuntime) Reconcile(_ context.Context, revision string) error {
+	runtime.reconcileRevision = revision
+	return runtime.call("reconcile")
+}
 func (runtime *fakeRuntime) Restore(context.Context, string) error {
 	runtime.calls = append(runtime.calls, "restore")
 	if runtime.restoreFails {
 		return errors.New("restore failed")
 	}
 	return nil
+}
+
+func TestRecoverReconcilesPersistedActiveRevisionAfterBoot(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name    string
+		journal Journal
+	}{
+		{
+			name: "committed",
+			journal: Journal{
+				State:                 StateCommitted,
+				ActiveRevision:        "active-revision",
+				LastKnownGoodRevision: "active-revision",
+			},
+		},
+		{
+			name: "rolled back",
+			journal: Journal{
+				State:                 StateRolledBack,
+				ActiveRevision:        "active-revision",
+				LastKnownGoodRevision: "active-revision",
+				RollbackResult:        "explicit rollback: restored",
+			},
+		},
+		{
+			name: "degraded",
+			journal: Journal{
+				State:                 StateDegraded,
+				ActiveRevision:        "active-revision",
+				LastKnownGoodRevision: "active-revision",
+				RollbackResult:        "boot/crash recovery: failed",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &fakeRuntime{}
+			store := &memoryJournal{value: test.journal}
+
+			if err := newTransaction(runtime, store, now).Recover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if runtime.reconcileRevision != "active-revision" {
+				t.Fatalf("reconciled revision = %q", runtime.reconcileRevision)
+			}
+			if strings.Join(runtime.calls, ",") != "reconcile" {
+				t.Fatalf("runtime calls = %v", runtime.calls)
+			}
+		})
+	}
+}
+
+func TestRecoverLeavesIdleRuntimeUntouched(t *testing.T) {
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateIdle}}
+
+	if err := newTransaction(runtime, store, time.Unix(100, 0).UTC()).Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.calls) != 0 {
+		t.Fatalf("runtime calls = %v", runtime.calls)
+	}
 }
 
 func newTransaction(runtime *fakeRuntime, store *memoryJournal, now time.Time) *Transaction {

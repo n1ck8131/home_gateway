@@ -217,6 +217,87 @@ func TestLinuxRuntimeReconcilesPolicyRulesWithoutUnsupportedReplace(t *testing.T
 	}
 }
 
+func TestLinuxRuntimeReconcilesActiveRevisionAfterReboot(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{runtime.FirewallIncludePath, runtime.DNSIncludePath} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runner.calls = nil
+	runner.outputs = map[string][]byte{
+		"nft list table inet routerd": []byte("table inet routerd {\n chain prerouting { }\n}\n"),
+	}
+	runner.beforeRun = func(program string, args []string) error {
+		if program != "ip" || len(args) < 3 {
+			return nil
+		}
+		family := args[0]
+		switch {
+		case args[1] == "route" && args[2] == "replace":
+			runner.outputs[commandKey("ip", []string{family, "route", "show", "table", "10001"})] = []byte("blackhole default\n")
+		case args[1] == "rule" && args[2] == "add":
+			runner.outputs[commandKey("ip", []string{family, "rule", "show"})] = []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n")
+		}
+		return nil
+	}
+
+	if err := runtime.Reconcile(context.Background(), candidate.RevisionID); err != nil {
+		t.Fatal(err)
+	}
+	assertFileEquals(t, runtime.FirewallIncludePath, candidate.NFT)
+	assertFileEquals(t, runtime.DNSIncludePath, candidate.DNS)
+
+	mutations := 0
+	for _, call := range runner.calls {
+		if call.program == "ip" && len(call.args) > 2 &&
+			(call.args[1] == "route" && call.args[2] == "replace" || call.args[1] == "rule" && call.args[2] == "add") {
+			mutations++
+		}
+	}
+	if mutations != 4 {
+		t.Fatalf("kernel reconciliation mutations = %d, calls = %#v", mutations, runner.calls)
+	}
+}
+
+func TestLinuxRuntimeReconcileRejectsActiveOwnershipMetadataDrift(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	activeRoutes := filepath.Join(runtime.Root, "active", routeArtifactName)
+	if err := os.WriteFile(activeRoutes, []byte("{\"version\":1,\"commands\":[]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+
+	err := runtime.Reconcile(context.Background(), candidate.RevisionID)
+	if err == nil || !strings.Contains(err.Error(), "active ownership metadata drift") {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner called after ownership metadata drift: %#v", runner.calls)
+	}
+}
+
 func TestLinuxRuntimeRejectsUnownedPolicyPriorityCollision(t *testing.T) {
 	runtime, runner := newTestLinuxRuntime(t)
 	candidate := testCandidate("revision-1")

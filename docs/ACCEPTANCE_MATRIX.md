@@ -13,6 +13,22 @@ Each requirement has one owning phase and one evidence type.
 
 P0 is complete for its software scope. The hardware gates remain open and no P0 claim is made for hardware success or 300 Mbps throughput.
 
+## P1 deterministic policy core
+
+| Requirement | Owner phase | Evidence type |
+|---|---|---|
+| Domain, IDNA, public-suffix and CIDR normalization | P1 | automated |
+| Duplicate and subsumed entries normalize deterministically | P1 | automated |
+| Protected, manual, curated and external precedence pairs | P1 | automated |
+| Most-specific domain and CIDR matching within one tier | P1 | automated |
+| One logical device supports multiple network identities | P1 | automated |
+| Protected work devices cannot select `always-vpn` | P1 | automated |
+| Expired entries are excluded using an explicit evaluation time | P1 | automated |
+| Shared-IP direct/VPN conflict resolves direct and remains visible | P1 | automated |
+| Per-server marks and routing selections are stable and unique | P1 | automated |
+| Route explanation includes ordered winning and losing evidence | P1 | automated |
+| Repeated policy evaluation produces byte-stable output | P1 | automated |
+
 ## §30.1 Routing
 
 | Requirement | Owner phase | Evidence type |

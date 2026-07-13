@@ -10,10 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/vsevo/home-gateway/internal/routing/iprule"
+	routingnft "github.com/vsevo/home-gateway/internal/routing/nft"
 	"github.com/vsevo/home-gateway/internal/system/linux"
+	"github.com/vsevo/home-gateway/pkg/contracts"
 )
 
 const (
@@ -43,6 +46,314 @@ type routeReconciliation struct {
 	addRules      [][]string
 	deleteRules   [][]string
 	deleteRoutes  [][]string
+}
+
+type nftTableInventory struct {
+	Nftables []struct {
+		Table *struct {
+			Family  string `json:"family"`
+			Name    string `json:"name"`
+			Comment string `json:"comment"`
+		} `json:"table,omitempty"`
+	} `json:"nftables"`
+}
+
+func (runtime LinuxRuntime) Preflight(ctx context.Context, revisions []string) error {
+	if err := runtime.validateConfiguration(); err != nil {
+		return err
+	}
+	candidates, err := runtime.readOwnedCandidates(revisions)
+	if err != nil {
+		return err
+	}
+	if err := runtime.verifyActiveOwnership(candidates); err != nil {
+		return err
+	}
+	if err := runtime.verifyManagedIncludeOwnership(candidates); err != nil {
+		return err
+	}
+	if err := runtime.verifyNFTTableOwnership(ctx, len(candidates) != 0); err != nil {
+		return err
+	}
+	return runtime.verifyReservedRoutingOwnership(ctx, candidates)
+}
+
+func (runtime LinuxRuntime) readOwnedCandidates(revisions []string) ([]Candidate, error) {
+	candidates := make([]Candidate, 0, len(revisions))
+	seen := make(map[string]struct{}, len(revisions))
+	for _, revision := range revisions {
+		if _, exists := seen[revision]; exists {
+			continue
+		}
+		seen[revision] = struct{}{}
+		directory, err := runtime.revisionDirectory(revision)
+		if err != nil {
+			return nil, err
+		}
+		candidate := Candidate{RevisionID: revision}
+		for name, target := range map[string]*[]byte{
+			nftArtifactName:   &candidate.NFT,
+			dnsArtifactName:   &candidate.DNS,
+			routeArtifactName: &candidate.Routes,
+		} {
+			data, err := readRegularFile(filepath.Join(directory, name))
+			if err != nil {
+				return nil, fmt.Errorf("read owned revision %q artifact %s: %w", revision, name, err)
+			}
+			*target = data
+		}
+		if _, err := iprule.Parse(candidate.Routes); err != nil {
+			return nil, fmt.Errorf("parse owned revision %q routes: %w", revision, err)
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, nil
+}
+
+func (runtime LinuxRuntime) verifyActiveOwnership(candidates []Candidate) error {
+	active := filepath.Join(runtime.Root, "active")
+	if _, err := os.Lstat(active); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect active ownership metadata: %w", err)
+	}
+	if err := requireDirectory(active); err != nil {
+		return fmt.Errorf("active ownership metadata: %w", err)
+	}
+	for _, candidate := range candidates {
+		if err := verifyArtifacts(active, candidateArtifacts(candidate)); err == nil {
+			return nil
+		}
+	}
+	if len(candidates) == 0 {
+		return errors.New("unowned active routerd metadata already exists")
+	}
+	return errors.New("active ownership metadata differs from every journal-owned revision")
+}
+
+func (runtime LinuxRuntime) verifyManagedIncludeOwnership(candidates []Candidate) error {
+	for _, include := range []struct {
+		label string
+		path  string
+		data  func(Candidate) []byte
+	}{
+		{label: "firewall", path: runtime.FirewallIncludePath, data: func(candidate Candidate) []byte { return candidate.NFT }},
+		{label: "dns", path: runtime.DNSIncludePath, data: func(candidate Candidate) []byte { return candidate.DNS }},
+	} {
+		installed, present, err := readOptionalRegularFile(include.path)
+		if err != nil {
+			return fmt.Errorf("inspect %s include ownership: %w", include.label, err)
+		}
+		if !present {
+			continue
+		}
+		for _, candidate := range candidates {
+			if bytes.Equal(installed, include.data(candidate)) {
+				present = false
+				break
+			}
+		}
+		if present {
+			return fmt.Errorf("%s include is not owned by a journal revision", include.label)
+		}
+	}
+	return nil
+}
+
+func (runtime LinuxRuntime) verifyNFTTableOwnership(ctx context.Context, hasOwnedRevision bool) error {
+	result, err := runtime.Runner.Run(ctx, "nft", "-j", "list", "tables")
+	if err != nil {
+		return fmt.Errorf("inspect nft table inventory: %w", err)
+	}
+	tables, err := decodeNFTTableInventory(result.Stdout)
+	if err != nil {
+		return fmt.Errorf("decode nft table inventory: %w", err)
+	}
+	present := false
+	for _, item := range tables.Nftables {
+		if item.Table != nil && item.Table.Family == "inet" && item.Table.Name == routingnft.TableName {
+			present = true
+		}
+	}
+	if !present {
+		return nil
+	}
+	if !hasOwnedRevision {
+		return fmt.Errorf("nft table %q exists without a journal-owned revision", routingnft.TableName)
+	}
+	result, err = runtime.Runner.Run(ctx, "nft", "-j", "list", "table", "inet", routingnft.TableName)
+	if err != nil {
+		return fmt.Errorf("inspect owned nft table: %w", err)
+	}
+	table, err := decodeNFTTableInventory(result.Stdout)
+	if err != nil {
+		return fmt.Errorf("decode owned nft table: %w", err)
+	}
+	owned := 0
+	for _, item := range table.Nftables {
+		if item.Table == nil || item.Table.Family != "inet" || item.Table.Name != routingnft.TableName {
+			continue
+		}
+		owned++
+		if item.Table.Comment != routingnft.OwnershipComment {
+			return fmt.Errorf("nft table %q has an invalid ownership marker", routingnft.TableName)
+		}
+	}
+	if owned != 1 {
+		return fmt.Errorf("nft table %q ownership inventory is incomplete", routingnft.TableName)
+	}
+	return nil
+}
+
+func decodeNFTTableInventory(data []byte) (nftTableInventory, error) {
+	var inventory nftTableInventory
+	if err := json.Unmarshal(data, &inventory); err != nil {
+		return nftTableInventory{}, err
+	}
+	if inventory.Nftables == nil {
+		return nftTableInventory{}, errors.New("nftables array is required")
+	}
+	return inventory, nil
+}
+
+func (runtime LinuxRuntime) verifyReservedRoutingOwnership(ctx context.Context, candidates []Candidate) error {
+	allowedRoutes := make(map[string][][]string)
+	allowedRules := make(map[string][][]string)
+	for _, candidate := range candidates {
+		artifact, err := iprule.Parse(candidate.Routes)
+		if err != nil {
+			return err
+		}
+		for _, command := range artifact.Commands {
+			target := allowedRoutes
+			if command[2] == "rule" {
+				target = allowedRules
+			}
+			key := routeStateKey(command)
+			target[key] = append(target[key], command)
+		}
+	}
+
+	for _, family := range []string{"-4", "-6"} {
+		rules, err := runtime.Runner.Run(ctx, "ip", family, "rule", "show")
+		if err != nil {
+			return fmt.Errorf("inspect policy rules for %s: %w", family, err)
+		}
+		if err := verifyRuleOwnership(family, rules.Stdout, allowedRules); err != nil {
+			return err
+		}
+		routes, err := runtime.Runner.Run(ctx, "ip", family, "route", "show", "table", "all")
+		if err != nil {
+			return fmt.Errorf("inspect route inventory for %s: %w", family, err)
+		}
+		if err := verifyRouteOwnership(family, routes.Stdout, allowedRoutes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyRuleOwnership(family string, data []byte, allowed map[string][][]string) error {
+	seen := make(map[string]int)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		priority := strings.TrimSuffix(fields[0], ":")
+		priorityNumber, priorityErr := strconv.ParseUint(priority, 10, 32)
+		reservedPriority := priorityErr == nil && isReservedRoutingTable(uint32(priorityNumber))
+		mark, reservedMark := routerdMark(fields)
+		if !reservedPriority && !reservedMark {
+			continue
+		}
+		key := family + "\x00" + priority
+		seen[key]++
+		matched := seen[key] == 1
+		if matched {
+			matched = false
+			for _, command := range allowed[key] {
+				if ruleLineMatches(fields, command) {
+					matched = true
+					break
+				}
+			}
+		}
+		if matched {
+			continue
+		}
+		if reservedPriority {
+			return fmt.Errorf("policy priority %s for %s is unowned, duplicated or drifted", priority, family)
+		}
+		return fmt.Errorf("policy mark %s for %s is unowned or drifted", mark, family)
+	}
+	return nil
+}
+
+func routerdMark(fields []string) (string, bool) {
+	for index, field := range fields {
+		if field != "fwmark" || index+1 >= len(fields) {
+			continue
+		}
+		token := fields[index+1]
+		parts := strings.Split(token, "/")
+		if len(parts) > 2 {
+			return token, false
+		}
+		value, err := strconv.ParseUint(parts[0], 0, 32)
+		if err != nil {
+			return token, false
+		}
+		mask := uint64(^uint32(0))
+		if len(parts) == 2 {
+			mask, err = strconv.ParseUint(parts[1], 0, 32)
+			if err != nil {
+				return token, false
+			}
+		}
+		return token, value&mask&uint64(contracts.RouterdMarkMask) != 0
+	}
+	return "", false
+}
+
+func verifyRouteOwnership(family string, data []byte, allowed map[string][][]string) error {
+	routes := make(map[string][]string)
+	tables := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		for index, field := range fields {
+			if field != "table" || index+1 >= len(fields) {
+				continue
+			}
+			table := fields[index+1]
+			number, err := strconv.ParseUint(table, 10, 32)
+			if err != nil || !isReservedRoutingTable(uint32(number)) {
+				continue
+			}
+			key := family + "\x00" + table
+			routes[key] = append(routes[key], strings.Join(fields, " "))
+			tables[key] = table
+			break
+		}
+	}
+	for key, lines := range routes {
+		current := []byte(strings.Join(lines, "\n") + "\n")
+		matched := false
+		for _, command := range allowed[key] {
+			if routeOutputMatches(current, command[6:]) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("routing table %s for %s contains an unowned or drifted route", tables[key], family)
+		}
+	}
+	return nil
+}
+
+func isReservedRoutingTable(table uint32) bool {
+	return table > contracts.RouterdRoutingTableBase && table <= contracts.RouterdRoutingTableBase+255
 }
 
 func (runtime LinuxRuntime) Stage(_ context.Context, candidate Candidate) error {
@@ -269,13 +580,16 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 	if err := runtime.validateConfiguration(); err != nil {
 		return err
 	}
-	nftResult, err := runtime.Runner.Run(ctx, "nft", "list", "table", "inet", "routerd")
+	nftResult, err := runtime.Runner.Run(ctx, "nft", "list", "table", "inet", routingnft.TableName)
 	if err != nil {
 		return err
 	}
-	if !bytes.Contains(nftResult.Stdout, []byte("table inet routerd")) ||
+	if !bytes.Contains(nftResult.Stdout, []byte("table inet "+routingnft.TableName)) ||
 		!bytes.Contains(nftResult.Stdout, []byte("chain prerouting")) {
 		return errors.New("routerd nft table or prerouting chain is missing")
+	}
+	if !bytes.Contains(nftResult.Stdout, []byte(fmt.Sprintf("comment %q", routingnft.OwnershipComment))) {
+		return errors.New("routerd nft table ownership marker is missing or invalid")
 	}
 	artifact, err := runtime.readActiveRouteArtifact()
 	if err != nil {

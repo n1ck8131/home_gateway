@@ -68,10 +68,11 @@ func (watchdog *fakeWatchdog) Arm(_ time.Time, action func()) (func(), error) {
 }
 
 type fakeRuntime struct {
-	fail              string
-	calls             []string
-	reconcileRevision string
-	restoreFails      bool
+	fail               string
+	calls              []string
+	preflightRevisions []string
+	reconcileRevision  string
+	restoreFails       bool
 }
 
 func (runtime *fakeRuntime) call(name string) error {
@@ -82,6 +83,10 @@ func (runtime *fakeRuntime) call(name string) error {
 	return nil
 }
 func (runtime *fakeRuntime) Stage(context.Context, Candidate) error { return runtime.call("stage") }
+func (runtime *fakeRuntime) Preflight(_ context.Context, revisions []string) error {
+	runtime.preflightRevisions = append([]string(nil), revisions...)
+	return runtime.call("preflight")
+}
 func (runtime *fakeRuntime) Validate(context.Context, Candidate) error {
 	return runtime.call("validate")
 }
@@ -146,7 +151,10 @@ func TestRecoverReconcilesPersistedActiveRevisionAfterBoot(t *testing.T) {
 			if runtime.reconcileRevision != "active-revision" {
 				t.Fatalf("reconciled revision = %q", runtime.reconcileRevision)
 			}
-			if strings.Join(runtime.calls, ",") != "reconcile" {
+			if strings.Join(runtime.preflightRevisions, ",") != "active-revision" {
+				t.Fatalf("preflight revisions = %v", runtime.preflightRevisions)
+			}
+			if strings.Join(runtime.calls, ",") != "preflight,reconcile" {
 				t.Fatalf("runtime calls = %v", runtime.calls)
 			}
 		})
@@ -160,8 +168,26 @@ func TestRecoverLeavesIdleRuntimeUntouched(t *testing.T) {
 	if err := newTransaction(runtime, store, time.Unix(100, 0).UTC()).Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(runtime.calls) != 0 {
+	if strings.Join(runtime.calls, ",") != "preflight" || len(runtime.preflightRevisions) != 0 {
 		t.Fatalf("runtime calls = %v", runtime.calls)
+	}
+}
+
+func TestRecoverRejectsOwnershipCollisionBeforeMutation(t *testing.T) {
+	runtime := &fakeRuntime{fail: "preflight"}
+	store := &memoryJournal{value: Journal{
+		State:                 StatePending,
+		ActiveRevision:        "lkg",
+		LastKnownGoodRevision: "lkg",
+		PendingRevision:       "candidate",
+	}}
+
+	err := newTransaction(runtime, store, time.Unix(100, 0).UTC()).Recover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "preflight") {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	if strings.Join(runtime.preflightRevisions, ",") != "candidate,lkg" || strings.Join(runtime.calls, ",") != "preflight" {
+		t.Fatalf("runtime calls = %v, preflight revisions = %v", runtime.calls, runtime.preflightRevisions)
 	}
 }
 
@@ -178,7 +204,7 @@ func newTransaction(runtime *fakeRuntime, store *memoryJournal, now time.Time) *
 
 func TestApplyCompensatesEveryMutationBoundary(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
-	for _, boundary := range []string{"stage", "validate", "snapshot", "activate", "reload", "post-check"} {
+	for _, boundary := range []string{"preflight", "stage", "validate", "snapshot", "activate", "reload", "post-check"} {
 		t.Run(boundary, func(t *testing.T) {
 			runtime := &fakeRuntime{fail: boundary}
 			store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg", LastKnownGoodRevision: "lkg"}}
@@ -265,7 +291,7 @@ func TestApplyArmsWatchdogBeforeActivationAndCancelsItOnFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected activation failure")
 	}
-	wantCalls := []string{"stage", "validate", "snapshot", "watchdog", "activate", "restore"}
+	wantCalls := []string{"preflight", "stage", "validate", "snapshot", "watchdog", "activate", "restore"}
 	if strings.Join(runtime.calls, ",") != strings.Join(wantCalls, ",") {
 		t.Fatalf("calls = %v, want %v", runtime.calls, wantCalls)
 	}

@@ -16,6 +16,7 @@ type Candidate struct {
 }
 
 type Runtime interface {
+	Preflight(context.Context, []string) error
 	Stage(context.Context, Candidate) error
 	Validate(context.Context, Candidate) error
 	Snapshot(context.Context, string) error
@@ -71,6 +72,9 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultEr
 	}
 	if current.State == StatePending {
 		return errors.New("another revision is pending confirmation")
+	}
+	if err := tx.Runtime.Preflight(ctx, ownedRevisions(current)); err != nil {
+		return fmt.Errorf("preflight: %w", err)
 	}
 	if err := tx.Runtime.Stage(ctx, candidate); err != nil {
 		return fmt.Errorf("stage: %w", err)
@@ -169,6 +173,9 @@ func (tx *Transaction) Rollback(ctx context.Context) (resultErr error) {
 	if journal.State != StatePending {
 		return errors.New("no revision is pending confirmation")
 	}
+	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
+		return fmt.Errorf("preflight: %w", err)
+	}
 	err = tx.restore(ctx, journal, "explicit rollback")
 	tx.cancelWatchdog()
 	return err
@@ -188,6 +195,9 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 	journal, err := tx.Journal.Load()
 	if err != nil {
 		return err
+	}
+	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
+		return fmt.Errorf("preflight: %w", err)
 	}
 	if journal.State == StatePending {
 		err = tx.restore(ctx, journal, "boot/crash recovery")
@@ -228,9 +238,32 @@ func (tx *Transaction) Expire(ctx context.Context) (resultErr error) {
 	if clock.Now().Before(journal.PendingDeadline) {
 		return nil
 	}
+	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
+		return fmt.Errorf("preflight: %w", err)
+	}
 	err = tx.restore(ctx, journal, "watchdog expiry")
 	tx.cancelWatchdog()
 	return err
+}
+
+func ownedRevisions(journal Journal) []string {
+	values := []string{journal.ActiveRevision}
+	if journal.State == StatePending {
+		values = []string{journal.PendingRevision, journal.ActiveRevision, journal.LastKnownGoodRevision}
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, revision := range values {
+		if revision == "" {
+			continue
+		}
+		if _, exists := seen[revision]; exists {
+			continue
+		}
+		seen[revision] = struct{}{}
+		result = append(result, revision)
+	}
+	return result
 }
 
 func (tx *Transaction) acquire(ctx context.Context) (func() error, error) {

@@ -58,7 +58,7 @@ func TestLinuxRuntimePostCheckRequiresExpectedNFTPolicyRulesAndRoutes(t *testing
 		t.Fatal(err)
 	}
 	runner.outputs = map[string][]byte{
-		"nft list table inet routerd":  []byte("table inet routerd {\n chain prerouting { }\n}\n"),
+		"nft list table inet routerd":  []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n"),
 		"ip -4 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -6 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -4 route show table 10001": []byte("blackhole default\n"),
@@ -68,9 +68,100 @@ func TestLinuxRuntimePostCheckRequiresExpectedNFTPolicyRulesAndRoutes(t *testing
 		t.Fatal(err)
 	}
 
+	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"foreign\"\n chain prerouting { }\n}\n")
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ownership marker") {
+		t.Fatalf("PostCheck() error = %v, want invalid ownership marker", err)
+	}
+	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n")
+
 	runner.outputs["ip -6 route show table 10001"] = nil
 	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "route table 10001") {
 		t.Fatalf("PostCheck() error = %v, want missing route", err)
+	}
+}
+
+func TestLinuxRuntimePreflightRejectsUnownedStartupResources(t *testing.T) {
+	tests := []struct {
+		name   string
+		output map[string][]byte
+		want   string
+	}{
+		{
+			name: "nft table",
+			output: map[string][]byte{
+				"nft -j list tables": []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd"}}]}`),
+			},
+			want: "nft table",
+		},
+		{
+			name: "reserved priority",
+			output: map[string][]byte{
+				"ip -4 rule show": []byte("10002: from all lookup main\n"),
+			},
+			want: "priority 10002",
+		},
+		{
+			name: "reserved mark",
+			output: map[string][]byte{
+				"ip -6 rule show": []byte("5000: from all fwmark 0x2000000/0xff000000 lookup 200\n"),
+			},
+			want: "mark 0x2000000/0xff000000",
+		},
+		{
+			name: "reserved route table",
+			output: map[string][]byte{
+				"ip -4 route show table all": []byte("default via 192.0.2.1 dev wan0 table 10003\n"),
+			},
+			want: "routing table 10003",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, runner := newTestLinuxRuntime(t)
+			for command, output := range test.output {
+				runner.outputs[command] = output
+			}
+
+			err := runtime.Preflight(context.Background(), nil)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Preflight() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLinuxRuntimePreflightAcceptsOwnedActiveRevision(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtime.FirewallIncludePath, candidate.NFT, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtime.DNSIncludePath, candidate.DNS, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputs = expectedStartupInventoryOutputs()
+
+	if err := runtime.Preflight(context.Background(), []string{candidate.RevisionID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinuxRuntimePreflightRejectsSpoofedOwnershipMarker(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputs["nft -j list tables"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd"}}]}`)
+	runner.outputs["nft -j list table inet routerd"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd","comment":"foreign"}}]}`)
+
+	err := runtime.Preflight(context.Background(), []string{candidate.RevisionID})
+	if err == nil || !strings.Contains(err.Error(), "ownership marker") {
+		t.Fatalf("Preflight() error = %v", err)
 	}
 }
 
@@ -237,7 +328,7 @@ func TestLinuxRuntimeReconcilesActiveRevisionAfterReboot(t *testing.T) {
 
 	runner.calls = nil
 	runner.outputs = map[string][]byte{
-		"nft list table inet routerd": []byte("table inet routerd {\n chain prerouting { }\n}\n"),
+		"nft list table inet routerd": []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n"),
 	}
 	runner.beforeRun = func(program string, args []string) error {
 		if program != "ip" || len(args) < 3 {
@@ -437,7 +528,12 @@ func newTestLinuxRuntime(t *testing.T) (LinuxRuntime, *recordingRunner) {
 			t.Fatal(err)
 		}
 	}
-	runner := &recordingRunner{fw4Output: []byte("table inet fw4 {}\n")}
+	runner := &recordingRunner{
+		fw4Output: []byte("table inet fw4 {}\n"),
+		outputs: map[string][]byte{
+			"nft -j list tables": []byte(`{"nftables":[]}`),
+		},
+	}
 	return LinuxRuntime{
 		Root:                filepath.Join(base, "runtime"),
 		FirewallIncludePath: firewallPath,
@@ -449,7 +545,7 @@ func newTestLinuxRuntime(t *testing.T) (LinuxRuntime, *recordingRunner) {
 func testCandidate(revision string) Candidate {
 	return Candidate{
 		RevisionID: revision,
-		NFT:        []byte("table inet routerd {}\n"),
+		NFT:        []byte("table inet routerd { comment \"managed-by-routerd\"; }\n"),
 		DNS:        []byte("# routerd dnsmasq fragment\n"),
 		Routes: []byte(`{
   "version": 1,
@@ -470,6 +566,17 @@ func expectedKernelRouteOutputs() map[string][]byte {
 		"ip -6 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -4 route show table 10001": []byte("blackhole default\n"),
 		"ip -6 route show table 10001": []byte("blackhole default\n"),
+	}
+}
+
+func expectedStartupInventoryOutputs() map[string][]byte {
+	return map[string][]byte{
+		"nft -j list tables":             []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd"}}]}`),
+		"nft -j list table inet routerd": []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd","comment":"managed-by-routerd"}}]}`),
+		"ip -4 rule show":                []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
+		"ip -6 rule show":                []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
+		"ip -4 route show table all":     []byte("blackhole default table 10001\n"),
+		"ip -6 route show table all":     []byte("blackhole default table 10001\n"),
 	}
 }
 

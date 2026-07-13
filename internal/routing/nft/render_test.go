@@ -21,6 +21,7 @@ func TestRenderOwnedTableMarksParityAndProtocolIndependentRules(t *testing.T) {
 	text := string(got)
 	for _, want := range []string{
 		"table inet routerd",
+		`comment "managed-by-routerd"`,
 		"ip daddr { 8.8.8.8 }",
 		"ip6 daddr { 2606:4700::/32 }",
 		"ct mark & 0xff000000",

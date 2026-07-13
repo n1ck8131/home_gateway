@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	TableName  = "routerd"
-	SetTimeout = 3600
+	TableName        = "routerd"
+	OwnershipComment = "managed-by-routerd"
+	SetTimeout       = 3600
 )
 
 type Inventory struct {
@@ -41,6 +42,7 @@ func Render(plan contracts.PolicyPlan, inventory Inventory) ([]byte, error) {
 
 	var out strings.Builder
 	out.WriteString("table inet routerd {\n")
+	fmt.Fprintf(&out, "  comment %q;\n", OwnershipComment)
 	writeLocalSets(&out)
 	for _, group := range groups {
 		if group.kind == contracts.EntryKindDomain {

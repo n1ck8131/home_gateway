@@ -44,3 +44,13 @@ jobs:
             artifacts/awg-go-run2
           if-no-files-found: error
           retention-days: 7
+      - name: Verify clean worktree
+        shell: sh
+        run: |
+          set -eu
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [ -n "$status" ]; then
+            printf '%s\n' "$status"
+            exit 1
+          fi

@@ -48,7 +48,7 @@
 - Stage только explicit paths; не использовать `git add -A` в mixed worktree.
 - Не переписывать history и не применять destructive commands.
 - Субагент не делает push. Push выполняет controller после phase review.
-- Текущий remote: `git@github.com:n1ck8131/home_gateqay.git`.
+- Текущий remote: `git@github.com:n1ck8131/home_gateway.git`.
 
 ## Safety invariants
 

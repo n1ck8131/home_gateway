@@ -20,6 +20,17 @@ jobs:
         run: .\scripts\bootstrap-dev.ps1
       - shell: powershell
         run: .\scripts\dev.ps1 -Command verify
+      - name: Verify clean worktree
+        shell: pwsh
+        run: |
+          git diff --exit-code
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $status = git status --porcelain=v1 --untracked-files=all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($status) {
+            $status
+            throw "Validation mutated the worktree"
+          }
 
   linux:
     runs-on: ubuntu-24.04
@@ -40,3 +51,13 @@ jobs:
       - run: go test -race ./...
       - run: sudo apt-get update && sudo apt-get install --yes dnsmasq-base iproute2 jq nftables
       - run: sudo tests/network-ns/check-prereqs.sh
+      - name: Verify clean worktree
+        shell: sh
+        run: |
+          set -eu
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [ -n "$status" ]; then
+            printf '%s\n' "$status"
+            exit 1
+          fi

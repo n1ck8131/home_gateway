@@ -156,11 +156,24 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:Build | Should -Match 'aarch64_cortex-a53'
         $script:Build | Should -Match 'adbdump --format json'
         $script:Build | Should -Not -Match 'val\.LINUX_(VERSION|VERMAGIC)'
-        $script:Build | Should -Match 'expected exactly one kernel dependency'
-        $script:Build | Should -Match 'capture\("\^kernel='
+        $script:Build | Should -Match 'expected exactly one kernel dependency object'
+        $script:Build | Should -Match 'capture\("\^\(\?<kernel>'
         $script:Build | Should -Match '\(\?<kernel>'
         $script:Build | Should -Match '\(\?<vermagic>\[0-9a-f\]\{32\}\)'
         $script:Build | Should -Match 'require_single_payload_file'
+    }
+
+    It 'uses APK v3 schema_dependency object fields' {
+        $script:Build | Should -Match 'malformed package dependencies: expected a dependency array'
+        $script:Build | Should -Match 'malformed package dependencies: expected schema_dependency objects'
+        $script:Build | Should -Match 'malformed kmod dependencies: expected a dependency array'
+        $script:Build | Should -Match 'malformed kmod dependencies: expected schema_dependency objects'
+        $script:Build | Should -Match 'select\(\.name == \$expected\)'
+        $script:Build | Should -Match 'select\(\.name == "kernel"\)'
+        $script:Build | Should -Match '\.\[0\]\.version as \$version'
+        $script:Build | Should -Match 'has\("match"\) and \(\.match \| type\) != "number"'
+        $script:Build | Should -Not -Match 'select\(startswith\("kernel="\)\)'
+        $script:Build | Should -Not -Match 'all\(\$depends\[\]; type == "string"\)'
     }
 
     It 'returns exactly one SDK path and sends checksum diagnostics to stderr' {

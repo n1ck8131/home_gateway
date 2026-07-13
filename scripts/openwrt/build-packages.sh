@@ -71,10 +71,23 @@ require_apk_info_field() {
 require_single_dependency() {
 	expected="$1"
 	jq -e --arg expected "$expected" '
+		def schema_dependency:
+			if type != "object" then false
+			elif (.name | type) != "string" then false
+			elif has("version") and (.version | type) != "string" then false
+			elif has("match") and (.match | type) != "number" then false
+			else true
+			end;
 		.info.depends as $depends |
-		($depends | type) == "array" and
-		all($depends[]; type == "string") and
-		([$depends[] | select(. == $expected)] | length) == 1
+		if ($depends | type) != "array" then
+			error("malformed package dependencies: expected a dependency array")
+		elif (all($depends[]; schema_dependency) | not) then
+			error("malformed package dependencies: expected schema_dependency objects")
+		elif ([$depends[] | select(.name == $expected)] | length) != 1 then
+			error("expected exactly one dependency named \($expected)")
+		else
+			true
+		end
 	' >/dev/null
 }
 
@@ -100,16 +113,32 @@ require_single_payload_file() {
 }
 
 kernel_tuple="$(printf '%s\n' "$kmod_dump" | jq -ec '
+	def schema_dependency:
+		if type != "object" then false
+		elif (.name | type) != "string" then false
+		elif has("version") and (.version | type) != "string" then false
+		elif has("match") and (.match | type) != "number" then false
+		else true
+		end;
 	.info.depends as $depends |
-	if ($depends | type) != "array" or (all($depends[]; type == "string") | not) then
-		error("malformed kmod dependencies")
+	if ($depends | type) != "array" then
+		error("malformed kmod dependencies: expected a dependency array")
+	elif (all($depends[]; schema_dependency) | not) then
+		error("malformed kmod dependencies: expected schema_dependency objects")
 	else
-		[$depends[] | select(startswith("kernel="))]
+		[$depends[] | select(.name == "kernel")]
 	end |
 	if length != 1 then
-		error("expected exactly one kernel dependency")
+		error("expected exactly one kernel dependency object")
 	else
-		.[0] | capture("^kernel=(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
+		.[0].version as $version |
+		if ($version | type) != "string" then
+			error("kernel dependency is missing a string version")
+		elif ($version | test("^[0-9]+\\.[0-9]+\\.[0-9]+~[0-9a-f]{32}-r1$") | not) then
+			error("kernel dependency version has an unexpected format")
+		else
+			$version | capture("^(?<kernel>[0-9]+\\.[0-9]+\\.[0-9]+)~(?<vermagic>[0-9a-f]{32})-r1$")
+		end
 	end
 ')"
 kernel="$(printf '%s\n' "$kernel_tuple" | jq -er '.kernel | select(type == "string")')"

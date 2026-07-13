@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Smoke')]
+[CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Smoke')]
 param(
     [Parameter(Mandatory)]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$')]
@@ -82,7 +82,8 @@ function Invoke-RemoteScript {
     $priorEncoding = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $output = @(Get-Content -LiteralPath $remoteScript -Raw -Encoding UTF8 | & $sshCommand @connectionOptions $target sh -s -- @Arguments 2>&1)
+        $remoteArguments = @('sh', '-s', '--') + $Arguments
+        $output = @(Get-Content -LiteralPath $remoteScript -Raw -Encoding UTF8 | & $sshCommand @connectionOptions $target @remoteArguments 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
         [Console]::OutputEncoding = $priorEncoding
@@ -95,8 +96,17 @@ function Invoke-RemoteScript {
 
 function Write-RecoveryCommand {
     param([Parameter(Mandatory)][string]$Nonce)
-    $quotedKnownHosts = '"' + $knownHosts.Replace('"', '`"') + '"'
-    Write-Error -ErrorAction Continue "Router cleanup could not be confirmed. Run: & `"$PSCommandPath`" -RouterHost $RouterHost -KnownHostsFile $quotedKnownHosts -SshUser $SshUser -Recover -RecoveryToken $Nonce -Confirm:`$false"
+    $quotedScript = ConvertTo-PowerShellSingleQuotedLiteral -Value $PSCommandPath
+    $quotedRouter = ConvertTo-PowerShellSingleQuotedLiteral -Value $RouterHost
+    $quotedKnownHosts = ConvertTo-PowerShellSingleQuotedLiteral -Value $knownHosts
+    $quotedUser = ConvertTo-PowerShellSingleQuotedLiteral -Value $SshUser
+    $quotedNonce = ConvertTo-PowerShellSingleQuotedLiteral -Value $Nonce
+    Write-Error -ErrorAction Continue "Router cleanup could not be confirmed. Run: & $quotedScript -RouterHost $quotedRouter -KnownHostsFile $quotedKnownHosts -SshUser $quotedUser -Recover -RecoveryToken $quotedNonce -Confirm:`$false"
+}
+
+function ConvertTo-PowerShellSingleQuotedLiteral {
+    param([Parameter(Mandatory)][string]$Value)
+    return "'" + $Value.Replace("'", "''") + "'"
 }
 
 if ($Recover) {
@@ -108,18 +118,43 @@ if ($Recover) {
 
 $scpCommand = (Get-Command -Name scp -ErrorAction Stop).Source
 $packageRoot = (Resolve-Path -LiteralPath $PackageDirectory).Path
-$kmodPackages = @(Get-ChildItem -LiteralPath $packageRoot -File -Filter 'kmod-amneziawg-*.apk')
-$toolsPackages = @(Get-ChildItem -LiteralPath $packageRoot -File -Filter 'amneziawg-tools-*.apk')
-if ($kmodPackages.Count -ne 1 -or $toolsPackages.Count -ne 1) {
-    throw 'PackageDirectory must contain exactly one kmod-amneziawg APK and one amneziawg-tools APK'
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+$lockPath = Join-Path $repoRoot 'manifest/versions.lock.yaml'
+if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw 'Trusted versions lock is missing' }
+$lock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$trustedKmod = $lock.amneziawg.verified_openwrt_packages.kmod
+$trustedTools = $lock.amneziawg.verified_openwrt_packages.tools
+foreach ($trusted in @($trustedKmod, $trustedTools)) {
+    if ($null -eq $trusted -or $trusted.filename -notmatch '^[A-Za-z0-9._+-]+\.apk$' -or $trusted.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw 'Trusted AWG2 package lock is invalid'
+    }
 }
+if ($trustedKmod.filename -notmatch '^kmod-amneziawg-' -or
+    $trustedTools.filename -notmatch '^amneziawg-tools-' -or
+    $trustedKmod.filename -eq $trustedTools.filename) {
+    throw 'Trusted AWG2 package roles are invalid'
+}
+$expectedNames = @($trustedKmod.filename, $trustedTools.filename)
+$packageFiles = @(Get-ChildItem -LiteralPath $packageRoot -File -Filter '*.apk')
+if ($packageFiles.Count -ne 2 -or @($packageFiles | Where-Object { $_.Name -notin $expectedNames }).Count -ne 0) {
+    throw 'PackageDirectory must contain exactly the two filenames in the trusted versions lock'
+}
+$kmodPackage = Get-Item -LiteralPath (Join-Path $packageRoot $trustedKmod.filename)
+$toolsPackage = Get-Item -LiteralPath (Join-Path $packageRoot $trustedTools.filename)
 $sumPath = Join-Path $packageRoot 'SHA256SUMS'
 $metadataPath = Join-Path $packageRoot 'build-metadata.txt'
 if (-not (Test-Path -LiteralPath $sumPath -PathType Leaf)) { throw 'SHA256SUMS is missing' }
 if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { throw 'build-metadata.txt is missing' }
-$packages = @($kmodPackages[0], $toolsPackages[0])
+$packages = @($kmodPackage, $toolsPackage)
 foreach ($package in $packages) {
     if ($package.Name -notmatch '^[A-Za-z0-9._+-]+$') { throw "Unsafe package filename: $($package.Name)" }
+}
+$trustedHashes = @{}
+$trustedHashes[$trustedKmod.filename] = [string]$trustedKmod.sha256
+$trustedHashes[$trustedTools.filename] = [string]$trustedTools.sha256
+foreach ($package in $packages) {
+    $actual = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $trustedHashes[$package.Name]) { throw "Trusted SHA256 mismatch for $($package.Name)" }
 }
 $sumEntries = @{}
 foreach ($line in Get-Content -LiteralPath $sumPath -Encoding UTF8) {
@@ -179,13 +214,13 @@ try {
     Invoke-RemoteScript -Arguments @('prepare', $nonce) | Out-Null
     $copyArguments = $connectionOptions + @(
         '--',
-        $kmodPackages[0].FullName,
-        $toolsPackages[0].FullName,
+        $kmodPackage.FullName,
+        $toolsPackage.FullName,
         $sumPath,
         "${target}:$remoteDirectory/"
     )
     Invoke-CheckedNative -FilePath $scpCommand -Arguments $copyArguments | Out-Null
-    Invoke-RemoteScript -Arguments @('smoke', $nonce, $kmodPackages[0].Name, $toolsPackages[0].Name, $kernelAbi) | Out-Null
+    Invoke-RemoteScript -Arguments @('smoke', $nonce, $kmodPackage.Name, $toolsPackage.Name, $kernelAbi) | Out-Null
     $smokePassed = $true
     $cleanupConfirmed = $true
 } catch {

@@ -105,6 +105,7 @@ Describe 'scripts/dev.ps1' {
     }
 
     It 'builds the exact target tuples and Windows program contracts' {
+        & $script:Dev -Command build
         $go = Join-Path $script:Root ".tools/go/bin/go$(if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { '.exe' } else { '' })"
         $targets = @(
             @{ Path = 'build/routerd_linux_arm64'; GOOS = 'linux'; GOARCH = 'arm64' },

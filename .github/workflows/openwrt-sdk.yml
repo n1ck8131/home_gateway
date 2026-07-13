@@ -28,6 +28,7 @@ jobs:
         run: |
           tests/openwrt-sdk/assert-awg2-helper.sh
           sh tests/openwrt-sdk/assert-apk-dependencies.sh
+          sh tests/openwrt-sdk/assert-awg2-smoke-rollback.sh
           OUTPUT_DIR="$PWD/artifacts/openwrt-run1" scripts/openwrt/build-packages.sh
           rm -rf .cache/openwrt-sdk
           OUTPUT_DIR="$PWD/artifacts/openwrt-run2" scripts/openwrt/build-packages.sh

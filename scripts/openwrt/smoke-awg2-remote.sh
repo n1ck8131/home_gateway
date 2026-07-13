@@ -13,15 +13,58 @@ test "${#nonce}" -eq 32
 test "$work" = /tmp/home-gateway-p0
 
 package_present() {
-	if apk info -e "$1" >/dev/null 2>&1; then printf '1'; else printf '0'; fi
+	if apk info -e "$1" >/dev/null 2>&1; then
+		printf '1'
+		return 0
+	else
+		probe_status=$?
+	fi
+	if [ "$probe_status" -eq 1 ]; then
+		printf '0'
+		return 0
+	fi
+	echo "package probe failed for $1 with exit $probe_status" >&2
+	return "$probe_status"
 }
 
 module_present() {
-	if lsmod | awk '{print $1}' | grep -qx amneziawg; then printf '1'; else printf '0'; fi
+	if modules=$(lsmod); then :; else
+		probe_status=$?
+		echo "module probe failed with exit $probe_status" >&2
+		return "$probe_status"
+	fi
+	if module_names=$(printf '%s\n' "$modules" | awk '{print $1}'); then :; else
+		probe_status=$?
+		echo "module probe parser failed with exit $probe_status" >&2
+		return "$probe_status"
+	fi
+	if printf '%s\n' "$module_names" | grep -qx amneziawg; then
+		printf '1'
+		return 0
+	else
+		probe_status=$?
+	fi
+	if [ "$probe_status" -eq 1 ]; then
+		printf '0'
+		return 0
+	fi
+	echo "module matcher failed with exit $probe_status" >&2
+	return "$probe_status"
 }
 
 interface_present() {
-	if ip link show awg-p0 >/dev/null 2>&1; then printf '1'; else printf '0'; fi
+	if ip link show awg-p0 >/dev/null 2>&1; then
+		printf '1'
+		return 0
+	else
+		probe_status=$?
+	fi
+	if [ "$probe_status" -eq 1 ]; then
+		printf '0'
+		return 0
+	fi
+	echo "interface probe failed with exit $probe_status" >&2
+	return "$probe_status"
 }
 
 write_owner() {
@@ -40,54 +83,75 @@ EOF
 }
 
 read_owner() {
-	test -f "$owner"
-	stored_nonce=$(sed -n 's/^nonce=//p' "$owner")
-	test "$stored_nonce" = "$nonce"
+	if [ ! -f "$owner" ]; then
+		echo 'owner marker is missing' >&2
+		return 1
+	fi
+	stored_nonce=$(sed -n 's/^nonce=//p' "$owner") || return 1
+	if [ "$stored_nonce" != "$nonce" ]; then
+		echo 'recovery token does not own temporary state' >&2
+		return 1
+	fi
 	for name in pre_kmod pre_tools pre_module pre_interface created_kmod created_tools created_module created_interface; do
-		value=$(sed -n "s/^$name=//p" "$owner")
-		case "$value" in 0|1) ;; *) echo "invalid owner marker: $name" >&2; exit 1 ;; esac
+		value=$(sed -n "s/^$name=//p" "$owner") || return 1
+		case "$value" in 0|1) ;; *) echo "invalid owner marker: $name" >&2; return 1 ;; esac
 		eval "$name=\$value"
 	done
 }
 
 assert_state() {
-	test "$(package_present kmod-amneziawg)" = "$pre_kmod"
-	test "$(package_present amneziawg-tools)" = "$pre_tools"
-	test "$(module_present)" = "$pre_module"
-	test "$(interface_present)" = "$pre_interface"
+	actual_kmod=$(package_present kmod-amneziawg) || return 1
+	actual_tools=$(package_present amneziawg-tools) || return 1
+	actual_module=$(module_present) || return 1
+	actual_interface=$(interface_present) || return 1
+	for state_name in kmod tools module interface; do
+		eval "actual=\$actual_$state_name"
+		eval "expected=\$pre_$state_name"
+		if [ "$actual" != "$expected" ]; then
+			echo "cleanup state mismatch for $state_name: expected $expected, got $actual" >&2
+			return 1
+		fi
+	done
 }
 
 cleanup_owned() {
-	read_owner
-	if [ "$created_interface" = 1 ] && [ "$pre_interface" = 0 ] && [ "$(interface_present)" = 1 ]; then
-		ip link delete awg-p0
+	read_owner || return 1
+	current_interface=$(interface_present) || return 1
+	if [ "$created_interface" = 1 ] && [ "$pre_interface" = 0 ] && [ "$current_interface" = 1 ]; then
+		ip link delete awg-p0 || return 1
 	fi
-	if [ "$created_tools" = 1 ] && [ "$pre_tools" = 0 ] && [ "$(package_present amneziawg-tools)" = 1 ]; then
-		apk del amneziawg-tools
+	current_module=$(module_present) || return 1
+	if [ "$created_module" = 1 ] && [ "$pre_module" = 0 ] && [ "$current_module" = 1 ]; then
+		rmmod amneziawg || return 1
 	fi
-	if [ "$created_kmod" = 1 ] && [ "$pre_kmod" = 0 ] && [ "$(package_present kmod-amneziawg)" = 1 ]; then
-		apk del kmod-amneziawg
+	current_tools=$(package_present amneziawg-tools) || return 1
+	if [ "$created_tools" = 1 ] && [ "$pre_tools" = 0 ] && [ "$current_tools" = 1 ]; then
+		apk del amneziawg-tools || return 1
 	fi
-	if [ "$created_module" = 1 ] && [ "$pre_module" = 0 ] && [ "$(module_present)" = 1 ]; then
-		rmmod amneziawg
+	current_kmod=$(package_present kmod-amneziawg) || return 1
+	if [ "$created_kmod" = 1 ] && [ "$pre_kmod" = 0 ] && [ "$current_kmod" = 1 ]; then
+		apk del kmod-amneziawg || return 1
 	fi
-	assert_state
-	rm -rf "$work"
-	test ! -e "$work"
+	assert_state || return 1
+	rm -rf "$work" || return 1
+	if [ -e "$work" ]; then
+		echo 'temporary state removal was not confirmed' >&2
+		return 1
+	fi
 }
 
 case "$mode" in
 	prepare)
 		test ! -e "$work"
-		mkdir -m 0700 "$work"
-		pre_kmod=$(package_present kmod-amneziawg)
-		pre_tools=$(package_present amneziawg-tools)
-		pre_module=$(module_present)
-		pre_interface=$(interface_present)
+		pre_kmod=$(package_present kmod-amneziawg) || exit $?
+		pre_tools=$(package_present amneziawg-tools) || exit $?
+		pre_module=$(module_present) || exit $?
+		pre_interface=$(interface_present) || exit $?
 		created_kmod=0
 		created_tools=0
 		created_module=0
 		created_interface=0
+		mkdir -m 0700 "$work"
 		write_owner
 		;;
 	smoke)
@@ -98,8 +162,7 @@ case "$mode" in
 		case "$tools" in *[!A-Za-z0-9._+-]*) exit 2 ;; esac
 		test "$kernel_abi" = 'kernel-6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1'
 		read_owner
-		status=0
-		trap 'status=$?; trap - EXIT INT TERM; cleanup_owned || status=1; exit "$status"' EXIT
+		trap 'smoke_status=$?; trap - EXIT INT TERM; cleanup_owned || smoke_status=1; exit "$smoke_status"' EXIT
 		trap 'exit 130' INT TERM
 		cd "$work"
 		test "$(find . -maxdepth 1 -type f -name '*.apk' | wc -l)" -eq 2

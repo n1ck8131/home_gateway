@@ -205,8 +205,15 @@ function Invoke-Build {
     $build = Join-Path $root 'build'
     Remove-Item -LiteralPath $build -Recurse -Force -ErrorAction SilentlyContinue
     Move-Item -LiteralPath $runOne -Destination $build
-    Remove-Item -LiteralPath $runTwo -Recurse -Force
-    Remove-Item -LiteralPath $temporaryRoot -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $runTwo) {
+        Remove-Item -LiteralPath $runTwo -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $temporaryRoot) {
+        $remainingTemporaryItems = @(Get-ChildItem -LiteralPath $temporaryRoot -Force -ErrorAction SilentlyContinue)
+        if ($remainingTemporaryItems.Count -eq 0) {
+            Remove-Item -LiteralPath $temporaryRoot -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Invoke-Verify {

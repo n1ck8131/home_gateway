@@ -73,6 +73,7 @@ type fakeRuntime struct {
 	preflightRevisions []string
 	reconcileRevision  string
 	restoreFails       bool
+	restoreErr         error
 	restoreContextErr  error
 	restoreHasDeadline bool
 }
@@ -106,6 +107,9 @@ func (runtime *fakeRuntime) Restore(ctx context.Context, _ string) error {
 	runtime.calls = append(runtime.calls, "restore")
 	runtime.restoreContextErr = ctx.Err()
 	_, runtime.restoreHasDeadline = ctx.Deadline()
+	if runtime.restoreErr != nil {
+		return runtime.restoreErr
+	}
 	if runtime.restoreFails {
 		return errors.New("restore failed")
 	}
@@ -338,6 +342,30 @@ func TestApplyRecoveryIgnoresCanceledCallerAndKeepsWatchdogArmedOnRestoreFailure
 			t.Fatal("failed recovery canceled watchdog")
 		}
 		if store.value.State != StateDegraded {
+			t.Fatalf("journal = %+v", store.value)
+		}
+	})
+
+	t.Run("semantic restore mismatch", func(t *testing.T) {
+		now := time.Unix(100, 0).UTC()
+		runtime := &fakeRuntime{
+			fail:       "post-check",
+			restoreErr: errors.New("restore post-check: nft semantics drifted"),
+		}
+		store := &memoryJournal{value: Journal{
+			State:                 StateCommitted,
+			ActiveRevision:        "lkg",
+			LastKnownGoodRevision: "lkg",
+		}}
+		tx := newTransaction(runtime, store, now)
+
+		if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err == nil || !strings.Contains(err.Error(), "rollback failed") {
+			t.Fatalf("Apply() error = %v", err)
+		}
+		if tx.Watchdog.(*fakeWatchdog).canceled {
+			t.Fatal("semantic restore mismatch canceled watchdog")
+		}
+		if store.value.State != StateDegraded || store.value.LastKnownGoodRevision != "lkg" {
 			t.Fatalf("journal = %+v", store.value)
 		}
 	})

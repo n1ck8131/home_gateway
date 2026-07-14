@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vsevo/home-gateway/internal/routing/iprule"
 	routingnft "github.com/vsevo/home-gateway/internal/routing/nft"
@@ -624,61 +625,233 @@ func (runtime LinuxRuntime) verifyActiveNFTTable(ctx context.Context, expected [
 	if !bytes.Contains(nftResult.Stdout, []byte(fmt.Sprintf("comment %q", routingnft.OwnershipComment))) {
 		return errors.New("routerd nft table ownership marker is missing or invalid")
 	}
-	sets, rules, err := expectedNFTSemantics(expected)
+	expectedChain, err := nftNamedBlock(expected, "chain", "prerouting")
 	if err != nil {
 		return fmt.Errorf("inspect expected nft artifact: %w", err)
 	}
-	for _, set := range sets {
-		if !containsTokenSequence(nftResult.Stdout, []string{"set", set, "{"}) {
-			return fmt.Errorf("routerd nft set %q is missing", set)
-		}
+	activeChain, err := nftNamedBlock(nftResult.Stdout, "chain", "prerouting")
+	if err != nil {
+		return fmt.Errorf("inspect active nft table: %w", err)
 	}
-	for _, rule := range rules {
-		if !containsTokenSequence(nftResult.Stdout, rule) {
-			return fmt.Errorf("routerd nft rule is missing or drifted: %s", strings.Join(rule, " "))
+	if !slicesEqual(nftComparableTokens(activeChain), nftComparableTokens(expectedChain)) {
+		return errors.New("routerd nft prerouting chain metadata or ordered rules are missing or drifted")
+	}
+
+	expectedSets, err := nftSetInventory(expected)
+	if err != nil {
+		return fmt.Errorf("inspect expected nft artifact: %w", err)
+	}
+	activeSets, err := nftSetInventory(nftResult.Stdout)
+	if err != nil {
+		return fmt.Errorf("inspect active nft table: %w", err)
+	}
+	if len(activeSets) != len(expectedSets) {
+		return fmt.Errorf("routerd nft set inventory drifted: active=%d expected=%d", len(activeSets), len(expectedSets))
+	}
+	for name, expectedSet := range expectedSets {
+		activeSet, found := activeSets[name]
+		if !found {
+			return fmt.Errorf("routerd nft set %q is missing", name)
+		}
+		if err := verifyNFTSetSemantics(activeSet, expectedSet); err != nil {
+			return fmt.Errorf("routerd nft set %q drifted: %w", name, err)
 		}
 	}
 	return nil
 }
 
-func expectedNFTSemantics(data []byte) ([]string, [][]string, error) {
-	sets := make([]string, 0)
-	rules := make([][]string, 0)
-	inPrerouting := false
-	foundPrerouting := false
-	for _, rawLine := range strings.Split(string(data), "\n") {
-		line := strings.TrimSpace(rawLine)
-		if strings.HasPrefix(line, "set ") {
-			fields := strings.Fields(line)
-			if len(fields) < 3 || fields[2] != "{" {
-				return nil, nil, fmt.Errorf("invalid set declaration %q", line)
+type nftSetSemantics struct {
+	typeName string
+	flags    []string
+	timeout  string
+	elements []string
+}
+
+func nftNamedBlock(data []byte, kind, name string) ([]string, error) {
+	blocks, err := nftNamedBlocks(data, kind)
+	if err != nil {
+		return nil, err
+	}
+	block, found := blocks[name]
+	if !found {
+		return nil, fmt.Errorf("%s %q is missing", kind, name)
+	}
+	return block, nil
+}
+
+func nftNamedBlocks(data []byte, kind string) (map[string][]string, error) {
+	tokens := nftDocumentTokens(string(data))
+	blocks := make(map[string][]string)
+	for index := 0; index+2 < len(tokens); index++ {
+		if tokens[index] != kind || tokens[index+2] != "{" {
+			continue
+		}
+		name := tokens[index+1]
+		depth := 1
+		end := index + 3
+		for ; end < len(tokens) && depth != 0; end++ {
+			switch tokens[end] {
+			case "{":
+				depth++
+			case "}":
+				depth--
 			}
-			sets = append(sets, fields[1])
 		}
-		if line == "chain prerouting {" {
-			inPrerouting = true
-			foundPrerouting = true
+		if depth != 0 {
+			return nil, fmt.Errorf("unterminated %s %q", kind, name)
+		}
+		if _, duplicate := blocks[name]; duplicate {
+			return nil, fmt.Errorf("duplicate %s %q", kind, name)
+		}
+		blocks[name] = append([]string(nil), tokens[index+3:end-1]...)
+		index = end - 1
+	}
+	return blocks, nil
+}
+
+func nftSetInventory(data []byte) (map[string]nftSetSemantics, error) {
+	blocks, err := nftNamedBlocks(data, "set")
+	if err != nil {
+		return nil, err
+	}
+	sets := make(map[string]nftSetSemantics, len(blocks))
+	for name, block := range blocks {
+		semantics, err := parseNFTSetSemantics(block)
+		if err != nil {
+			return nil, fmt.Errorf("set %q: %w", name, err)
+		}
+		sets[name] = semantics
+	}
+	return sets, nil
+}
+
+func parseNFTSetSemantics(tokens []string) (nftSetSemantics, error) {
+	var result nftSetSemantics
+	depth := 0
+	for index := 0; index < len(tokens); index++ {
+		switch tokens[index] {
+		case "{":
+			depth++
+			continue
+		case "}":
+			depth--
 			continue
 		}
-		if !inPrerouting {
+		if depth != 0 {
 			continue
 		}
-		if line == "}" {
-			inPrerouting = false
-			continue
-		}
-		if line == "" || strings.HasPrefix(line, "type ") {
-			continue
-		}
-		fields := nftSemanticTokens(line)
-		if len(fields) != 0 {
-			rules = append(rules, fields)
+		switch tokens[index] {
+		case "type":
+			if index+1 >= len(tokens) {
+				return nftSetSemantics{}, errors.New("type value is missing")
+			}
+			result.typeName = tokens[index+1]
+			index++
+		case "flags":
+			terminated := false
+			for index++; index < len(tokens); index++ {
+				if tokens[index] == ";" {
+					terminated = true
+					break
+				}
+				if tokens[index] != "{" && tokens[index] != "}" && tokens[index] != "=" {
+					result.flags = append(result.flags, tokens[index])
+				}
+			}
+			if !terminated || len(result.flags) == 0 {
+				return nftSetSemantics{}, errors.New("flags declaration is invalid")
+			}
+		case "timeout":
+			if index+1 >= len(tokens) {
+				return nftSetSemantics{}, errors.New("timeout value is missing")
+			}
+			result.timeout = tokens[index+1]
+			index++
+		case "elements":
+			if index+2 >= len(tokens) || tokens[index+1] != "=" || tokens[index+2] != "{" {
+				return nftSetSemantics{}, errors.New("elements block is invalid")
+			}
+			index += 3
+			elementDepth := 1
+			for ; index < len(tokens) && elementDepth != 0; index++ {
+				switch tokens[index] {
+				case "{":
+					elementDepth++
+				case "}":
+					elementDepth--
+				default:
+					if elementDepth == 1 {
+						result.elements = append(result.elements, tokens[index])
+					}
+				}
+			}
+			if elementDepth != 0 {
+				return nftSetSemantics{}, errors.New("elements block is unterminated")
+			}
+			index--
 		}
 	}
-	if !foundPrerouting {
-		return nil, nil, errors.New("prerouting chain is missing")
+	if result.typeName == "" {
+		return nftSetSemantics{}, errors.New("type declaration is missing")
 	}
-	return sets, rules, nil
+	return result, nil
+}
+
+func verifyNFTSetSemantics(active, expected nftSetSemantics) error {
+	if active.typeName != expected.typeName {
+		return fmt.Errorf("type=%q, want %q", active.typeName, expected.typeName)
+	}
+	if !sameTokenMultiset(active.flags, expected.flags) {
+		return fmt.Errorf("flags=%v, want %v", active.flags, expected.flags)
+	}
+	if !equalNFTTimeout(active.timeout, expected.timeout) {
+		return fmt.Errorf("timeout=%q, want %q", active.timeout, expected.timeout)
+	}
+	if containsString(expected.flags, "timeout") && len(expected.elements) == 0 {
+		return nil
+	}
+	if !sameTokenMultiset(active.elements, expected.elements) {
+		return fmt.Errorf("elements=%v, want %v", active.elements, expected.elements)
+	}
+	return nil
+}
+
+func equalNFTTimeout(active, expected string) bool {
+	if active == expected {
+		return true
+	}
+	if active == "" || expected == "" {
+		return false
+	}
+	activeDuration, activeErr := time.ParseDuration(active)
+	expectedDuration, expectedErr := time.ParseDuration(expected)
+	return activeErr == nil && expectedErr == nil && activeDuration == expectedDuration
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func sameTokenMultiset(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[string]int, len(left))
+	for _, token := range left {
+		counts[token]++
+	}
+	for _, token := range right {
+		counts[token]--
+		if counts[token] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (runtime LinuxRuntime) verifyNFTTableAbsent(ctx context.Context) error {
@@ -839,8 +1012,24 @@ func containsTokenSequence(data []byte, expected []string) bool {
 }
 
 func nftSemanticTokens(line string) []string {
-	line = strings.NewReplacer("(", " ", ")", " ", ";", " ").Replace(line)
-	fields := strings.Fields(line)
+	return nftTokens(line, " ")
+}
+
+func nftDocumentTokens(document string) []string {
+	return nftTokens(document, " ; ")
+}
+
+func nftTokens(value, semicolonReplacement string) []string {
+	value = strings.NewReplacer(
+		"(", " ",
+		")", " ",
+		";", semicolonReplacement,
+		",", " ",
+		"{", " { ",
+		"}", " } ",
+		"=", " = ",
+	).Replace(value)
+	fields := strings.Fields(value)
 	for index, field := range fields {
 		if !strings.HasPrefix(field, "0x") {
 			continue
@@ -851,6 +1040,16 @@ func nftSemanticTokens(line string) []string {
 		}
 	}
 	return fields
+}
+
+func nftComparableTokens(tokens []string) []string {
+	comparable := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		if token != ";" {
+			comparable = append(comparable, token)
+		}
+	}
+	return comparable
 }
 
 func slicesEqual(left, right []string) bool {

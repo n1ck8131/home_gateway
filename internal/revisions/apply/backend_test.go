@@ -60,7 +60,7 @@ func TestLinuxRuntimePostCheckRequiresExpectedNFTPolicyRulesAndRoutes(t *testing
 		t.Fatal(err)
 	}
 	runner.outputs = map[string][]byte{
-		"nft list table inet routerd":  []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n"),
+		"nft list table inet routerd":  candidate.NFT,
 		"ip -4 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -6 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -4 route show table 10001": []byte("blackhole default\n"),
@@ -70,21 +70,48 @@ func TestLinuxRuntimePostCheckRequiresExpectedNFTPolicyRulesAndRoutes(t *testing
 		t.Fatal(err)
 	}
 
-	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"foreign\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
+	runner.outputs["nft list table inet routerd"] = []byte(strings.Replace(string(candidate.NFT), "managed-by-routerd", "foreign", 1))
 	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ownership marker") {
 		t.Fatalf("PostCheck() error = %v, want invalid ownership marker", err)
 	}
-	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
+	runner.outputs["nft list table inet routerd"] = candidate.NFT
 
-	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n")
-	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "nft rule") {
+	runner.outputs["nft list table inet routerd"] = []byte(strings.Replace(string(candidate.NFT), "    ct direction reply return\n", "", 1))
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ordered rules") {
 		t.Fatalf("PostCheck() error = %v, want missing nft rule", err)
 	}
-	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
+	runner.outputs["nft list table inet routerd"] = candidate.NFT
 
 	runner.outputs["ip -6 route show table 10001"] = nil
 	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "route table 10001") {
 		t.Fatalf("PostCheck() error = %v, want missing route", err)
+	}
+}
+
+func TestLinuxRuntimePostCheckRejectsUnhookedPreroutingChain(t *testing.T) {
+	runtime, runner := activeTestLinuxRuntime(t, testCandidate("revision-1"))
+	candidate := testCandidate("revision-1")
+	runner.outputs["nft list table inet routerd"] = []byte(strings.Replace(
+		string(candidate.NFT),
+		"    type filter hook prerouting priority mangle; policy accept;\n",
+		"",
+		1,
+	))
+
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "prerouting chain metadata") {
+		t.Fatalf("PostCheck() error = %v, want unhooked prerouting rejection", err)
+	}
+}
+
+func TestLinuxRuntimePostCheckRejectsRuleOutsidePrerouting(t *testing.T) {
+	candidate := testCandidate("revision-1")
+	runtime, runner := activeTestLinuxRuntime(t, candidate)
+	listed := strings.Replace(string(candidate.NFT), "    ct direction reply return\n", "", 1)
+	listed = strings.Replace(listed, "  chain prerouting {", "  chain decoy {\n    ct direction reply return\n  }\n  chain prerouting {", 1)
+	runner.outputs["nft list table inet routerd"] = []byte(listed)
+
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ordered rules") {
+		t.Fatalf("PostCheck() error = %v, want misplaced rule rejection", err)
 	}
 }
 
@@ -522,7 +549,7 @@ func TestLinuxRuntimeRestorePostChecksPopulatedSnapshot(t *testing.T) {
 	runner.beforeRun = func(program string, args []string) error {
 		if program == "/etc/init.d/dnsmasq" && reflect.DeepEqual(args, []string{"reload"}) {
 			runner.outputs = expectedKernelRouteOutputsForSlot(1)
-			runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
+			runner.outputs["nft list table inet routerd"] = baseline.NFT
 		}
 		return nil
 	}
@@ -531,6 +558,82 @@ func TestLinuxRuntimeRestorePostChecksPopulatedSnapshot(t *testing.T) {
 	}
 	assertFileEquals(t, runtime.FirewallIncludePath, baseline.NFT)
 	assertFileEquals(t, runtime.DNSIncludePath, baseline.DNS)
+}
+
+func TestLinuxRuntimeRestoreRejectsStaticSetDriftButAllowsDynamicElements(t *testing.T) {
+	baseline := testCandidateWithSets("baseline")
+	dynamicElements := strings.Replace(
+		string(baseline.NFT),
+		"set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 3600s; }",
+		"set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 1h; elements = { 203.0.113.10 }; }",
+		1,
+	)
+	dynamicElements = strings.Replace(
+		dynamicElements,
+		"set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 3600s; }",
+		"set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 1h; elements = { 2001:db8::10 }; }",
+		1,
+	)
+
+	tests := []struct {
+		name    string
+		listed  string
+		wantErr string
+	}{
+		{name: "dynamic runtime elements", listed: dynamicElements},
+		{
+			name:    "rd_local4 static element drift",
+			listed:  strings.Replace(string(baseline.NFT), "10.0.0.0/8", "192.168.0.0/16", 1),
+			wantErr: "rd_local4",
+		},
+		{
+			name:    "rd_local6 static element drift",
+			listed:  strings.Replace(string(baseline.NFT), "fd00::/8", "2001:db8::/32", 1),
+			wantErr: "rd_local6",
+		},
+		{
+			name:    "set type drift",
+			listed:  strings.Replace(string(baseline.NFT), "set rd_local4 { type ipv4_addr", "set rd_local4 { type ipv6_addr", 1),
+			wantErr: "type=",
+		},
+		{
+			name:    "set flags drift",
+			listed:  strings.Replace(string(baseline.NFT), "set rd_local4 { type ipv4_addr; flags interval", "set rd_local4 { type ipv4_addr; flags timeout", 1),
+			wantErr: "flags=",
+		},
+		{
+			name:    "set timeout drift",
+			listed:  strings.Replace(string(baseline.NFT), "timeout 3600s", "timeout 30m", 1),
+			wantErr: "timeout=",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, runner := newTestLinuxRuntime(t)
+			if err := runtime.Stage(context.Background(), baseline); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.Activate(context.Background(), baseline); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.Snapshot(context.Background(), baseline.RevisionID); err != nil {
+				t.Fatal(err)
+			}
+			runner.outputs = expectedKernelRouteOutputs()
+			runner.outputs["nft list table inet routerd"] = []byte(test.listed)
+
+			err := runtime.Restore(context.Background(), baseline.RevisionID)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Restore() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
 }
 
 func TestLinuxRuntimeRestoreRejectsReloadSuccessWithWrongState(t *testing.T) {
@@ -661,6 +764,23 @@ func newTestLinuxRuntime(t *testing.T) (LinuxRuntime, *recordingRunner) {
 	}, runner
 }
 
+func activeTestLinuxRuntime(t *testing.T, candidate Candidate) (LinuxRuntime, *recordingRunner) {
+	t.Helper()
+	runtime, runner := newTestLinuxRuntime(t)
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputs = expectedKernelRouteOutputs()
+	runner.outputs["nft list table inet routerd"] = candidate.NFT
+	return runtime, runner
+}
+
 func testCandidate(revision string) Candidate {
 	return Candidate{
 		RevisionID: revision,
@@ -683,6 +803,22 @@ func testCandidate(revision string) Candidate {
 }
 `),
 	}
+}
+
+func testCandidateWithSets(revision string) Candidate {
+	candidate := testCandidate(revision)
+	candidate.NFT = []byte("table inet routerd {\n" +
+		"  comment \"managed-by-routerd\";\n" +
+		"  set rd_local4 { type ipv4_addr; flags interval; elements = { 10.0.0.0/8 }; }\n" +
+		"  set rd_local6 { type ipv6_addr; flags interval; elements = { fd00::/8 }; }\n" +
+		"  set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 3600s; }\n" +
+		"  set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 3600s; }\n" +
+		"  chain prerouting {\n" +
+		"    type filter hook prerouting priority mangle; policy accept;\n" +
+		"    ct direction reply return\n" +
+		"  }\n" +
+		"}\n")
+	return candidate
 }
 
 func testCandidateForSlot(revision string, slot int) Candidate {

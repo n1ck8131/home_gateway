@@ -49,8 +49,18 @@ jobs:
       - run: make PWSH=./.tools/pwsh/pwsh verify
       - run: cc --version && ld --version
       - run: GOMAXPROCS=2 go test -p=1 -timeout=15m -race ./...
-      - run: sudo apt-get update && sudo apt-get install --yes dnsmasq-base iproute2 jq nftables
+      - run: sudo apt-get update && sudo apt-get install --yes dnsmasq-base dnsutils iproute2 jq nftables tcpdump
       - run: sudo tests/network-ns/check-prereqs.sh
+      - name: Run P2 network namespace safety suite
+        run: sudo env "PATH=$PATH" "GO_BIN=$(command -v go)" "NETWORK_NS_EVIDENCE_DIR=$RUNNER_TEMP/network-ns-evidence" tests/network-ns/run.sh
+      - name: Upload P2 network namespace evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: network-ns-evidence
+          path: ${{ runner.temp }}/network-ns-evidence
+          if-no-files-found: error
+          retention-days: 7
       - run: sh tests/openwrt-sdk/assert-awg2-smoke-rollback.sh
       - name: Verify clean worktree
         shell: sh

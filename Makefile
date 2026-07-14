@@ -1,6 +1,6 @@
 PWSH ?= pwsh
 
-.PHONY: bootstrap format format-check test lint build pester verify
+.PHONY: bootstrap format format-check test lint build pester verify p2-unit p2-netns p2-qemu
 
 bootstrap:
 	$(PWSH) -NoProfile -File scripts/dev.ps1 -Command bootstrap
@@ -25,3 +25,12 @@ pester:
 
 verify:
 	$(PWSH) -NoProfile -File scripts/dev.ps1 -Command verify
+
+p2-unit:
+	$(PWSH) -NoProfile -File scripts/dev.ps1 -Command p2-unit
+
+p2-netns:
+	$(PWSH) -NoProfile -File scripts/dev.ps1 -Command p2-netns
+
+p2-qemu:
+	$(PWSH) -NoProfile -File scripts/dev.ps1 -Command p2-qemu

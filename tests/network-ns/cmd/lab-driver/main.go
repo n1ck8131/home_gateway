@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/vsevo/home-gateway/internal/dataplane"
+	revisionapply "github.com/vsevo/home-gateway/internal/revisions/apply"
 	"github.com/vsevo/home-gateway/internal/routing/iprule"
 	"github.com/vsevo/home-gateway/internal/routing/nft"
 	"github.com/vsevo/home-gateway/internal/system/linux"
@@ -26,9 +27,12 @@ import (
 )
 
 const (
-	commandTimeout = 15 * time.Second
-	workDeviceID   = "work"
-	vpnServerID    = "vpn-1"
+	commandTimeout           = 15 * time.Second
+	workDeviceID             = "work"
+	vpnServerID              = "vpn-1"
+	runtimeLab               = "lab"
+	runtimeOpenWRT           = "openwrt"
+	watchdogRollbackRestored = "watchdog expiry: restored"
 )
 
 func main() {
@@ -262,16 +266,26 @@ func runApply(args []string) error {
 	fault := set.String("fault", "none", "single injected fault")
 	available := set.Bool("available", true, "whether the VPN interface is usable")
 	labRoot := set.String("lab-root", "", "absolute lab root")
+	runtimeName := set.String("runtime", runtimeLab, "lab or openwrt runtime")
+	confirmTimeoutText := set.String("confirm-timeout", "30s", "commit-confirm deadline")
+	expectTimeout := set.Bool("expect-timeout", false, "wait for watchdog rollback")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	if set.NArg() != 0 || *revision == "" {
-		return errors.New("apply requires revision and lab-root flags")
+		return errors.New("apply requires a revision and flags only")
 	}
 	if !validFault(*fault) {
 		return fmt.Errorf("unsupported fault %q", *fault)
 	}
-	controller, err := productionController(*labRoot, *fault)
+	confirmTimeout, err := time.ParseDuration(*confirmTimeoutText)
+	if err != nil || confirmTimeout <= 0 || confirmTimeout > 2*time.Minute {
+		return errors.New("confirm-timeout must be greater than zero and at most 2m")
+	}
+	if *expectTimeout && (*fault != "none" || confirmTimeout > 10*time.Second) {
+		return errors.New("expect-timeout requires fault=none and confirm-timeout at most 10s")
+	}
+	controller, journalPath, err := productionController(*runtimeName, *labRoot, *fault, confirmTimeout)
 	if err != nil {
 		return err
 	}
@@ -281,19 +295,26 @@ func runApply(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
-	return controller.Apply(ctx, request)
+	if err := controller.Apply(ctx, request); err != nil {
+		return err
+	}
+	if !*expectTimeout {
+		return nil
+	}
+	return waitForWatchdogRollback(journalPath, confirmTimeout+commandTimeout)
 }
 
 func runTransactionCommand(command string, args []string) error {
 	set := newFlagSet(command)
 	labRoot := set.String("lab-root", "", "absolute lab root")
+	runtimeName := set.String("runtime", runtimeLab, "lab or openwrt runtime")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	if set.NArg() != 0 {
 		return fmt.Errorf("%s accepts flags only", command)
 	}
-	controller, err := productionController(*labRoot, "none")
+	controller, _, err := productionController(*runtimeName, *labRoot, "none", 30*time.Second)
 	if err != nil {
 		return err
 	}
@@ -320,13 +341,26 @@ func validFault(value string) bool {
 	}
 }
 
-func productionController(labRoot, fault string) (*dataplane.Controller, error) {
+func productionController(runtimeName, labRoot, fault string, confirmTimeout time.Duration) (*dataplane.Controller, string, error) {
+	if runtimeName == runtimeOpenWRT {
+		if labRoot != "" {
+			return nil, "", errors.New("lab-root must be empty for the openwrt runtime")
+		}
+		controller, err := dataplane.NewProductionController(dataplane.ProductionConfig{
+			ConfirmTimeout: confirmTimeout,
+			Runner:         &openWRTRunner{exec: linux.ExecRunner{}, fault: fault},
+		})
+		return controller, filepath.Join(dataplane.DefaultStateRoot, "journal.json"), err
+	}
+	if runtimeName != runtimeLab {
+		return nil, "", fmt.Errorf("unsupported runtime %q", runtimeName)
+	}
 	if labRoot == "" || !filepath.IsAbs(labRoot) || filepath.Clean(labRoot) != labRoot || labRoot == "/" {
-		return nil, errors.New("lab-root must be an absolute clean non-root path")
+		return nil, "", errors.New("lab-root must be an absolute clean non-root path")
 	}
 	info, err := os.Stat(labRoot)
 	if err != nil || !info.IsDir() {
-		return nil, errors.New("lab-root must be an existing directory")
+		return nil, "", errors.New("lab-root must be an existing directory")
 	}
 	runner := &labRunner{
 		exec:         linux.ExecRunner{},
@@ -336,14 +370,35 @@ func productionController(labRoot, fault string) (*dataplane.Controller, error) 
 		dnsPIDPath:   filepath.Join(labRoot, "run", "dnsmasq.pid"),
 		fault:        fault,
 	}
-	return dataplane.NewProductionController(dataplane.ProductionConfig{
+	controller, err := dataplane.NewProductionController(dataplane.ProductionConfig{
 		StateRoot:           filepath.Join(labRoot, "state"),
 		LockPath:            filepath.Join(labRoot, "run", "apply.lock"),
 		FirewallIncludePath: runner.firewallPath,
 		DNSIncludePath:      runner.dnsPath,
-		ConfirmTimeout:      30 * time.Second,
+		ConfirmTimeout:      confirmTimeout,
 		Runner:              runner,
 	})
+	return controller, filepath.Join(labRoot, "state", "journal.json"), err
+}
+
+func waitForWatchdogRollback(journalPath string, deadlineAfter time.Duration) error {
+	journal := revisionapply.FileJournal{Path: journalPath}
+	deadline := time.Now().Add(deadlineAfter)
+	for time.Now().Before(deadline) {
+		current, err := journal.Load()
+		if err != nil {
+			return err
+		}
+		if watchdogRollbackComplete(current) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return errors.New("watchdog rollback did not complete before the deadline")
+}
+
+func watchdogRollbackComplete(journal revisionapply.Journal) bool {
+	return journal.State == revisionapply.StateRolledBack && journal.RollbackResult == watchdogRollbackRestored
 }
 
 func applyRequest(revision, profile string, available bool) (dataplane.ApplyRequest, error) {
@@ -402,6 +457,60 @@ func applyRequest(revision, profile string, available bool) (dataplane.ApplyRequ
 			},
 		},
 	}, nil
+}
+
+type openWRTRunner struct {
+	exec      linux.ExecRunner
+	fault     string
+	faultUsed bool
+}
+
+func (runner *openWRTRunner) Run(ctx context.Context, program string, args ...string) (linux.Result, error) {
+	if !runner.faultUsed && runner.fault == "nft-validate" && program == "nft" && len(args) == 3 && args[0] == "-c" && args[1] == "-f" {
+		runner.faultUsed = true
+		return runner.runInvalidFixture(ctx, "nft", []byte("table inet {\n"), "-c", "-f")
+	}
+	if !runner.faultUsed && runner.fault == "dns-validate" && program == "dnsmasq" && len(args) >= 1 && args[0] == "--test" {
+		runner.faultUsed = true
+		return runner.runInvalidFixture(ctx, "dnsmasq", []byte("definitely-invalid-routerd-option\n"), "--test", "--conf-file=")
+	}
+	result, err := runner.exec.Run(ctx, program, args...)
+	if err != nil {
+		return result, err
+	}
+	if !runner.faultUsed && runner.fault == "postcheck" && program == "nft" && equalArgs(args, "list", "table", "inet", nft.TableName) {
+		runner.faultUsed = true
+		return result, errors.New("injected OpenWrt post-check fault")
+	}
+	return result, nil
+}
+
+func (runner *openWRTRunner) runInvalidFixture(ctx context.Context, program string, content []byte, args ...string) (result linux.Result, resultErr error) {
+	fixture, err := os.CreateTemp("/tmp", "routerd-invalid-")
+	if err != nil {
+		return linux.Result{}, fmt.Errorf("create invalid %s fixture: %w", program, err)
+	}
+	path := fixture.Name()
+	defer func() {
+		resultErr = errors.Join(resultErr, os.Remove(path))
+	}()
+	if _, err := fixture.Write(content); err != nil {
+		_ = fixture.Close()
+		return linux.Result{}, fmt.Errorf("write invalid %s fixture: %w", program, err)
+	}
+	if err := fixture.Close(); err != nil {
+		return linux.Result{}, fmt.Errorf("close invalid %s fixture: %w", program, err)
+	}
+	if program == "dnsmasq" {
+		args[len(args)-1] += path
+	} else {
+		args = append(args, path)
+	}
+	result, err = runner.exec.Run(ctx, program, args...)
+	if err == nil {
+		return result, fmt.Errorf("%s accepted an intentionally invalid fixture", program)
+	}
+	return result, err
 }
 
 type labRunner struct {

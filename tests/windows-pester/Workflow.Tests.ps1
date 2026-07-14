@@ -2,7 +2,8 @@ BeforeAll {
     $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     $script:Ci = Get-Content -LiteralPath (Join-Path $script:Root '.github/workflows/ci.yml') -Raw
     $script:OpenWrt = Get-Content -LiteralPath (Join-Path $script:Root '.github/workflows/openwrt-sdk.yml') -Raw
-    $script:Workflows = @($script:Ci, $script:OpenWrt)
+    $script:Qemu = Get-Content -LiteralPath (Join-Path $script:Root '.github/workflows/openwrt-qemu.yml') -Raw
+    $script:Workflows = @($script:Ci, $script:OpenWrt, $script:Qemu)
 }
 
 Describe 'pinned GitHub workflows' {
@@ -20,6 +21,8 @@ Describe 'pinned GitHub workflows' {
             $workflow | Should -Not -Match '(?i)latest'
         }
         $script:OpenWrt | Should -Match 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        $script:Ci | Should -Match 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
+        $script:Qemu | Should -Match 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
     }
 
     It 'hardens every checkout' {
@@ -38,6 +41,8 @@ Describe 'pinned GitHub workflows' {
         $script:Ci | Should -Match 'cc --version && ld --version'
         $script:Ci | Should -Match 'GOMAXPROCS=2 go test -p=1 -timeout=15m -race \./\.\.\.'
         $script:Ci | Should -Match 'sudo tests/network-ns/check-prereqs\.sh'
+        $script:Ci | Should -Match 'tests/network-ns/run\.sh'
+        $script:Qemu | Should -Match 'tests/openwrt-qemu/run\.sh'
     }
 
     It 'builds and compares two clean OpenWrt and userspace trees' {

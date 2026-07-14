@@ -19,6 +19,7 @@ $requiredArtifacts = @(
     'shellcheck_linux_amd64',
     'actionlint_windows_amd64', 'actionlint_linux_amd64',
     'openwrt_sdk', 'openwrt_factory', 'openwrt_sysupgrade',
+    'openwrt_qemu', 'openwrt_qemu_dnsmasq_full', 'openwrt_qemu_ip_full',
     'awg_kernel_source', 'awg_tools_source', 'awg_go_source',
     'awg_openwrt_adapter_source'
 )

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('bootstrap', 'format', 'format-check', 'test', 'lint', 'build', 'pester', 'verify')]
+    [ValidateSet('bootstrap', 'format', 'format-check', 'test', 'lint', 'build', 'pester', 'verify', 'p2-unit', 'p2-netns', 'p2-qemu')]
     [string]$Command
 )
 
@@ -66,7 +66,7 @@ function Invoke-BootstrapCommand {
 
 function Invoke-Format {
     $gofmt = Get-PinnedGofmt
-    $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'cmd'), (Join-Path $root 'internal') -Recurse -Filter '*.go' -File | Select-Object -ExpandProperty FullName)
+    $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'cmd'), (Join-Path $root 'internal'), (Join-Path $root 'tests') -Recurse -Filter '*.go' -File | Select-Object -ExpandProperty FullName)
     if ($files.Count -ne 0) {
         Invoke-CheckedNative -FilePath $gofmt -Arguments (@('-w') + $files)
     }
@@ -74,7 +74,7 @@ function Invoke-Format {
 
 function Invoke-FormatCheck {
     $gofmt = Get-PinnedGofmt
-    $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'cmd'), (Join-Path $root 'internal') -Recurse -Filter '*.go' -File | Select-Object -ExpandProperty FullName)
+    $files = @(Get-ChildItem -LiteralPath (Join-Path $root 'cmd'), (Join-Path $root 'internal'), (Join-Path $root 'tests') -Recurse -Filter '*.go' -File | Select-Object -ExpandProperty FullName)
     if ($files.Count -eq 0) {
         return
     }
@@ -107,6 +107,42 @@ function Invoke-PesterTests {
     $result = Invoke-Pester -Path (Join-Path $root 'tests/windows-pester') -Output Detailed -PassThru
     if ($result.Result -ne 'Passed' -or $result.TotalCount -eq 0) {
         throw "Pester failed or discovered no tests: $($result.Result)"
+    }
+}
+
+function Invoke-P2UnitTests {
+    $go = Get-PinnedGo
+    Invoke-CheckedNative -FilePath $go -Arguments @(
+        'test',
+        './internal/routing/nft/...',
+        './internal/routing/iprule/...',
+        './internal/dns/dnsmasq/...',
+        './internal/revisions/apply/...',
+        './internal/system/linux/...',
+        './internal/dataplane/...',
+        './internal/routerdcmd/...'
+    )
+}
+
+function Invoke-P2LinuxSuite {
+    param([Parameter(Mandatory)][string]$RelativePath)
+    if ($windowsPlatform) {
+        throw "$RelativePath requires Linux"
+    }
+    $go = Get-PinnedGo
+    $priorGoBin = Get-Item -LiteralPath 'Env:GO_BIN' -ErrorAction SilentlyContinue
+    try {
+        $env:GO_BIN = $go
+        & (Join-Path $root $RelativePath)
+        if ($LASTEXITCODE -ne 0) {
+            throw "$RelativePath failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        if ($priorGoBin) {
+            $env:GO_BIN = $priorGoBin.Value
+        } else {
+            Remove-Item -LiteralPath 'Env:GO_BIN' -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -250,4 +286,7 @@ switch ($Command) {
     'build' { Invoke-Build }
     'pester' { Invoke-PesterTests }
     'verify' { Invoke-Verify }
+    'p2-unit' { Invoke-P2UnitTests }
+    'p2-netns' { Invoke-P2LinuxSuite -RelativePath 'tests/network-ns/run.sh' }
+    'p2-qemu' { Invoke-P2LinuxSuite -RelativePath 'tests/openwrt-qemu/run.sh' }
 }

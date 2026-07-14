@@ -1,0 +1,49 @@
+name: openwrt-qemu
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  p2-openwrt-qemu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: 1.26.5
+          cache: true
+      - name: Install QEMU host prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes curl gzip jq openssh-client qemu-system-x86 qemu-utils rsync
+      - name: Run pinned OpenWrt QEMU P2 smoke
+        env:
+          GOTOOLCHAIN: local
+          OPENWRT_QEMU_EVIDENCE_DIR: ${{ runner.temp }}/openwrt-qemu-evidence
+        run: tests/openwrt-qemu/run.sh
+      - name: Upload OpenWrt QEMU evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: openwrt-qemu-evidence
+          path: ${{ runner.temp }}/openwrt-qemu-evidence
+          if-no-files-found: error
+          retention-days: 7
+      - name: Verify clean worktree
+        shell: sh
+        run: |
+          set -eu
+          git diff --exit-code
+          status="$(git status --porcelain=v1 --untracked-files=all)"
+          if [ -n "$status" ]; then
+            printf '%s\n' "$status"
+            exit 1
+          fi

@@ -7,6 +7,9 @@ d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e  gitleaks_8.30.
 97e6b2a833b6d89f9ff17d25419ac0a7e3b482a044e9ab18cdef834bd834fd38  go1.26.5.windows-amd64.zip
 d0c997128c3c775be10311f80b4c20c9f85bbc8c2ebb2601f5957b7290b71412  openwrt-25.12.5-mediatek-filogic-glinet_gl-mt6000-squashfs-factory.bin
 4b506982cc4ae2e1ebdee85be637fdfd59ed7df83e9995e03ffd641c58954390  openwrt-25.12.5-mediatek-filogic-glinet_gl-mt6000-squashfs-sysupgrade.bin
+23e2538e8ab0eb52dfed1c65d608ecdb71ffd432dd54885da138ae67cd9e4461  openwrt-25.12.5-x86-64-generic-ext4-combined.img.gz
+1d1a95d56ddf521d7f83df7ce487201f9e22f932dd9fba75eb173c539054d92a  dnsmasq-full-2.93-r1.apk
+ccb056ae416635ceeedec2bf1d137c1b9a181069f818e0f1404547e8e16ad22d  ip-full-6.18.0-r2.apk
 ff4a38a397caa2cfe1c39e18f84ddede14878221b3593c3f2c4cfe24e3ec4c25  openwrt-sdk-25.12.5-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
 238d9aa37a55d7b4afcb66245f36fc7410774c067fec40084e00eea474de9862  Pester.6.0.0.nupkg
 6cbcfbf20e376aa62ffd91c973493c41a7a52ddfd5a5db3ff9bc12f0d0fe9292  powershell-7.6.2-linux-x64.tar.gz

@@ -21,6 +21,23 @@ fail() {
     exit 1
 }
 
+ensure_real_directory() {
+    path="$1"
+    mode="$2"
+    if [ -L "$path" ]; then
+        fail "$path must not be a symlink"
+    fi
+    if [ -e "$path" ]; then
+        [ -d "$path" ] || fail "$path is not a directory"
+    else
+        mkdir -p "$path" || fail "could not create $path"
+    fi
+    chmod "$mode" "$path" || fail "could not set mode $mode on $path"
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+        fail "$path is not a real directory"
+    fi
+}
+
 journal_value() {
     jsonfilter -i "$journal" -e "@$1"
 }
@@ -149,6 +166,9 @@ if [ "$phase" = phase1 ]; then
     apk info -vv >"$evidence/packages.txt"
     cat /etc/openwrt_release >"$evidence/openwrt-release.txt"
     uname -a >"$evidence/uname.txt"
+
+    ensure_real_directory /usr/share/nftables.d 0755
+    ensure_real_directory /usr/share/nftables.d/ruleset-post 0755
 
     "$driver" apply --runtime openwrt --revision qemu-baseline --available=false
     "$driver" confirm --runtime openwrt

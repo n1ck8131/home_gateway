@@ -36,7 +36,7 @@ jobs:
           OUTPUT_DIR="$PWD/artifacts/awg-go-run1" scripts/openwrt/build-amneziawg-go.sh
           OUTPUT_DIR="$PWD/artifacts/awg-go-run2" scripts/openwrt/build-amneziawg-go.sh
           diff -ru --no-dereference artifacts/awg-go-run1 artifacts/awg-go-run2
-          .tools/bin/shellcheck scripts/openwrt/*.sh tests/network-ns/*.sh tests/openwrt-sdk/*.sh
+          .tools/bin/shellcheck scripts/openwrt/*.sh tests/network-ns/*.sh tests/network-ns/lib/*.sh tests/openwrt-sdk/*.sh tests/openwrt-qemu/*.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: verified-openwrt-outputs

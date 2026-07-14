@@ -114,6 +114,37 @@ func TestLinuxRuntimePostCheckRejectsUnhookedPreroutingChain(t *testing.T) {
 	}
 }
 
+func TestLinuxRuntimePostCheckAcceptsCanonicalNFTListing(t *testing.T) {
+	candidate := testCandidate("revision-1")
+	candidate.NFT = []byte(strings.Replace(
+		string(candidate.NFT),
+		"    ct direction reply return\n",
+		"    ip daddr { 9.9.9.9 } meta mark set (meta mark & 0x00ffffff) | 0x1000000 "+
+			"ct mark set (ct mark & 0x00ffffff) | 0x1000000 return\n"+
+			"    ip6 daddr { 2620:fe::9 } return\n"+
+			"    ct direction reply return\n",
+		1,
+	))
+	runtime, runner := activeTestLinuxRuntime(t, candidate)
+	listed := strings.NewReplacer(
+		"{ 9.9.9.9 }", "9.9.9.9",
+		"{ 2620:fe::9 }", "2620:fe::9",
+		"meta mark & 0x00ffffff", "meta mark & 0x01ffffff",
+		"ct mark & 0x00ffffff", "ct mark & 0x01ffffff",
+		"| 0x1000000", "| 0x01000000",
+	).Replace(string(candidate.NFT))
+	runner.outputs["nft list table inet routerd"] = []byte(listed)
+
+	if err := runtime.PostCheck(context.Background()); err != nil {
+		t.Fatalf("PostCheck() error = %v, want canonical nft listing accepted", err)
+	}
+
+	runner.outputs["nft list table inet routerd"] = []byte(strings.Replace(listed, "| 0x01000000", "| 0x02000000", 1))
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ordered rules") {
+		t.Fatalf("PostCheck() error = %v, want changed mark rejected", err)
+	}
+}
+
 func TestLinuxRuntimePostCheckRejectsRuleOutsidePrerouting(t *testing.T) {
 	candidate := testCandidate("revision-1")
 	runtime, runner := activeTestLinuxRuntime(t, candidate)
@@ -649,15 +680,16 @@ func TestLinuxRuntimeRestoreRejectsStaticSetDriftButAllowsDynamicElements(t *tes
 	dynamicElements := strings.Replace(
 		string(baseline.NFT),
 		"set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 3600s; }",
-		"set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 1h; elements = { 203.0.113.10 }; }",
+		"set rd_dns_shadow4 { type ipv4_addr; timeout 1h; elements = { 203.0.113.10 }; }",
 		1,
 	)
 	dynamicElements = strings.Replace(
 		dynamicElements,
 		"set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 3600s; }",
-		"set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 1h; elements = { 2001:db8::10 }; }",
+		"set rd_dns_shadow6 { type ipv6_addr; timeout 1h; elements = { 2001:db8::10 }; }",
 		1,
 	)
+	dynamicElements = strings.Replace(dynamicElements, "::/128, ::1/128", "::, ::1", 1)
 
 	tests := []struct {
 		name    string
@@ -689,6 +721,16 @@ func TestLinuxRuntimeRestoreRejectsStaticSetDriftButAllowsDynamicElements(t *tes
 			name:    "set timeout drift",
 			listed:  strings.Replace(string(baseline.NFT), "timeout 3600s", "timeout 30m", 1),
 			wantErr: "timeout=",
+		},
+		{
+			name: "set timeout missing",
+			listed: strings.Replace(
+				string(baseline.NFT),
+				"set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 3600s; }",
+				"set rd_dns_shadow4 { type ipv4_addr; }",
+				1,
+			),
+			wantErr: "flags=",
 		},
 	}
 	for _, test := range tests {
@@ -894,7 +936,7 @@ func testCandidateWithSets(revision string) Candidate {
 	candidate.NFT = []byte("table inet routerd {\n" +
 		"  comment \"managed-by-routerd\";\n" +
 		"  set rd_local4 { type ipv4_addr; flags interval; elements = { 10.0.0.0/8 }; }\n" +
-		"  set rd_local6 { type ipv6_addr; flags interval; elements = { fd00::/8 }; }\n" +
+		"  set rd_local6 { type ipv6_addr; flags interval; elements = { ::/128, ::1/128, fd00::/8 }; }\n" +
 		"  set rd_dns_shadow4 { type ipv4_addr; flags timeout; timeout 3600s; }\n" +
 		"  set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 3600s; }\n" +
 		"  chain prerouting {\n" +

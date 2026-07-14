@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -827,19 +829,33 @@ func verifyNFTSetSemantics(active, expected nftSetSemantics) error {
 	if active.typeName != expected.typeName {
 		return fmt.Errorf("type=%q, want %q", active.typeName, expected.typeName)
 	}
-	if !sameTokenMultiset(active.flags, expected.flags) {
+	if !equalNFTSetFlags(active, expected) {
 		return fmt.Errorf("flags=%v, want %v", active.flags, expected.flags)
 	}
 	if !equalNFTTimeout(active.timeout, expected.timeout) {
 		return fmt.Errorf("timeout=%q, want %q", active.timeout, expected.timeout)
 	}
-	if containsString(expected.flags, "timeout") && len(expected.elements) == 0 {
+	if expected.timeout != "" && containsString(expected.flags, "timeout") && len(expected.elements) == 0 {
 		return nil
 	}
-	if !sameTokenMultiset(active.elements, expected.elements) {
+	if !sameTokenMultiset(comparableNFTSetElements(active.elements), comparableNFTSetElements(expected.elements)) {
 		return fmt.Errorf("elements=%v, want %v", active.elements, expected.elements)
 	}
 	return nil
+}
+
+func equalNFTSetFlags(active, expected nftSetSemantics) bool {
+	if sameTokenMultiset(active.flags, expected.flags) {
+		return true
+	}
+	if containsString(active.flags, "timeout") || !containsString(expected.flags, "timeout") ||
+		!equalNFTTimeout(active.timeout, expected.timeout) {
+		return false
+	}
+	return sameTokenMultiset(active.flags, slices.DeleteFunc(
+		append([]string(nil), expected.flags...),
+		func(flag string) bool { return flag == "timeout" },
+	))
 }
 
 func equalNFTTimeout(active, expected string) bool {
@@ -852,6 +868,30 @@ func equalNFTTimeout(active, expected string) bool {
 	activeDuration, activeErr := time.ParseDuration(active)
 	expectedDuration, expectedErr := time.ParseDuration(expected)
 	return activeErr == nil && expectedErr == nil && activeDuration == expectedDuration
+}
+
+func comparableNFTSetElements(elements []string) []string {
+	comparable := append([]string(nil), elements...)
+	for index, element := range comparable {
+		if canonical, ok := canonicalNFTAddressToken(element); ok {
+			comparable[index] = canonical
+		}
+	}
+	return comparable
+}
+
+func canonicalNFTAddressToken(value string) (string, bool) {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		prefix = prefix.Masked()
+		if prefix.Bits() == prefix.Addr().BitLen() {
+			return prefix.Addr().String(), true
+		}
+		return prefix.String(), true
+	}
+	if address, err := netip.ParseAddr(value); err == nil {
+		return address.String(), true
+	}
+	return "", false
 }
 
 func containsString(values []string, expected string) bool {
@@ -1070,9 +1110,36 @@ func nftTokens(value, semicolonReplacement string) []string {
 
 func nftComparableTokens(tokens []string) []string {
 	comparable := make([]string, 0, len(tokens))
-	for _, token := range tokens {
+	for index := 0; index < len(tokens); index++ {
+		token := tokens[index]
+		if token == "{" && index+2 < len(tokens) && tokens[index+2] == "}" &&
+			tokens[index+1] != "{" && tokens[index+1] != "}" {
+			if canonical, ok := canonicalNFTAddressToken(tokens[index+1]); ok {
+				comparable = append(comparable, canonical)
+				index += 2
+				continue
+			}
+		}
+		if canonical, ok := canonicalNFTAddressToken(token); ok {
+			token = canonical
+		}
 		if token != ";" {
 			comparable = append(comparable, token)
+		}
+	}
+	for index := 0; index+8 < len(comparable); index++ {
+		register := comparable[index]
+		if (register != "meta" && register != "ct") ||
+			comparable[index+1] != "mark" || comparable[index+2] != "set" ||
+			comparable[index+3] != register || comparable[index+4] != "mark" ||
+			comparable[index+5] != "&" || comparable[index+7] != "|" {
+			continue
+		}
+		mask, maskErr := strconv.ParseUint(strings.TrimPrefix(comparable[index+6], "0x"), 16, 64)
+		mark, markErr := strconv.ParseUint(strings.TrimPrefix(comparable[index+8], "0x"), 16, 64)
+		if maskErr == nil && markErr == nil &&
+			strings.HasPrefix(comparable[index+6], "0x") && strings.HasPrefix(comparable[index+8], "0x") {
+			comparable[index+6] = fmt.Sprintf("0x%x", mask|mark)
 		}
 	}
 	return comparable

@@ -24,6 +24,10 @@ func (ExecRunner) Run(ctx context.Context, program string, args ...string) (Resu
 	if program == "" {
 		return Result{}, errors.New("program is required")
 	}
+	if !allowedProgram(program) {
+		return Result{}, fmt.Errorf("program %q is not in the dataplane executable allowlist", program)
+	}
+	// #nosec G204 -- program is restricted above to the fixed dataplane executable allowlist; TestExecRunnerProgramAllowlist guards this boundary.
 	command := exec.CommandContext(ctx, program, args...)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -39,4 +43,13 @@ func (ExecRunner) Run(ctx context.Context, program string, args ...string) (Resu
 		return result, fmt.Errorf("%s exited with status %d: %w", program, result.ExitCode, err)
 	}
 	return result, fmt.Errorf("run %s: %w", program, err)
+}
+
+func allowedProgram(program string) bool {
+	switch program {
+	case "fw4", "nft", "dnsmasq", "ip", "/etc/init.d/dnsmasq":
+		return true
+	default:
+		return false
+	}
 }

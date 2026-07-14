@@ -520,6 +520,31 @@ func TestReadSnapshotManifestRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestManagedFileHelpersRejectUnsafePaths(t *testing.T) {
+	if _, err := readRegularFile("relative-artifact"); err == nil || !strings.Contains(err.Error(), "absolute clean path") {
+		t.Fatalf("readRegularFile() error = %v, want absolute clean path rejection", err)
+	}
+	if err := writeExclusive("relative-artifact", []byte("unsafe"), 0o600); err == nil || !strings.Contains(err.Error(), "absolute clean path") {
+		t.Fatalf("writeExclusive() error = %v, want absolute clean path rejection", err)
+	}
+	if err := syncDirectory("relative-directory"); err == nil || !strings.Contains(err.Error(), "absolute clean path") {
+		t.Fatalf("syncDirectory() error = %v, want absolute clean path rejection", err)
+	}
+
+	directory := t.TempDir()
+	if _, err := readRegularFile(directory); err == nil || !strings.Contains(err.Error(), "regular non-symlink file") {
+		t.Fatalf("readRegularFile(directory) error = %v, want regular-file rejection", err)
+	}
+	existing := filepath.Join(directory, "existing")
+	if err := os.WriteFile(existing, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExclusive(existing, []byte("replacement"), 0o600); err == nil {
+		t.Fatal("writeExclusive() replaced an existing managed file")
+	}
+	assertFileEquals(t, existing, []byte("original"))
+}
+
 func newTestLinuxRuntime(t *testing.T) (LinuxRuntime, *recordingRunner) {
 	t.Helper()
 	base := t.TempDir()

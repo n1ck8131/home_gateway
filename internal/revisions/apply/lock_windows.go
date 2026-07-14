@@ -11,6 +11,9 @@ import (
 )
 
 func openAdvisoryLockFile(path string) (*os.File, error) {
+	if err := requireAbsoluteCleanPath(path); err != nil {
+		return nil, err
+	}
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, fmt.Errorf("%s must be a regular non-symlink file", path)
@@ -18,6 +21,7 @@ func openAdvisoryLockFile(path string) (*os.File, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	// #nosec G304 -- the absolute clean lock path has a validated real parent; pre/post Lstat checks reject symlinks and non-regular entries.
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -30,6 +34,15 @@ func openAdvisoryLockFile(path string) (*os.File, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		_ = file.Close()
 		return nil, fmt.Errorf("%s must be a regular non-symlink file", path)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		_ = file.Close()
+		return nil, fmt.Errorf("%s changed while opening the operation lock", path)
 	}
 	return file, nil
 }

@@ -1132,7 +1132,17 @@ func requireDirectory(path string) error {
 	return nil
 }
 
+func requireAbsoluteCleanPath(path string) error {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("absolute clean path is required: %q", path)
+	}
+	return nil
+}
+
 func readRegularFile(path string) ([]byte, error) {
+	if err := requireAbsoluteCleanPath(path); err != nil {
+		return nil, err
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -1140,7 +1150,20 @@ func readRegularFile(path string) ([]byte, error) {
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%s must be a regular non-symlink file", path)
 	}
-	return os.ReadFile(path)
+	// #nosec G304 -- callers provide validated managed paths; the pre-open Lstat and post-open SameFile check pin the read to that regular file.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("%s changed while opening the managed file", path)
+	}
+	return io.ReadAll(file)
 }
 
 func readOptionalRegularFile(path string) ([]byte, bool, error) {
@@ -1155,6 +1178,13 @@ func readOptionalRegularFile(path string) ([]byte, bool, error) {
 }
 
 func writeExclusive(path string, data []byte, mode os.FileMode) error {
+	if err := requireAbsoluteCleanPath(path); err != nil {
+		return err
+	}
+	if err := requireDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	// #nosec G304 -- path is absolute and clean, its parent is a real managed directory, and O_EXCL prevents following or replacing an existing entry.
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
@@ -1279,11 +1309,29 @@ func removeDirectory(path string) error {
 }
 
 func syncDirectory(path string) error {
+	if err := requireAbsoluteCleanPath(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s must be a real directory", path)
+	}
+	// #nosec G304 -- path is absolute and clean; Lstat plus SameFile below binds the handle to the validated real directory.
 	directory, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
+	openedInfo, err := directory.Stat()
+	if err != nil {
+		return err
+	}
+	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
+		return fmt.Errorf("%s changed while opening the managed directory", path)
+	}
 	if err := directory.Sync(); err != nil && runtime.GOOS != "windows" {
 		return err
 	}

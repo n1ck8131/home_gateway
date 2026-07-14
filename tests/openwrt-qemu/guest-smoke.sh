@@ -119,8 +119,11 @@ assert_identity
 if [ "$phase" = phase1 ]; then
     apk info dnsmasq >/dev/null 2>&1 || fail "pinned base image lacks plain dnsmasq"
     sha256sum /etc/config/firewall /etc/config/dhcp >"$root/base-config.sha256"
-    apk add --no-network "$root/dnsmasq-full-2.93-r1.apk" "$root/ip-full-6.18.0-r2.apk" \
-        >"$evidence/apk-install.stdout" 2>"$evidence/apk-install.stderr"
+    if ! apk add --no-network "$root/dnsmasq-full-2.93-r1.apk" "$root/ip-full-6.18.0-r2.apk" \
+        >"$evidence/apk-install.stdout" 2>"$evidence/apk-install.stderr"; then
+        cat "$evidence/apk-install.stderr" >&2
+        fail "offline package install failed"
+    fi
     assert_full_packages
     /etc/init.d/dnsmasq restart
     apk info -vv >"$evidence/packages.txt"

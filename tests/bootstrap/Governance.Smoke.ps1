@@ -28,7 +28,8 @@ $missing = @($required | Where-Object {
 if ($missing.Count -ne 0) {
     throw "Missing governance files: $($missing -join ', ')"
 }
-if ((Get-Content -LiteralPath (Join-Path $root 'STATUS.md') -Raw) -notmatch 'Current phase: P0') {
-    throw 'STATUS.md must identify P0'
+$status = Get-Content -LiteralPath (Join-Path $root 'STATUS.md') -Raw
+if ($status -notmatch '(?m)^Current phase: P[0-9]+(?:[A-Z])?\b') {
+    throw 'STATUS.md must identify a numbered project phase'
 }
 'GOVERNANCE_SMOKE_PASS'

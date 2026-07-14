@@ -98,6 +98,7 @@ mkdir -p "$cache"
 
 fetch_artifact() {
     key="$1"
+    kind="${2:-input}"
     url="$(jq -er ".artifacts.$key.url" "$lock")"
     expected="$(jq -er ".artifacts.$key.sha256" "$lock")"
     case "$url" in
@@ -114,17 +115,39 @@ fetch_artifact() {
         mv "$partial" "$destination"
     fi
     printf '%s  %s\n' "$expected" "$destination" | sha256sum --check - >&2
+    printf '%s  %s\n' "$expected" "$filename" >>"$evidence/locked-inputs.sha256"
+    if [ "$kind" = apk ]; then
+        printf '%s  %s\n' "$expected" "$filename" >>"$work_root/qemu-apks.sha256"
+    fi
     printf '%s\n' "$destination"
 }
 
+: >"$evidence/locked-inputs.sha256"
+: >"$work_root/qemu-apks.sha256"
 image_archive="$(fetch_artifact openwrt_qemu)"
-dnsmasq_apk="$(fetch_artifact openwrt_qemu_dnsmasq_full)"
-ip_apk="$(fetch_artifact openwrt_qemu_ip_full)"
+dnsmasq_apk="$(fetch_artifact openwrt_qemu_dnsmasq_full apk)"
+ip_apk="$(fetch_artifact openwrt_qemu_ip_full apk)"
+libnetfilter_conntrack_apk="$(fetch_artifact openwrt_qemu_libnetfilter_conntrack3 apk)"
+libnettle_apk="$(fetch_artifact openwrt_qemu_libnettle8 apk)"
+libbpf_apk="$(fetch_artifact openwrt_qemu_libbpf1 apk)"
+libelf_apk="$(fetch_artifact openwrt_qemu_libelf1 apk)"
+libgmp_apk="$(fetch_artifact openwrt_qemu_libgmp10 apk)"
+libnfnetlink_apk="$(fetch_artifact openwrt_qemu_libnfnetlink0 apk)"
+kmod_conntrack_netlink_apk="$(fetch_artifact openwrt_qemu_kmod_nf_conntrack_netlink apk)"
 
-jq '{openwrt_qemu, artifacts: {openwrt_qemu: .artifacts.openwrt_qemu, openwrt_qemu_dnsmasq_full: .artifacts.openwrt_qemu_dnsmasq_full, openwrt_qemu_ip_full: .artifacts.openwrt_qemu_ip_full}}' \
+jq '{openwrt_qemu, artifacts: {
+        openwrt_qemu: .artifacts.openwrt_qemu,
+        openwrt_qemu_dnsmasq_full: .artifacts.openwrt_qemu_dnsmasq_full,
+        openwrt_qemu_ip_full: .artifacts.openwrt_qemu_ip_full,
+        openwrt_qemu_libnetfilter_conntrack3: .artifacts.openwrt_qemu_libnetfilter_conntrack3,
+        openwrt_qemu_libnettle8: .artifacts.openwrt_qemu_libnettle8,
+        openwrt_qemu_libbpf1: .artifacts.openwrt_qemu_libbpf1,
+        openwrt_qemu_libelf1: .artifacts.openwrt_qemu_libelf1,
+        openwrt_qemu_libgmp10: .artifacts.openwrt_qemu_libgmp10,
+        openwrt_qemu_libnfnetlink0: .artifacts.openwrt_qemu_libnfnetlink0,
+        openwrt_qemu_kmod_nf_conntrack_netlink: .artifacts.openwrt_qemu_kmod_nf_conntrack_netlink
+    }}' \
     "$lock" >"$evidence/locked-inputs.json"
-grep -E 'openwrt-25\.12\.5-x86-64-generic-ext4-combined\.img\.gz|dnsmasq-full-2\.93-r1\.apk|ip-full-6\.18\.0-r2\.apk' \
-    "$checksums" >"$evidence/locked-inputs.sha256"
 qemu-system-x86_64 --version >"$evidence/qemu-version.txt"
 "${GO_BIN:-go}" version >"$evidence/go-version.txt"
 
@@ -175,7 +198,10 @@ wait_for_guest
 guest_ssh 'mkdir -p /root/routerd-p2 && chmod 700 /root/routerd-p2'
 scp -O -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$known_hosts" \
-    "$driver" "$script_dir/guest-smoke.sh" "$dnsmasq_apk" "$ip_apk" \
+    "$driver" "$script_dir/guest-smoke.sh" "$work_root/qemu-apks.sha256" \
+    "$dnsmasq_apk" "$ip_apk" "$libnetfilter_conntrack_apk" "$libnettle_apk" \
+    "$libbpf_apk" "$libelf_apk" "$libgmp_apk" "$libnfnetlink_apk" \
+    "$kmod_conntrack_netlink_apk" \
     root@127.0.0.1:/root/routerd-p2/ >"$evidence/scp-upload.log" 2>&1
 guest_ssh 'chmod 700 /root/routerd-p2/lab-driver /root/routerd-p2/guest-smoke.sh'
 

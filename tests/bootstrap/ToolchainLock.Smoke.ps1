@@ -20,6 +20,10 @@ $requiredArtifacts = @(
     'actionlint_windows_amd64', 'actionlint_linux_amd64',
     'openwrt_sdk', 'openwrt_factory', 'openwrt_sysupgrade',
     'openwrt_qemu', 'openwrt_qemu_dnsmasq_full', 'openwrt_qemu_ip_full',
+    'openwrt_qemu_libnetfilter_conntrack3', 'openwrt_qemu_libnettle8',
+    'openwrt_qemu_libbpf1', 'openwrt_qemu_libelf1',
+    'openwrt_qemu_libgmp10', 'openwrt_qemu_libnfnetlink0',
+    'openwrt_qemu_kmod_nf_conntrack_netlink',
     'awg_kernel_source', 'awg_tools_source', 'awg_go_source',
     'awg_openwrt_adapter_source'
 )

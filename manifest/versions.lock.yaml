@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "locked_at": "2026-07-12",
+  "locked_at": "2026-07-14",
   "go_modules": {
     "govulncheck": "golang.org/x/vuln/cmd/govulncheck@v1.1.4",
     "staticcheck": "honnef.co/go/tools/cmd/staticcheck@2026.1",
@@ -111,6 +111,34 @@
     "openwrt_qemu_ip_full": {
       "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/ip-full-6.18.0-r2.apk",
       "sha256": "ccb056ae416635ceeedec2bf1d137c1b9a181069f818e0f1404547e8e16ad22d"
+    },
+    "openwrt_qemu_libnetfilter_conntrack3": {
+      "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libnetfilter-conntrack3-1.1.0-r1.apk",
+      "sha256": "d2e6866ff4230202319c4e99610b1e8790c55516e5ccf35a8faa59feb7106a2d"
+    },
+    "openwrt_qemu_libnettle8": {
+      "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libnettle8-3.10.2-r1.apk",
+      "sha256": "cc08604a5839f5ec59094e0ad1492195d9a5a8b555bc941e55908b8014d40a39"
+    },
+    "openwrt_qemu_libbpf1": {
+      "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libbpf1-1.6.2-r1.apk",
+      "sha256": "60511f7f251599c0c27246aaa3c2cc46f267d52dd76070195eb9f707124f1699"
+    },
+    "openwrt_qemu_libelf1": {
+      "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libelf1-0.192-r1.apk",
+      "sha256": "6fd93321212379abd979e8596b4c902c89ff21a9764a6ae50bae62c1a7c99ea6"
+    },
+    "openwrt_qemu_libgmp10": {
+      "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libgmp10-6.3.0-r2.apk",
+      "sha256": "424af0523d50608b8ba0ac9fb8411451f1ba73e4e3b8a76bcffdafb78feb6eae"
+    },
+    "openwrt_qemu_libnfnetlink0": {
+      "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libnfnetlink0-1.0.2-r1.apk",
+      "sha256": "4520b43d6336a91cafe38e0753da44d204aa616cc7372c84439feb6478be6f3d"
+    },
+    "openwrt_qemu_kmod_nf_conntrack_netlink": {
+      "url": "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/kmods/6.12.94-1-a7bc15f451f9652701ba04af9cfb0b95/kmod-nf-conntrack-netlink-6.12.94-r1.apk",
+      "sha256": "a514da8981d118b9f31c6f5fecead679cbf00f10381d2481f1c3a59705fbae6f"
     },
     "awg_kernel_source": {
       "url": "https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/archive/refs/tags/v1.0.20260611.tar.gz",

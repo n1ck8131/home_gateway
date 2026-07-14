@@ -50,6 +50,20 @@ cleanup_lab() {
     for link in ${LAB_HOST_LINKS:-}; do
         ip link del "$link" >/dev/null 2>&1 || true
     done
+    for text_evidence in "$EVIDENCE_DIR"/*.log "$EVIDENCE_DIR"/*.txt "$EVIDENCE_DIR"/*.conf "$EVIDENCE_DIR"/*.json "$EVIDENCE_DIR"/*.tsv; do
+        [ -f "$text_evidence" ] || continue
+        sed -i \
+            -e "s|$LAB_ROOT|<LAB_ROOT>|g" \
+            -e "s|$NS_CLIENT|<NS_CLIENT>|g" \
+            -e "s|$NS_ROUTER|<NS_ROUTER>|g" \
+            -e "s|$NS_WAN|<NS_WAN>|g" \
+            -e "s|$NS_VPN|<NS_VPN>|g" \
+            -e "s|$NS_INTERNET2|<NS_INTERNET2>|g" \
+            -e "s|$NS_INTERNET|<NS_INTERNET>|g" \
+            "$text_evidence"
+    done
+    assert_file_size_cap
+    handoff_external_evidence
 }
 
 assert_file_size_cap() {
@@ -61,4 +75,19 @@ assert_file_size_cap() {
         fail "evidence exceeds 50 MiB: ${size_kib} KiB"
     fi
     printf '%s\n' "$size_kib" >"$EVIDENCE_DIR/size-kib.txt"
+}
+
+handoff_external_evidence() {
+    [ "${EVIDENCE_IS_EXTERNAL:-0}" = 1 ] || return 0
+    [ "$(id -u)" -eq 0 ] || return 0
+    if [ -z "${SUDO_UID:-}" ] && [ -z "${SUDO_GID:-}" ]; then
+        return 0
+    fi
+    case "${SUDO_UID:-}" in
+        ''|*[!0-9]*) fail "SUDO_UID must be numeric for evidence handoff" ;;
+    esac
+    case "${SUDO_GID:-}" in
+        ''|*[!0-9]*) fail "SUDO_GID must be numeric for evidence handoff" ;;
+    esac
+    chown -R "$SUDO_UID:$SUDO_GID" "$EVIDENCE_DIR"
 }

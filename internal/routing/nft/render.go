@@ -89,8 +89,7 @@ func Render(plan contracts.PolicyPlan, inventory Inventory) ([]byte, error) {
 			}
 		}
 	}
-	out.WriteString("    ct mark & 0xff000000 != 0 meta mark set (meta mark & 0x00ffffff) | (ct mark & 0xff000000)\n")
-	out.WriteString("    ct mark & 0xff000000 != 0 return\n")
+	writeConnmarkRestoreRules(&out, marks)
 
 	for _, device := range orderedDevices {
 		if device.mode == contracts.DeviceModeAlwaysVPN {
@@ -291,7 +290,23 @@ func writeDeviceAction(out *strings.Builder, device deviceRuntime, action string
 }
 
 func markAction(mark uint32) string {
-	return fmt.Sprintf("meta mark set (meta mark & 0x00ffffff) | %#x ct mark set (ct mark & 0x00ffffff) | (meta mark & 0xff000000) return", mark)
+	return fmt.Sprintf("meta mark set (meta mark & 0x00ffffff) | %#x ct mark set (ct mark & 0x00ffffff) | %#x return", mark, mark)
+}
+
+func writeConnmarkRestoreRules(out *strings.Builder, marks map[string]uint32) {
+	unique := make(map[uint32]struct{}, len(marks))
+	values := make([]uint32, 0, len(marks))
+	for _, mark := range marks {
+		if _, exists := unique[mark]; exists {
+			continue
+		}
+		unique[mark] = struct{}{}
+		values = append(values, mark)
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+	for _, mark := range values {
+		fmt.Fprintf(out, "    ct mark & 0xff000000 == %#x meta mark set (meta mark & 0x00ffffff) | %#x return\n", mark, mark)
+	}
 }
 
 func directOverrideAction() string {

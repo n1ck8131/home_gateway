@@ -53,9 +53,24 @@ LAB_PIDS=
 
 LAB_ROOT=$(mktemp -d "/tmp/routerd-netns-${token}-XXXXXX")
 EVIDENCE_DIR="$LAB_ROOT/evidence"
+EVIDENCE_IS_EXTERNAL=0
 LAB_DRIVER="$LAB_ROOT/bin/lab-driver"
-mkdir -p "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/run" "$EVIDENCE_DIR"
-chmod 700 "$LAB_ROOT" "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/run" "$EVIDENCE_DIR"
+mkdir -p "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/run"
+chmod 700 "$LAB_ROOT" "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/run"
+if [ -n "${NETWORK_NS_EVIDENCE_DIR:-}" ]; then
+    case "$NETWORK_NS_EVIDENCE_DIR" in
+        /*/) fail "NETWORK_NS_EVIDENCE_DIR must not have a trailing slash" ;;
+        /*) ;;
+        *) fail "NETWORK_NS_EVIDENCE_DIR must be an absolute path" ;;
+    esac
+    [ "$NETWORK_NS_EVIDENCE_DIR" != / ] || fail "NETWORK_NS_EVIDENCE_DIR cannot be root"
+    [ ! -e "$NETWORK_NS_EVIDENCE_DIR" ] || fail "NETWORK_NS_EVIDENCE_DIR already exists"
+    mkdir -m 700 "$NETWORK_NS_EVIDENCE_DIR"
+    EVIDENCE_DIR=$NETWORK_NS_EVIDENCE_DIR
+    EVIDENCE_IS_EXTERNAL=1
+else
+    mkdir -m 700 "$EVIDENCE_DIR"
+fi
 trap cleanup_lab EXIT INT TERM HUP
 
 {
@@ -391,33 +406,6 @@ ip -n "$NS_ROUTER" -4 route show table 10002 >"$EVIDENCE_DIR/route-slot2-v4.txt"
 ip -n "$NS_ROUTER" -6 route show table 10002 >"$EVIDENCE_DIR/route-slot2-v6.txt"
 jq . "$LAB_ROOT/state/journal.json" >"$EVIDENCE_DIR/journal.json"
 sed -n '1,200p' "$DNS_INCLUDE" >"$EVIDENCE_DIR/dnsmasq-active.conf"
-
-for text_evidence in "$EVIDENCE_DIR"/*.log "$EVIDENCE_DIR"/*.txt "$EVIDENCE_DIR"/*.conf "$EVIDENCE_DIR"/*.json "$EVIDENCE_DIR"/*.tsv; do
-    [ -f "$text_evidence" ] || continue
-    sed -i \
-        -e "s|$LAB_ROOT|<LAB_ROOT>|g" \
-        -e "s|$NS_CLIENT|<NS_CLIENT>|g" \
-        -e "s|$NS_ROUTER|<NS_ROUTER>|g" \
-        -e "s|$NS_WAN|<NS_WAN>|g" \
-        -e "s|$NS_VPN|<NS_VPN>|g" \
-        -e "s|$NS_INTERNET2|<NS_INTERNET2>|g" \
-        -e "s|$NS_INTERNET|<NS_INTERNET>|g" \
-        "$text_evidence"
-done
-assert_file_size_cap
-
-if [ -n "${NETWORK_NS_EVIDENCE_DIR:-}" ]; then
-    case "$NETWORK_NS_EVIDENCE_DIR" in
-        /*/) fail "NETWORK_NS_EVIDENCE_DIR must not have a trailing slash" ;;
-        /*) ;;
-        *) fail "NETWORK_NS_EVIDENCE_DIR must be an absolute path" ;;
-    esac
-    [ "$NETWORK_NS_EVIDENCE_DIR" != / ] || fail "NETWORK_NS_EVIDENCE_DIR cannot be root"
-    [ ! -e "$NETWORK_NS_EVIDENCE_DIR" ] || fail "NETWORK_NS_EVIDENCE_DIR already exists"
-    mkdir -m 700 "$NETWORK_NS_EVIDENCE_DIR"
-    cp -R "$EVIDENCE_DIR"/. "$NETWORK_NS_EVIDENCE_DIR"/
-    EVIDENCE_DIR=$NETWORK_NS_EVIDENCE_DIR
-fi
 
 namespaces_to_check=$LAB_NAMESPACES
 cleanup_lab

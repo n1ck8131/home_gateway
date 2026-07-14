@@ -1,6 +1,7 @@
 package apply
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ type recordingRunner struct {
 	fw4Output   []byte
 	outputs     map[string][]byte
 	failProgram string
+	failStderr  []byte
 	beforeRun   func(string, []string) error
 }
 
@@ -36,7 +38,7 @@ func (runner *recordingRunner) Run(_ context.Context, program string, args ...st
 		}
 	}
 	if runner.failProgram == program {
-		return linux.Result{}, errors.New(program + " failed")
+		return linux.Result{Stderr: append([]byte(nil), runner.failStderr...)}, errors.New(program + " failed")
 	}
 	if output, exists := runner.outputs[commandKey(program, args)]; exists {
 		return linux.Result{Stdout: append([]byte(nil), output...)}, nil
@@ -246,6 +248,24 @@ func TestLinuxRuntimeStagesImmutableRevisionAndValidatesWithoutMutatingIt(t *tes
 	}
 	if runner.calls[2].program != "dnsmasq" || !strings.HasPrefix(runner.calls[2].args[1], "--conf-file=") {
 		t.Fatalf("dns validation call = %#v", runner.calls[2])
+	}
+}
+
+func TestLinuxRuntimeReportsBoundedNFTValidationStderr(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	runner.failProgram = "nft"
+	runner.failStderr = append([]byte("candidate:12:3: Operation not supported\x00\n"), bytes.Repeat([]byte("x"), 5000)...)
+
+	err := runtime.Validate(context.Background(), candidate)
+	if err == nil || !strings.Contains(err.Error(), "nft stderr: candidate:12:3: Operation not supported") {
+		t.Fatalf("Validate() error = %v, want nft stderr", err)
+	}
+	if strings.ContainsRune(err.Error(), '\x00') || !strings.Contains(err.Error(), "[truncated]") || len(err.Error()) > 4300 {
+		t.Fatalf("Validate() diagnostic is not sanitized and bounded: length=%d error=%q", len(err.Error()), err)
 	}
 }
 

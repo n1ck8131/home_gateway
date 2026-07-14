@@ -57,7 +57,7 @@ func TestRenderReturnsReplyTrafficBeforeAnyClassification(t *testing.T) {
 	text := string(got)
 	reply := strings.Index(text, "ct direction reply return")
 	local := strings.Index(text, "fib daddr type local return")
-	restore := strings.Index(text, "ct mark & 0xff000000 != 0 meta mark set")
+	restore := strings.Index(text, "ct mark & 0xff000000 == 0x1000000 meta mark set")
 	classify := strings.Index(text, "ip6 daddr { 2001:470:10::/64 }")
 	if reply < 0 || local < 0 || restore < 0 || classify < 0 {
 		t.Fatalf("missing reply guard or classification rule:\n%s", text)
@@ -102,6 +102,29 @@ func TestRenderUsesEntrySpecificServerMark(t *testing.T) {
 	}
 }
 
+func TestRenderRestoresKnownMarksDeterministicallyWithoutCrossRegisterExpressions(t *testing.T) {
+	nl := serverRoute(t, "nl", 1)
+	de := serverRoute(t, "de", 2)
+	got, err := Render(
+		contracts.PolicyPlan{ServerRoutes: []contracts.ServerRoute{de, nl}},
+		Inventory{ActiveServerID: "nl"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	first := strings.Index(text, "ct mark & 0xff000000 == 0x1000000 meta mark set (meta mark & 0x00ffffff) | 0x1000000 return")
+	second := strings.Index(text, "ct mark & 0xff000000 == 0x2000000 meta mark set (meta mark & 0x00ffffff) | 0x2000000 return")
+	if first < 0 || second < 0 || first >= second {
+		t.Fatalf("known marks are not restored in deterministic slot order:\n%s", text)
+	}
+	for _, forbidden := range []string{"| (ct mark", "| (meta mark"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("unsupported cross-register expression %q:\n%s", forbidden, text)
+		}
+	}
+}
+
 func TestRenderDeviceModesOverrideRestoredMarks(t *testing.T) {
 	route := serverRoute(t, "nl", 1)
 	directException := globalEntry("direct-exception", "9.9.9.9", contracts.EntryKindIP, contracts.RouteClassDirect, contracts.OriginManual, 2)
@@ -126,7 +149,7 @@ func TestRenderDeviceModesOverrideRestoredMarks(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(got)
-	restore := strings.Index(text, "ct mark & 0xff000000 != 0 meta mark set")
+	restore := strings.Index(text, "ct mark & 0xff000000 == 0x1000000 meta mark set")
 	alwaysDirect := strings.Index(text, "ip saddr 192.168.1.11 "+directOverrideAction())
 	exception := strings.Index(text, "ip saddr 192.168.1.10 ip daddr { 9.9.9.9 } "+directOverrideAction())
 	alwaysVPN := strings.Index(text, "ip saddr 192.168.1.10 "+markAction(route.Mark))
@@ -142,14 +165,18 @@ func TestRenderDeviceModesOverrideRestoredMarks(t *testing.T) {
 }
 
 func TestRenderSystemDirectPrecedesConnmarkRestore(t *testing.T) {
+	route := serverRoute(t, "nl", 1)
 	entry := globalEntry("management", "1.1.1.1", contracts.EntryKindIP, contracts.RouteClassDirect, contracts.OriginSystemDirect, 0)
-	got, err := Render(contracts.PolicyPlan{Entries: []contracts.RouteEntry{entry}}, Inventory{})
+	got, err := Render(
+		contracts.PolicyPlan{ServerRoutes: []contracts.ServerRoute{route}, Entries: []contracts.RouteEntry{entry}},
+		Inventory{ActiveServerID: "nl"},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(got)
 	systemDirect := strings.Index(text, "ip daddr { 1.1.1.1 } "+directOverrideAction())
-	restore := strings.Index(text, "ct mark & 0xff000000 != 0 meta mark set")
+	restore := strings.Index(text, "ct mark & 0xff000000 == 0x1000000 meta mark set")
 	if systemDirect < 0 || restore < 0 || systemDirect >= restore {
 		t.Fatalf("system-direct rule must precede connmark restore:\n%s", text)
 	}

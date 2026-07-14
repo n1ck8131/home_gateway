@@ -447,10 +447,10 @@ func (runtime LinuxRuntime) Validate(ctx context.Context, candidate Candidate) e
 	if err := replaceRegularFile(candidatePath, complete, 0o600); err != nil {
 		return err
 	}
-	_, validationErr := runtime.Runner.Run(ctx, "nft", "-c", "-f", candidatePath)
+	validationResult, validationErr := runtime.Runner.Run(ctx, "nft", "-c", "-f", candidatePath)
 	cleanupErr := removeManagedFile(candidatePath)
 	if validationErr != nil {
-		return validationErr
+		return withBoundedStderr(validationErr, validationResult.Stderr)
 	}
 	if cleanupErr != nil {
 		return fmt.Errorf("remove temporary nft validation file: %w", cleanupErr)
@@ -459,6 +459,32 @@ func (runtime LinuxRuntime) Validate(ctx context.Context, candidate Candidate) e
 		return err
 	}
 	return nil
+}
+
+func withBoundedStderr(err error, stderr []byte) error {
+	const limit = 4096
+	stderr = bytes.TrimSpace(stderr)
+	if len(stderr) == 0 {
+		return err
+	}
+	truncated := len(stderr) > limit
+	if truncated {
+		stderr = stderr[:limit]
+	}
+	diagnostic := strings.TrimSpace(strings.Map(func(value rune) rune {
+		switch {
+		case value == '\n' || value == '\t':
+			return value
+		case value < ' ' || value == 0x7f:
+			return ' '
+		default:
+			return value
+		}
+	}, string(stderr)))
+	if truncated {
+		diagnostic += "\n[truncated]"
+	}
+	return fmt.Errorf("%w; nft stderr: %s", err, diagnostic)
 }
 
 func (runtime LinuxRuntime) Snapshot(_ context.Context, activeRevision string) error {

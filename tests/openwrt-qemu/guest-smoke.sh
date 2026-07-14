@@ -56,7 +56,7 @@ record_runtime() {
     ip -4 route show table all >"$evidence/$label.ipv4-routes"
     ip -6 rule show >"$evidence/$label.ipv6-rules"
     ip -6 route show table all >"$evidence/$label.ipv6-routes"
-    fw4 print >"$evidence/$label.fw4"
+    fw4 print >"$evidence/$label.fw4" 2>&1
     cp "$journal" "$evidence/$label.journal.json"
 }
 
@@ -129,7 +129,9 @@ assert_runtime() {
     [ -s "$firewall_include" ] || fail "firewall include is missing"
     [ -s "$dns_include" ] || fail "DNS include is missing"
     nft list table inet routerd | grep -q 'managed-by-routerd' || fail "routerd nft ownership marker is missing"
-    fw4 print | grep -q 'managed-by-routerd' || fail "fw4 does not consume the routerd include"
+    fw4_output="$evidence/assert-runtime.fw4"
+    fw4 print >"$fw4_output" 2>&1 || fail "fw4 could not render the active ruleset"
+    grep -Fq "$firewall_include" "$fw4_output" || fail "fw4 does not consume the routerd include"
     artifact=$(active_route_artifact)
     tables=$(route_tables_from_artifact "$artifact")
     [ "$tables" = 10001 ] || fail "active route artifact does not own canonical table 10001: $tables"

@@ -77,14 +77,19 @@ trap cleanup_lab EXIT INT TERM HUP
     printf '%s\n' 'port=53' 'interface=lan0' 'bind-interfaces' 'no-resolv' 'no-hosts' 'user=root' 'group=root'
     printf 'conf-dir=%s\n' "$LAB_ROOT/etc/routerd.d"
     printf 'log-facility=%s\n' "$EVIDENCE_DIR/dnsmasq.log"
+    printf 'server=/%s/%s\n' 'suite.test' "$WAN_LINK4"
+} >"$LAB_ROOT/etc/dnsmasq-base.conf"
+chmod 600 "$LAB_ROOT/etc/dnsmasq-base.conf"
+
+{
+    printf '%s\n' 'port=53' 'interface=wan0' 'bind-interfaces' 'no-resolv' 'no-hosts' 'user=root' 'group=root'
     printf 'host-record=%s,%s,%s\n' "$VPN_DOMAIN" "$VPN4" "$VPN6"
     printf 'host-record=%s,%s,%s\n' "$VPN_APEX" "$VPN4" "$VPN6"
     printf 'host-record=%s,%s,%s\n' "$VPN_EXACT_CHILD" "$VPN4" "$VPN6"
     printf 'host-record=%s,%s,%s\n' "$DIRECT_DOMAIN" "$DIRECT4" "$DIRECT6"
     printf 'cname=%s,%s\n' "$VPN_ALIAS" "$VPN_DOMAIN"
-    printf 'local=/%s/\n' 'suite.test'
-} >"$LAB_ROOT/etc/dnsmasq-base.conf"
-chmod 600 "$LAB_ROOT/etc/dnsmasq-base.conf"
+} >"$LAB_ROOT/etc/dnsmasq-upstream.conf"
+chmod 600 "$LAB_ROOT/etc/dnsmasq-upstream.conf"
 
 GO_BIN=${GO_BIN:-go}
 if ! command -v "$GO_BIN" >/dev/null 2>&1; then
@@ -98,6 +103,19 @@ note "building bounded lab driver"
 
 note "creating isolated topology"
 create_topology
+
+ip netns exec "$NS_WAN" dnsmasq --keep-in-foreground \
+    --conf-file="$LAB_ROOT/etc/dnsmasq-upstream.conf" \
+    >"$EVIDENCE_DIR/upstream-dnsmasq.log" 2>&1 &
+UPSTREAM_DNS_PID=$!
+register_pid "$UPSTREAM_DNS_PID"
+
+attempts=0
+while ! ip netns exec "$NS_ROUTER" dig +time=1 +tries=1 +short "@$WAN_LINK4" "$VPN_DOMAIN" A 2>/dev/null | grep -Fx "$VPN4" >/dev/null; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 30 ] || fail "upstream DNS fixture did not become ready"
+    sleep 0.1
+done
 
 ip netns exec "$NS_WAN" "$LAB_DRIVER" serve \
     --token wan \

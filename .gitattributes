@@ -9,6 +9,7 @@ go.work.sum text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.sh text eol=lf
+tests/network-ns/fixtures/*.env text eol=lf
 *.ps1 text eol=crlf
 *.psd1 text eol=crlf
 *.psm1 text eol=crlf

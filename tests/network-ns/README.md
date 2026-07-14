@@ -1,5 +1,42 @@
-# Network namespace prerequisites
+# P2 Linux network namespace safety suite
 
-P0 proves only that the Linux lab has the required tools, root access and permission to create and remove a network namespace. Restricted containers can still deny these operations even when `CAP_NET_ADMIN` appears present.
+`run.sh` is the only entrypoint. It builds one bounded lab driver, creates five
+uniquely named namespaces, and exercises the production `dataplane.Controller`
+and `apply.LinuxRuntime` through real `nft`, `ip` and `dnsmasq-full` calls.
+Only the OpenWrt-only `fw4` and `/etc/init.d/dnsmasq reload` commands are
+emulated by an argv-preserving runner.
 
-P2 owns the routing topology, packet capture, DNS nftsets, fault injection and no-leak assertions.
+Topology:
+
+```text
+client -> router -> WAN
+             |
+             +-> fake tunnel bridge -> internet
+```
+
+Run only on a disposable Linux CI runner with root and network-namespace
+support:
+
+```sh
+sudo tests/network-ns/run.sh
+```
+
+CI can request a stable, initially absent artifact directory:
+
+```sh
+sudo NETWORK_NS_EVIDENCE_DIR=/absolute/path/network-ns-evidence \
+  tests/network-ns/run.sh
+```
+
+The entrypoint enforces a 15-minute outer deadline, caps Go compilation to one
+logical processor and one package at a time, keeps a fixed process count, and
+uses bounded TERM/KILL/wait cleanup. It does not invoke WSL, Docker or QEMU.
+The emitted evidence directory is rejected if it exceeds 50 MiB.
+
+The suite proves IPv4/IPv6 direct, VPN, scoped work-PC direct, TCP, UDP,
+QUIC-shaped UDP, real A/AAAA/CNAME nftset population and expiry, invalid
+validation rollback, explicit rollback, crash/boot recovery, and twenty
+consecutive tunnel-down no-leak cycles. Stock dnsmasq cannot represent
+exact-apex-only or wildcard-subdomains-only nftset matching without widening;
+the suite therefore asserts that both profiles fail before transaction state
+changes.

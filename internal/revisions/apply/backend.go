@@ -572,7 +572,7 @@ func (runtime LinuxRuntime) Reload(ctx context.Context) error {
 	if _, err := runtime.Runner.Run(ctx, "fw4", "reload"); err != nil {
 		return err
 	}
-	_, err := runtime.Runner.Run(ctx, "ubus", "call", "service", "signal", `{"name":"dnsmasq","signal":1}`)
+	_, err := runtime.Runner.Run(ctx, "/etc/init.d/dnsmasq", "reload")
 	return err
 }
 

@@ -273,7 +273,10 @@ func TestLinuxRuntimeActivatesRoutesBeforeIncludesAndRestoresInitialState(t *tes
 		}
 	}
 	last := runner.calls[len(runner.calls)-2:]
-	if last[0].program != "fw4" || last[1].program != "ubus" {
+	if last[0].program != "fw4" || !reflect.DeepEqual(last[0].args, []string{"reload"}) {
+		t.Fatalf("restore firewall reload call = %#v", last[0])
+	}
+	if last[1].program != "/etc/init.d/dnsmasq" || !reflect.DeepEqual(last[1].args, []string{"reload"}) {
 		t.Fatalf("restore reload calls = %#v", last)
 	}
 }

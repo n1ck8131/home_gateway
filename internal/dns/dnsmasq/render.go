@@ -3,6 +3,7 @@ package dnsmasq
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/vsevo/home-gateway/internal/routing/nft"
@@ -44,46 +45,120 @@ func Render(plan contracts.PolicyPlan, options Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	groups := buildSelectorGroups(bindings)
 	var out strings.Builder
 	fmt.Fprintf(&out, "# routerd managed; nft-timeout=%ds\ncache-rr=ANY\nmax-cache-ttl=%d\n", options.SetTimeoutSeconds, options.CacheTTLSeconds)
-	for _, binding := range bindings {
-		domains, err := dnsmasqDomains(binding)
-		if err != nil {
-			return nil, err
-		}
-		for start := 0; start < len(domains); start += options.ChunkSize {
+	for _, group := range groups {
+		for start := 0; start < len(group.selectors); start += options.ChunkSize {
 			end := start + options.ChunkSize
-			if end > len(domains) {
-				end = len(domains)
+			if end > len(group.selectors) {
+				end = len(group.selectors)
 			}
 			fmt.Fprintf(
 				&out,
-				"nftset=/%s/4#inet#%s#%s,6#inet#%s#%s\n",
-				strings.Join(domains[start:end], "/"),
-				nft.TableName,
-				binding.Set4,
-				nft.TableName,
-				binding.Set6,
+				"nftset=/%s/%s\n",
+				strings.Join(group.selectors[start:end], "/"),
+				group.targets,
 			)
 		}
 	}
 	return []byte(out.String()), nil
 }
 
-func dnsmasqDomains(binding nft.DomainBinding) ([]string, error) {
-	domains := make([]string, 0, len(binding.Patterns))
-	for _, pattern := range binding.Patterns {
-		domain := strings.TrimPrefix(strings.TrimSuffix(pattern, "."), "*.")
-		switch binding.Match {
-		case contracts.DomainMatchExact:
-			return nil, fmt.Errorf("exact domain %q cannot be represented by dnsmasq nftset without matching subdomains", pattern)
-		case contracts.DomainMatchSuffix:
-			domains = append(domains, domain)
-		case contracts.DomainMatchWildcard:
-			return nil, fmt.Errorf("wildcard domain %q cannot be represented by dnsmasq nftset without matching the apex", pattern)
-		default:
-			return nil, fmt.Errorf("unsupported domain match %q", binding.Match)
+type selectorGroup struct {
+	targets   string
+	selectors []string
+}
+
+// buildSelectorGroups expands every domain boundary into the effective set
+// memberships dnsmasq must apply there. This preserves broader overlapping
+// policies when dnsmasq selects a more-specific domain expression.
+func buildSelectorGroups(bindings []nft.DomainBinding) []selectorGroup {
+	boundarySet := make(map[string]struct{})
+	for _, binding := range bindings {
+		for _, pattern := range binding.Patterns {
+			boundarySet[canonicalDomain(pattern)] = struct{}{}
 		}
 	}
-	return domains, nil
+	boundaries := make([]string, 0, len(boundarySet))
+	for boundary := range boundarySet {
+		boundaries = append(boundaries, boundary)
+	}
+	sort.Strings(boundaries)
+
+	selectorsByTargets := make(map[string][]string)
+	for _, boundary := range boundaries {
+		apexTargets := targetsForDomain(boundary, bindings)
+		descendantTargets := targetsForDomain("routerd-probe."+boundary, bindings)
+		if apexTargets == descendantTargets {
+			if apexTargets != "" {
+				selectorsByTargets[apexTargets] = append(selectorsByTargets[apexTargets], boundary)
+			}
+			continue
+		}
+		if apexTargets != "" {
+			selectorsByTargets[apexTargets] = append(selectorsByTargets[apexTargets], boundary)
+		}
+		if descendantTargets == "" && apexTargets != "" {
+			descendantTargets = targetSpec(nft.DNSShadowSet4, nft.DNSShadowSet6)
+		}
+		if descendantTargets != "" {
+			selectorsByTargets[descendantTargets] = append(selectorsByTargets[descendantTargets], "*."+boundary)
+		}
+	}
+
+	targetKeys := make([]string, 0, len(selectorsByTargets))
+	for targets := range selectorsByTargets {
+		targetKeys = append(targetKeys, targets)
+	}
+	sort.Strings(targetKeys)
+	result := make([]selectorGroup, 0, len(targetKeys))
+	for _, targets := range targetKeys {
+		selectors := selectorsByTargets[targets]
+		sort.Strings(selectors)
+		result = append(result, selectorGroup{targets: targets, selectors: selectors})
+	}
+	return result
+}
+
+func targetsForDomain(domain string, bindings []nft.DomainBinding) string {
+	targets := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		matched := false
+		for _, pattern := range binding.Patterns {
+			if domainMatches(domain, pattern, binding.Match) {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			targets = append(targets, targetSpec(binding.Set4, binding.Set6))
+		}
+	}
+	sort.Strings(targets)
+	return strings.Join(targets, ",")
+}
+
+func targetSpec(set4, set6 string) string {
+	return fmt.Sprintf("4#inet#%s#%s,6#inet#%s#%s", nft.TableName, set4, nft.TableName, set6)
+}
+
+func domainMatches(domain, pattern string, match contracts.DomainMatch) bool {
+	domain = canonicalDomain(domain)
+	pattern = canonicalDomain(pattern)
+	subdomain := domain != pattern && strings.HasSuffix(domain, "."+pattern)
+	switch match {
+	case contracts.DomainMatchExact:
+		return domain == pattern
+	case contracts.DomainMatchSuffix:
+		return domain == pattern || subdomain
+	case contracts.DomainMatchWildcard:
+		return subdomain
+	default:
+		return false
+	}
+}
+
+func canonicalDomain(domain string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(domain), "."), "*."))
 }

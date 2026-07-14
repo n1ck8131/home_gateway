@@ -22,6 +22,8 @@ func TestRenderOwnedTableMarksParityAndProtocolIndependentRules(t *testing.T) {
 	for _, want := range []string{
 		"table inet routerd",
 		`comment "managed-by-routerd"`,
+		"set rd_dns_shadow4",
+		"set rd_dns_shadow6",
 		"ip daddr { 8.8.8.8 }",
 		"ip6 daddr { 2606:4700::/32 }",
 		"ct mark & 0xff000000",
@@ -39,6 +41,29 @@ func TestRenderOwnedTableMarksParityAndProtocolIndependentRules(t *testing.T) {
 	_, err = Render(plan, Inventory{ActiveServerID: "nl", OwnedTables: map[string]string{"routerd": "mwan3"}})
 	if err == nil {
 		t.Fatal("expected ownership collision")
+	}
+}
+
+func TestRenderReturnsReplyTrafficBeforeAnyClassification(t *testing.T) {
+	route := serverRoute(t, "nl", 1)
+	gua := globalEntry("lan-gua", "2001:470:10::/64", contracts.EntryKindCIDR, contracts.RouteClassVPN, contracts.OriginManual, 1)
+	got, err := Render(
+		contracts.PolicyPlan{ServerRoutes: []contracts.ServerRoute{route}, Entries: []contracts.RouteEntry{gua}},
+		Inventory{ActiveServerID: "nl"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	reply := strings.Index(text, "ct direction reply return")
+	local := strings.Index(text, "fib daddr type local return")
+	restore := strings.Index(text, "ct mark & 0xff000000 != 0 meta mark set")
+	classify := strings.Index(text, "ip6 daddr { 2001:470:10::/64 }")
+	if reply < 0 || local < 0 || restore < 0 || classify < 0 {
+		t.Fatalf("missing reply guard or classification rule:\n%s", text)
+	}
+	if reply >= local || reply >= restore || reply >= classify {
+		t.Fatalf("reply traffic can reach classification:\n%s", text)
 	}
 }
 

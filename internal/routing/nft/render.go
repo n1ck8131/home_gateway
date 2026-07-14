@@ -13,6 +13,8 @@ const (
 	TableName        = "routerd"
 	OwnershipComment = "managed-by-routerd"
 	SetTimeout       = 3600
+	DNSShadowSet4    = "rd_dns_shadow4"
+	DNSShadowSet6    = "rd_dns_shadow6"
 )
 
 type Inventory struct {
@@ -44,6 +46,8 @@ func Render(plan contracts.PolicyPlan, inventory Inventory) ([]byte, error) {
 	out.WriteString("table inet routerd {\n")
 	fmt.Fprintf(&out, "  comment %q;\n", OwnershipComment)
 	writeLocalSets(&out)
+	fmt.Fprintf(&out, "  set %s { type ipv4_addr; flags timeout; timeout %ds; }\n", DNSShadowSet4, SetTimeout)
+	fmt.Fprintf(&out, "  set %s { type ipv6_addr; flags timeout; timeout %ds; }\n", DNSShadowSet6, SetTimeout)
 	for _, group := range groups {
 		if group.kind == contracts.EntryKindDomain {
 			fmt.Fprintf(&out, "  set %s { type ipv4_addr; flags timeout; timeout %ds; }\n", group.set4, SetTimeout)
@@ -52,6 +56,7 @@ func Render(plan contracts.PolicyPlan, inventory Inventory) ([]byte, error) {
 	}
 	out.WriteString("  chain prerouting {\n")
 	out.WriteString("    type filter hook prerouting priority mangle; policy accept;\n")
+	out.WriteString("    ct direction reply return\n")
 	out.WriteString("    fib daddr type local return\n")
 	out.WriteString("    ip daddr @rd_local4 return\n")
 	out.WriteString("    ip6 daddr @rd_local6 return\n")

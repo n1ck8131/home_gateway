@@ -580,6 +580,39 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 	if err := runtime.validateConfiguration(); err != nil {
 		return err
 	}
+	active := filepath.Join(runtime.Root, "active")
+	if err := runtime.verifySnapshotIncludes(active, snapshotManifest{FirewallPresent: true, DNSPresent: true}); err != nil {
+		return err
+	}
+	artifact, err := runtime.readActiveRouteArtifact()
+	if err != nil {
+		return err
+	}
+	return runtime.verifySnapshotState(ctx, active, snapshotManifest{FirewallPresent: true, DNSPresent: true}, artifact, iprule.Artifact{})
+}
+
+func (runtime LinuxRuntime) verifySnapshotState(
+	ctx context.Context,
+	directory string,
+	manifest snapshotManifest,
+	desired iprule.Artifact,
+	previous iprule.Artifact,
+) error {
+	if manifest.FirewallPresent {
+		expected, err := readRegularFile(filepath.Join(directory, nftArtifactName))
+		if err != nil {
+			return fmt.Errorf("read expected nft artifact: %w", err)
+		}
+		if err := runtime.verifyActiveNFTTable(ctx, expected); err != nil {
+			return err
+		}
+	} else if err := runtime.verifyNFTTableAbsent(ctx); err != nil {
+		return err
+	}
+	return runtime.verifyRouteState(ctx, desired, previous)
+}
+
+func (runtime LinuxRuntime) verifyActiveNFTTable(ctx context.Context, expected []byte) error {
 	nftResult, err := runtime.Runner.Run(ctx, "nft", "list", "table", "inet", routingnft.TableName)
 	if err != nil {
 		return err
@@ -591,10 +624,81 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 	if !bytes.Contains(nftResult.Stdout, []byte(fmt.Sprintf("comment %q", routingnft.OwnershipComment))) {
 		return errors.New("routerd nft table ownership marker is missing or invalid")
 	}
-	artifact, err := runtime.readActiveRouteArtifact()
+	sets, rules, err := expectedNFTSemantics(expected)
+	if err != nil {
+		return fmt.Errorf("inspect expected nft artifact: %w", err)
+	}
+	for _, set := range sets {
+		if !containsTokenSequence(nftResult.Stdout, []string{"set", set, "{"}) {
+			return fmt.Errorf("routerd nft set %q is missing", set)
+		}
+	}
+	for _, rule := range rules {
+		if !containsTokenSequence(nftResult.Stdout, rule) {
+			return fmt.Errorf("routerd nft rule is missing or drifted: %s", strings.Join(rule, " "))
+		}
+	}
+	return nil
+}
+
+func expectedNFTSemantics(data []byte) ([]string, [][]string, error) {
+	sets := make([]string, 0)
+	rules := make([][]string, 0)
+	inPrerouting := false
+	foundPrerouting := false
+	for _, rawLine := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "set ") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 || fields[2] != "{" {
+				return nil, nil, fmt.Errorf("invalid set declaration %q", line)
+			}
+			sets = append(sets, fields[1])
+		}
+		if line == "chain prerouting {" {
+			inPrerouting = true
+			foundPrerouting = true
+			continue
+		}
+		if !inPrerouting {
+			continue
+		}
+		if line == "}" {
+			inPrerouting = false
+			continue
+		}
+		if line == "" || strings.HasPrefix(line, "type ") {
+			continue
+		}
+		fields := nftSemanticTokens(line)
+		if len(fields) != 0 {
+			rules = append(rules, fields)
+		}
+	}
+	if !foundPrerouting {
+		return nil, nil, errors.New("prerouting chain is missing")
+	}
+	return sets, rules, nil
+}
+
+func (runtime LinuxRuntime) verifyNFTTableAbsent(ctx context.Context) error {
+	result, err := runtime.Runner.Run(ctx, "nft", "-j", "list", "tables")
 	if err != nil {
 		return err
 	}
+	inventory, err := decodeNFTTableInventory(result.Stdout)
+	if err != nil {
+		return fmt.Errorf("decode nft table inventory: %w", err)
+	}
+	for _, item := range inventory.Nftables {
+		if item.Table != nil && item.Table.Family == "inet" && item.Table.Name == routingnft.TableName {
+			return fmt.Errorf("routerd nft table remains after restore")
+		}
+	}
+	return nil
+}
+
+func (runtime LinuxRuntime) verifyRouteState(ctx context.Context, desired, previous iprule.Artifact) error {
 	ruleOutputs := make(map[string][]byte, 2)
 	for _, family := range []string{"-4", "-6"} {
 		result, err := runtime.Runner.Run(ctx, "ip", family, "rule", "show")
@@ -604,7 +708,7 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 		ruleOutputs[family] = result.Stdout
 	}
 	seenRoutes := make(map[string]struct{})
-	for _, command := range artifact.Commands {
+	for _, command := range desired.Commands {
 		switch command[2] {
 		case "rule":
 			lines := ruleLinesAtPriority(ruleOutputs[command[1]], command[5])
@@ -622,9 +726,58 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 				return err
 			}
 			expected := command[6:]
-			if !containsTokenSequence(result.Stdout, expected) {
-				return fmt.Errorf("route table %s for %s does not contain %s", command[5], command[1], strings.Join(expected, " "))
+			if !routeOutputMatches(result.Stdout, expected) {
+				return fmt.Errorf("route table %s for %s is missing or drifted from %s", command[5], command[1], strings.Join(expected, " "))
 			}
+		}
+	}
+	desiredRoutes, desiredRules := indexRouteArtifact(desired)
+	for _, command := range previous.Commands {
+		key := routeStateKey(command)
+		switch command[2] {
+		case "rule":
+			if _, retained := desiredRules[key]; retained {
+				continue
+			}
+			if lines := ruleLinesAtPriority(ruleOutputs[command[1]], command[5]); len(lines) != 0 {
+				return fmt.Errorf("policy rule for %s priority %s remains after restore", command[1], command[5])
+			}
+		case "route":
+			if _, retained := desiredRoutes[key]; retained {
+				continue
+			}
+			result, err := runtime.Runner.Run(ctx, "ip", command[1], "route", "show", "table", command[5])
+			if err != nil {
+				return err
+			}
+			if !routeOutputEmpty(result.Stdout) {
+				return fmt.Errorf("route table %s for %s remains after restore", command[5], command[1])
+			}
+		}
+	}
+	return nil
+}
+
+func (runtime LinuxRuntime) verifySnapshotIncludes(active string, manifest snapshotManifest) error {
+	for _, include := range []struct {
+		label   string
+		path    string
+		name    string
+		present bool
+	}{
+		{label: "firewall", path: runtime.FirewallIncludePath, name: nftArtifactName, present: manifest.FirewallPresent},
+		{label: "dns", path: runtime.DNSIncludePath, name: dnsArtifactName, present: manifest.DNSPresent},
+	} {
+		if include.present {
+			if err := verifyInstalledArtifact(include.path, filepath.Join(active, include.name)); err != nil {
+				return fmt.Errorf("%s include post-check: %w", include.label, err)
+			}
+			continue
+		}
+		if _, present, err := readOptionalRegularFile(include.path); err != nil {
+			return fmt.Errorf("%s include post-check: %w", include.label, err)
+		} else if present {
+			return fmt.Errorf("%s include remains after restore", include.label)
 		}
 	}
 	return nil
@@ -675,7 +828,7 @@ func (runtime LinuxRuntime) Reconcile(ctx context.Context, revision string) erro
 
 func containsTokenSequence(data []byte, expected []string) bool {
 	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
+		fields := nftSemanticTokens(line)
 		for start := 0; start+len(expected) <= len(fields); start++ {
 			if slicesEqual(fields[start:start+len(expected)], expected) {
 				return true
@@ -683,6 +836,21 @@ func containsTokenSequence(data []byte, expected []string) bool {
 		}
 	}
 	return false
+}
+
+func nftSemanticTokens(line string) []string {
+	line = strings.NewReplacer("(", " ", ")", " ", ";", " ").Replace(line)
+	fields := strings.Fields(line)
+	for index, field := range fields {
+		if !strings.HasPrefix(field, "0x") {
+			continue
+		}
+		value, err := strconv.ParseUint(strings.TrimPrefix(field, "0x"), 16, 64)
+		if err == nil {
+			fields[index] = fmt.Sprintf("0x%x", value)
+		}
+	}
+	return fields
 }
 
 func slicesEqual(left, right []string) bool {
@@ -737,7 +905,16 @@ func (runtime LinuxRuntime) Restore(ctx context.Context, revision string) error 
 	if err := restoreManagedFile(runtime.DNSIncludePath, filepath.Join(active, dnsArtifactName), manifest.DNSPresent); err != nil {
 		return err
 	}
-	return runtime.Reload(ctx)
+	if err := runtime.Reload(ctx); err != nil {
+		return err
+	}
+	if err := runtime.verifySnapshotIncludes(active, manifest); err != nil {
+		return err
+	}
+	if err := runtime.verifySnapshotState(ctx, active, manifest, desired, previous); err != nil {
+		return fmt.Errorf("restore post-check: %w", err)
+	}
+	return nil
 }
 
 func (runtime LinuxRuntime) readActiveRouteArtifact() (iprule.Artifact, error) {

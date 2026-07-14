@@ -1,6 +1,6 @@
 # P2 Linux network namespace safety suite
 
-`run.sh` is the only entrypoint. It builds one bounded lab driver, creates five
+`run.sh` is the only entrypoint. It builds one bounded lab driver, creates six
 uniquely named namespaces, and exercises the production `dataplane.Controller`
 and `apply.LinuxRuntime` through real `nft`, `ip` and `dnsmasq-full` calls.
 Only the OpenWrt-only `fw4` and `/etc/init.d/dnsmasq reload` commands are
@@ -11,7 +11,9 @@ Topology:
 ```text
 client -> router -> WAN
              |
-             +-> fake tunnel bridge -> internet
+             +-> tunnel slot 1 -> internet
+             |
+             +-> tunnel slot 2 -> internet
 ```
 
 Run only on a disposable Linux CI runner with root and network-namespace
@@ -34,9 +36,8 @@ uses bounded TERM/KILL/wait cleanup. It does not invoke WSL, Docker or QEMU.
 The emitted evidence directory is rejected if it exceeds 50 MiB.
 
 The suite proves IPv4/IPv6 direct, VPN, scoped work-PC direct, TCP, UDP,
-QUIC-shaped UDP, real A/AAAA/CNAME nftset population and expiry, invalid
-validation rollback, explicit rollback, crash/boot recovery, and twenty
-consecutive tunnel-down no-leak cycles. Stock dnsmasq cannot represent
-exact-apex-only or wildcard-subdomains-only nftset matching without widening;
-the suite therefore asserts that both profiles fail before transaction state
-changes.
+QUIC-shaped UDP, exact-apex, wildcard-subdomain, suffix and overlapping-domain
+matching through real A/AAAA/CNAME nftset population and expiry. It also covers
+shared-IP direct precedence, sticky established flows across an active-slot
+switch, invalid validation rollback, explicit rollback, crash/boot recovery,
+and twenty alternating physical tunnel-link removal/recreation no-leak cycles.

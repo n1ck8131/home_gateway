@@ -73,6 +73,8 @@ type fakeRuntime struct {
 	preflightRevisions []string
 	reconcileRevision  string
 	restoreFails       bool
+	restoreContextErr  error
+	restoreHasDeadline bool
 }
 
 func (runtime *fakeRuntime) call(name string) error {
@@ -100,8 +102,10 @@ func (runtime *fakeRuntime) Reconcile(_ context.Context, revision string) error 
 	runtime.reconcileRevision = revision
 	return runtime.call("reconcile")
 }
-func (runtime *fakeRuntime) Restore(context.Context, string) error {
+func (runtime *fakeRuntime) Restore(ctx context.Context, _ string) error {
 	runtime.calls = append(runtime.calls, "restore")
+	runtime.restoreContextErr = ctx.Err()
+	_, runtime.restoreHasDeadline = ctx.Deadline()
 	if runtime.restoreFails {
 		return errors.New("restore failed")
 	}
@@ -193,12 +197,13 @@ func TestRecoverRejectsOwnershipCollisionBeforeMutation(t *testing.T) {
 
 func newTransaction(runtime *fakeRuntime, store *memoryJournal, now time.Time) *Transaction {
 	return &Transaction{
-		Runtime:        runtime,
-		Journal:        store,
-		Clock:          fakeClock{now},
-		ConfirmTimeout: time.Minute,
-		Locker:         &fakeLocker{},
-		Watchdog:       &fakeWatchdog{calls: &runtime.calls},
+		Runtime:         runtime,
+		Journal:         store,
+		Clock:           fakeClock{now},
+		ConfirmTimeout:  time.Minute,
+		RecoveryTimeout: time.Second,
+		Locker:          &fakeLocker{},
+		Watchdog:        &fakeWatchdog{calls: &runtime.calls},
 	}
 }
 
@@ -282,7 +287,7 @@ func TestCommitRollbackExpiryCrashAndDegradedRecovery(t *testing.T) {
 	})
 }
 
-func TestApplyArmsWatchdogBeforeActivationAndCancelsItOnFailure(t *testing.T) {
+func TestApplyArmsWatchdogBeforeActivationAndCancelsItAfterSuccessfulRecovery(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	runtime := &fakeRuntime{fail: "activate"}
 	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg"}}
@@ -297,6 +302,69 @@ func TestApplyArmsWatchdogBeforeActivationAndCancelsItOnFailure(t *testing.T) {
 	}
 	if !tx.Watchdog.(*fakeWatchdog).canceled {
 		t.Fatal("failed transaction did not cancel watchdog")
+	}
+}
+
+func TestApplyRecoveryIgnoresCanceledCallerAndKeepsWatchdogArmedOnRestoreFailure(t *testing.T) {
+	t.Run("canceled caller", func(t *testing.T) {
+		now := time.Unix(100, 0).UTC()
+		runtime := &fakeRuntime{fail: "activate"}
+		store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg"}}
+		tx := newTransaction(runtime, store, now)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if err := tx.Apply(ctx, Candidate{RevisionID: "next"}); err == nil {
+			t.Fatal("expected activation failure")
+		}
+		if runtime.restoreContextErr != nil || !runtime.restoreHasDeadline {
+			t.Fatalf("restore context: err=%v deadline=%v", runtime.restoreContextErr, runtime.restoreHasDeadline)
+		}
+		if !tx.Watchdog.(*fakeWatchdog).canceled {
+			t.Fatal("successful recovery did not cancel watchdog")
+		}
+	})
+
+	t.Run("restore failure", func(t *testing.T) {
+		now := time.Unix(100, 0).UTC()
+		runtime := &fakeRuntime{fail: "activate", restoreFails: true}
+		store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg"}}
+		tx := newTransaction(runtime, store, now)
+
+		if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err == nil || !strings.Contains(err.Error(), "rollback failed") {
+			t.Fatalf("Apply() error = %v", err)
+		}
+		if tx.Watchdog.(*fakeWatchdog).canceled {
+			t.Fatal("failed recovery canceled watchdog")
+		}
+		if store.value.State != StateDegraded {
+			t.Fatalf("journal = %+v", store.value)
+		}
+	})
+}
+
+func TestExplicitRollbackUsesBoundedRecoveryContextAfterCallerCancellation(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg", LastKnownGoodRevision: "lkg"}}
+	tx := newTransaction(runtime, store, now)
+	if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.restoreContextErr != nil || !runtime.restoreHasDeadline {
+		t.Fatalf("restore context: err=%v deadline=%v", runtime.restoreContextErr, runtime.restoreHasDeadline)
+	}
+	if !tx.Watchdog.(*fakeWatchdog).canceled {
+		t.Fatal("successful explicit rollback did not cancel watchdog")
+	}
+	if store.value.State != StateRolledBack || store.value.ActiveRevision != "lkg" {
+		t.Fatalf("journal = %+v", store.value)
 	}
 }
 

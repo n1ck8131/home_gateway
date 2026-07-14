@@ -11,6 +11,7 @@ root=/root/routerd-p2
 driver="$root/lab-driver"
 evidence="$root/evidence"
 journal=/etc/routerd/dataplane/journal.json
+revision_root=/etc/routerd/dataplane/revisions
 firewall_include=/usr/share/nftables.d/ruleset-post/50-routerd.nft
 dns_include=/tmp/dnsmasq.d/routerd.conf
 mkdir -p "$evidence"
@@ -75,13 +76,39 @@ assert_full_packages() {
     dnsmasq --version | grep -qw nftset || fail "dnsmasq lacks nftset support"
 }
 
+active_route_artifact() {
+    revision=$(journal_value .active_revision)
+    case "$revision" in
+        ''|*[!A-Za-z0-9_-]*) fail "active revision cannot select a route artifact" ;;
+    esac
+    artifact="$revision_root/$revision/routes.json"
+    [ -s "$artifact" ] || fail "active route artifact is missing"
+    printf '%s\n' "$artifact"
+}
+
+route_tables_from_artifact() {
+    awk '
+        /^[[:space:]]*"route",[[:space:]]*$/ { route_command = 1; next }
+        route_command && /^[[:space:]]*"table",[[:space:]]*$/ {
+            if (getline > 0) {
+                gsub(/[",[:space:]]/, "")
+                if ($0 ~ /^[0-9]+$/) print
+            }
+            route_command = 0
+        }
+    ' "$1" | sort -u
+}
+
 assert_runtime() {
     [ -s "$firewall_include" ] || fail "firewall include is missing"
     [ -s "$dns_include" ] || fail "DNS include is missing"
-    nft list table inet routerd | grep -q 'routerd-owned' || fail "routerd nft ownership marker is missing"
-    fw4 print | grep -q 'routerd-owned' || fail "fw4 does not consume the routerd include"
-    ip -4 route show table 20001 | grep -q '^blackhole default' || fail "IPv4 fail-closed route is missing"
-    ip -6 route show table 20001 | grep -q '^blackhole default' || fail "IPv6 fail-closed route is missing"
+    nft list table inet routerd | grep -q 'managed-by-routerd' || fail "routerd nft ownership marker is missing"
+    fw4 print | grep -q 'managed-by-routerd' || fail "fw4 does not consume the routerd include"
+    artifact=$(active_route_artifact)
+    tables=$(route_tables_from_artifact "$artifact")
+    [ "$tables" = 10001 ] || fail "active route artifact does not own canonical table 10001: $tables"
+    ip -4 route show table "$tables" | grep -q '^blackhole default' || fail "IPv4 fail-closed route is missing"
+    ip -6 route show table "$tables" | grep -q '^blackhole default' || fail "IPv6 fail-closed route is missing"
     dnsmasq --test --conf-file="$dns_include" >/dev/null 2>&1 || fail "active DNS include is invalid"
 }
 

@@ -29,7 +29,8 @@ import (
 const (
 	commandTimeout           = 15 * time.Second
 	workDeviceID             = "work"
-	vpnServerID              = "vpn-1"
+	vpnServer1ID             = "vpn-1"
+	vpnServer2ID             = "vpn-2"
 	runtimeLab               = "lab"
 	runtimeOpenWRT           = "openwrt"
 	watchdogRollbackRestored = "watchdog expiry: restored"
@@ -51,6 +52,8 @@ func run(args []string) error {
 		return runServe(args[1:])
 	case "probe":
 		return runProbe(args[1:])
+	case "sticky-probe":
+		return runStickyProbe(args[1:])
 	case "apply":
 		return runApply(args[1:])
 	case "confirm", "rollback", "recover":
@@ -154,20 +157,33 @@ func serveTCP(listener net.Listener, token string, errorsCh chan<- error) {
 			errorsCh <- fmt.Errorf("accept TCP: %w", err)
 			return
 		}
-		_ = connection.SetDeadline(time.Now().Add(2 * time.Second))
-		buffer := make([]byte, 64)
-		count, readErr := connection.Read(buffer)
-		if count > 0 {
-			_, readErr = connection.Write([]byte(token))
+		go func() {
+			if err := serveTCPConnection(connection, token); err != nil {
+				errorsCh <- fmt.Errorf("serve TCP connection: %w", err)
+			}
+		}()
+	}
+}
+
+func serveTCPConnection(connection net.Conn, token string) error {
+	defer connection.Close()
+	buffer := make([]byte, 64)
+	for {
+		if err := connection.SetDeadline(time.Now().Add(45 * time.Second)); err != nil {
+			return err
 		}
-		closeErr := connection.Close()
-		if readErr != nil {
-			errorsCh <- fmt.Errorf("serve TCP connection: %w", readErr)
-			return
+		count, err := connection.Read(buffer)
+		if errors.Is(err, io.EOF) {
+			return nil
 		}
-		if closeErr != nil {
-			errorsCh <- fmt.Errorf("close TCP connection: %w", closeErr)
-			return
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			continue
+		}
+		if _, err := connection.Write([]byte(token)); err != nil {
+			return err
 		}
 	}
 }
@@ -259,12 +275,157 @@ func probeTraffic(network, target, source, expected string, timeout time.Duratio
 	return nil
 }
 
+func runStickyProbe(args []string) error {
+	set := newFlagSet("sticky-probe")
+	target := set.String("target", "", "literal TCP target host and port")
+	source := set.String("source", "", "literal source address")
+	expect := set.String("expect", "", "expected response token")
+	readyFile := set.String("ready-file", "", "absolute synchronization file")
+	continueFile := set.String("continue-file", "", "absolute synchronization file")
+	timeoutText := set.String("timeout", "30s", "overall sticky probe deadline")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() != 0 || *target == "" || *source == "" || *expect == "" {
+		return errors.New("sticky-probe requires target, source, and expect flags")
+	}
+	if err := validateSignalPath(*readyFile); err != nil {
+		return fmt.Errorf("ready-file: %w", err)
+	}
+	if err := validateSignalPath(*continueFile); err != nil {
+		return fmt.Errorf("continue-file: %w", err)
+	}
+	if *readyFile == *continueFile {
+		return errors.New("ready-file and continue-file must differ")
+	}
+	timeout, err := time.ParseDuration(*timeoutText)
+	if err != nil || timeout <= 0 || timeout > 45*time.Second {
+		return errors.New("sticky-probe timeout must be greater than zero and at most 45s")
+	}
+	return stickyProbe(*target, *source, *expect, *readyFile, *continueFile, timeout)
+}
+
+func validateSignalPath(path string) error {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+		return errors.New("path must be absolute, clean, and non-root")
+	}
+	return nil
+}
+
+func stickyProbe(target, source, expected, readyFile, continueFile string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	connection, err := dialLiteralTCP(target, source, timeout)
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	if err := exchangeTCP(connection, expected, time.Until(deadline)); err != nil {
+		return fmt.Errorf("initial exchange: %w", err)
+	}
+	if err := writeSignalFile(readyFile); err != nil {
+		return err
+	}
+	for {
+		if _, err := os.Stat(continueFile); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect continue-file: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return errors.New("continue-file was not created before the deadline")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := exchangeTCP(connection, expected, time.Until(deadline)); err != nil {
+		return fmt.Errorf("sticky exchange: %w", err)
+	}
+	fmt.Printf("STICKY_PROBE_PASS %s\n", expected)
+	return nil
+}
+
+func dialLiteralTCP(target, source string, timeout time.Duration) (net.Conn, error) {
+	sourceAddress, err := netip.ParseAddr(source)
+	if err != nil {
+		return nil, fmt.Errorf("parse source address: %w", err)
+	}
+	targetHost, _, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, fmt.Errorf("parse target: %w", err)
+	}
+	targetAddress, err := netip.ParseAddr(targetHost)
+	if err != nil || targetAddress.Is4() != sourceAddress.Is4() {
+		return nil, errors.New("source and target must be literal addresses of the same family")
+	}
+	dialer := net.Dialer{
+		Timeout:   timeout,
+		LocalAddr: &net.TCPAddr{IP: net.IP(sourceAddress.AsSlice())},
+	}
+	connection, err := dialer.Dial("tcp", target)
+	if err != nil {
+		return nil, fmt.Errorf("dial TCP: %w", err)
+	}
+	return connection, nil
+}
+
+func exchangeTCP(connection net.Conn, expected string, timeout time.Duration) error {
+	if timeout <= 0 {
+		return errors.New("probe deadline expired")
+	}
+	if err := connection.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	if _, err := connection.Write([]byte("probe")); err != nil {
+		return fmt.Errorf("write probe: %w", err)
+	}
+	buffer := make([]byte, 64)
+	count, err := connection.Read(buffer)
+	if err != nil {
+		return fmt.Errorf("read probe: %w", err)
+	}
+	if actual := string(buffer[:count]); actual != expected {
+		return fmt.Errorf("response token %q does not match %q", actual, expected)
+	}
+	return nil
+}
+
+func writeSignalFile(path string) (resultErr error) {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".sticky-ready-")
+	if err != nil {
+		return fmt.Errorf("create ready-file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer func() {
+		if err := os.Remove(temporaryPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			resultErr = errors.Join(resultErr, err)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("secure ready-file: %w", err)
+	}
+	if _, err := temporary.WriteString("ready\n"); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write ready-file: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close ready-file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("publish ready-file: %w", err)
+	}
+	return nil
+}
+
 func runApply(args []string) error {
 	set := newFlagSet("apply")
 	revision := set.String("revision", "", "revision ID")
 	profile := set.String("profile", "suffix", "domain profile")
 	fault := set.String("fault", "none", "single injected fault")
 	available := set.Bool("available", true, "whether the VPN interface is usable")
+	dualServer := set.Bool("dual-server", false, "render both VPN server slots")
+	activeSlot := set.Int("active-slot", 1, "active VPN server slot")
+	slot1Available := set.Bool("slot1-available", true, "whether vpn0 is usable")
+	slot2Available := set.Bool("slot2-available", true, "whether vpn1 is usable")
 	labRoot := set.String("lab-root", "", "absolute lab root")
 	runtimeName := set.String("runtime", runtimeLab, "lab or openwrt runtime")
 	confirmTimeoutText := set.String("confirm-timeout", "30s", "commit-confirm deadline")
@@ -289,7 +450,16 @@ func runApply(args []string) error {
 	if err != nil {
 		return err
 	}
-	request, err := applyRequest(*revision, *profile, *available)
+	options := requestOptions{
+		dualServer:     *dualServer,
+		activeSlot:     *activeSlot,
+		slot1Available: *slot1Available,
+		slot2Available: *slot2Available,
+	}
+	if !options.dualServer {
+		options.slot1Available = *available
+	}
+	request, err := applyRequest(*revision, *profile, options)
 	if err != nil {
 		return err
 	}
@@ -401,10 +571,36 @@ func watchdogRollbackComplete(journal revisionapply.Journal) bool {
 	return journal.State == revisionapply.StateRolledBack && journal.RollbackResult == watchdogRollbackRestored
 }
 
-func applyRequest(revision, profile string, available bool) (dataplane.ApplyRequest, error) {
-	serverRoute, err := contracts.ServerRouteForSlot(vpnServerID, 1)
+type requestOptions struct {
+	dualServer     bool
+	activeSlot     int
+	slot1Available bool
+	slot2Available bool
+}
+
+func applyRequest(revision, profile string, options requestOptions) (dataplane.ApplyRequest, error) {
+	if options.activeSlot != 1 && (!options.dualServer || options.activeSlot != 2) {
+		return dataplane.ApplyRequest{}, errors.New("active slot must be 1, or 2 in dual-server mode")
+	}
+	serverRoute, err := contracts.ServerRouteForSlot(vpnServer1ID, 1)
 	if err != nil {
 		return dataplane.ApplyRequest{}, err
+	}
+	serverRoutes := []contracts.ServerRoute{serverRoute}
+	servers := []iprule.Server{{Route: serverRoute, Interface: "vpn0", Available: options.slot1Available}}
+	activeServerID := vpnServer1ID
+	entryServerID := vpnServer1ID
+	if options.dualServer {
+		serverRoute2, err := contracts.ServerRouteForSlot(vpnServer2ID, 2)
+		if err != nil {
+			return dataplane.ApplyRequest{}, err
+		}
+		serverRoutes = append(serverRoutes, serverRoute2)
+		servers = append(servers, iprule.Server{Route: serverRoute2, Interface: "vpn1", Available: options.slot2Available})
+		entryServerID = ""
+		if options.activeSlot == 2 {
+			activeServerID = vpnServer2ID
+		}
 	}
 	match := contracts.DomainMatchSuffix
 	pattern := "vpn.suite.test"
@@ -416,43 +612,52 @@ func applyRequest(revision, profile string, available bool) (dataplane.ApplyRequ
 	case "wildcard":
 		match = contracts.DomainMatchWildcard
 		pattern = "*.vpn.suite.test"
+	case "shared":
 	default:
 		return dataplane.ApplyRequest{}, fmt.Errorf("unsupported profile %q", profile)
 	}
+	entries := []contracts.RouteEntry{
+		{
+			ID: "vpn-domain", Pattern: pattern, Kind: contracts.EntryKindDomain,
+			Match: match, Route: contracts.RouteClassVPN, Scope: contracts.Scope{Type: contracts.ScopeGlobal},
+			Origin: contracts.OriginExternalVPN, ServerID: entryServerID,
+		},
+		{
+			ID: "system-direct-v4", Pattern: "9.9.9.9", Kind: contracts.EntryKindIP,
+			Route: contracts.RouteClassDirect, Scope: contracts.Scope{Type: contracts.ScopeGlobal}, Origin: contracts.OriginSystemDirect,
+		},
+		{
+			ID: "system-direct-v6", Pattern: "2620:fe::9", Kind: contracts.EntryKindIP,
+			Route: contracts.RouteClassDirect, Scope: contracts.Scope{Type: contracts.ScopeGlobal}, Origin: contracts.OriginSystemDirect,
+		},
+	}
+	if profile == "shared" {
+		entries = append(entries, contracts.RouteEntry{
+			ID: "manual-direct-shared", Pattern: "target.vpn.suite.test", Kind: contracts.EntryKindDomain,
+			Match: contracts.DomainMatchExact, Route: contracts.RouteClassDirect,
+			Scope: contracts.Scope{Type: contracts.ScopeGlobal}, Origin: contracts.OriginManual,
+		})
+	}
 	plan := contracts.PolicyPlan{
 		EvaluationTime: time.Unix(1_700_000_000, 0).UTC(),
-		Entries: []contracts.RouteEntry{
-			{
-				ID: "vpn-domain", Pattern: pattern, Kind: contracts.EntryKindDomain,
-				Match: match, Route: contracts.RouteClassVPN, Scope: contracts.Scope{Type: contracts.ScopeGlobal},
-				Origin: contracts.OriginExternalVPN, ServerID: vpnServerID,
-			},
-			{
-				ID: "system-direct-v4", Pattern: "9.9.9.9", Kind: contracts.EntryKindIP,
-				Route: contracts.RouteClassDirect, Scope: contracts.Scope{Type: contracts.ScopeGlobal}, Origin: contracts.OriginSystemDirect,
-			},
-			{
-				ID: "system-direct-v6", Pattern: "2620:fe::9", Kind: contracts.EntryKindIP,
-				Route: contracts.RouteClassDirect, Scope: contracts.Scope{Type: contracts.ScopeGlobal}, Origin: contracts.OriginSystemDirect,
-			},
-		},
-		ServerRoutes: []contracts.ServerRoute{serverRoute},
+		Entries:        entries,
+		ServerRoutes:   serverRoutes,
 	}
 	return dataplane.ApplyRequest{
 		RevisionID: revision,
 		Plan:       plan,
 		Inventory: dataplane.RuntimeInventory{
 			NFT: nft.Inventory{
-				ActiveServerID: vpnServerID,
+				ActiveServerID: activeServerID,
 				DeviceModes: map[string]contracts.DeviceMode{
 					workDeviceID: contracts.DeviceModeAlwaysDirect,
 				},
 				DeviceIPv4:  map[string][]netip.Addr{workDeviceID: {netip.MustParseAddr("10.10.0.3")}},
-				DeviceIPv6:  map[string][]netip.Addr{workDeviceID: {netip.MustParseAddr("2001:db8:10::3")}},
+				DeviceIPv6:  map[string][]netip.Addr{workDeviceID: {netip.MustParseAddr("2001:470:10::3")}},
 				OwnedTables: map[string]string{},
 			},
 			IPRule: iprule.Inventory{
-				Servers:    []iprule.Server{{Route: serverRoute, Interface: "vpn0", Available: available}},
+				Servers:    servers,
 				OwnedMarks: map[uint32]string{}, OwnedTables: map[uint32]string{},
 			},
 		},

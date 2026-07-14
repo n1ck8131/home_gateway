@@ -44,6 +44,7 @@ NS_ROUTER="n${token}r"
 NS_WAN="n${token}w"
 NS_VPN="n${token}v"
 NS_INTERNET="n${token}i"
+NS_INTERNET2="n${token}j"
 LINK_PREFIX="h${token}"
 LAB_NAMESPACES=
 LAB_HOST_LINKS=
@@ -61,6 +62,8 @@ trap cleanup_lab EXIT INT TERM HUP
     printf 'conf-file=%s\n' "$LAB_ROOT/etc/routerd.conf"
     printf 'log-facility=%s\n' "$EVIDENCE_DIR/dnsmasq.log"
     printf 'host-record=%s,%s,%s\n' "$VPN_DOMAIN" "$VPN4" "$VPN6"
+    printf 'host-record=%s,%s,%s\n' "$VPN_APEX" "$VPN4" "$VPN6"
+    printf 'host-record=%s,%s,%s\n' "$VPN_EXACT_CHILD" "$VPN4" "$VPN6"
     printf 'host-record=%s,%s,%s\n' "$DIRECT_DOMAIN" "$DIRECT4" "$DIRECT6"
     printf 'cname=%s,%s\n' "$VPN_ALIAS" "$VPN_DOMAIN"
     printf 'local=/%s/\n' 'suite.test'
@@ -90,14 +93,22 @@ WAN_SERVER_PID=$!
 register_pid "$WAN_SERVER_PID"
 
 ip netns exec "$NS_INTERNET" "$LAB_DRIVER" serve \
-    --token vpn \
+    --token vpn-1 \
     --address "$VPN4" --address "$VPN6" \
     --tcp-port "$TCP_PORT" --udp-port "$UDP_PORT" --quic-port "$QUIC_PORT" \
     >"$EVIDENCE_DIR/vpn-server.log" 2>&1 &
 VPN_SERVER_PID=$!
 register_pid "$VPN_SERVER_PID"
 
-for ready_file in "$EVIDENCE_DIR/wan-server.log" "$EVIDENCE_DIR/vpn-server.log"; do
+ip netns exec "$NS_INTERNET2" "$LAB_DRIVER" serve \
+    --token vpn-2 \
+    --address "$VPN4" --address "$VPN6" \
+    --tcp-port "$TCP_PORT" --udp-port "$UDP_PORT" --quic-port "$QUIC_PORT" \
+    >"$EVIDENCE_DIR/vpn2-server.log" 2>&1 &
+VPN2_SERVER_PID=$!
+register_pid "$VPN2_SERVER_PID"
+
+for ready_file in "$EVIDENCE_DIR/wan-server.log" "$EVIDENCE_DIR/vpn-server.log" "$EVIDENCE_DIR/vpn2-server.log"; do
     attempts=0
     while ! grep -q '^SERVE_READY ' "$ready_file" 2>/dev/null; do
         attempts=$((attempts + 1))
@@ -112,17 +123,18 @@ timeout --signal=TERM --kill-after=2s 600s ip netns exec "$NS_ROUTER" \
 CAPTURE_WAN_PID=$!
 register_pid "$CAPTURE_WAN_PID"
 timeout --signal=TERM --kill-after=2s 600s ip netns exec "$NS_ROUTER" \
-    tcpdump -U -n -i vpn0 -c 200 -s 96 -w "$EVIDENCE_DIR/vpn0.pcap" \
-    >"$EVIDENCE_DIR/vpn0-tcpdump.log" 2>&1 &
-CAPTURE_VPN_PID=$!
-register_pid "$CAPTURE_VPN_PID"
+    tcpdump -U -n -i any -c 400 -s 96 -w "$EVIDENCE_DIR/router-any.pcap" \
+    >"$EVIDENCE_DIR/router-any-tcpdump.log" 2>&1 &
+CAPTURE_ANY_PID=$!
+register_pid "$CAPTURE_ANY_PID"
 
 note "applying and confirming baseline through the production controller"
-router_driver apply --revision baseline --profile suffix --fault none --available=true
+router_driver apply --revision baseline --profile suffix --fault none \
+    --dual-server --active-slot 1 --slot1-available=true --slot2-available=true
 router_driver confirm
 assert_journal_active baseline
 populate_vpn_sets
-assert_up_matrix
+assert_up_matrix vpn-1
 
 DNS_INCLUDE="$LAB_ROOT/etc/routerd.conf"
 FIREWALL_INCLUDE="$LAB_ROOT/etc/50-routerd.nft"
@@ -161,15 +173,104 @@ grep -F 'timeout 3600s' "$FIREWALL_INCLUDE" >/dev/null || fail "production nft s
 grep -F 'max-cache-ttl=3600' "$DNS_INCLUDE" >/dev/null || fail "dnsmasq cache TTL is not aligned"
 populate_vpn_sets
 
-note "asserting exact and wildcard DNS profiles fail closed"
-before_journal=$(sha256sum "$LAB_ROOT/state/journal.json" | awk '{print $1}')
-before_firewall=$(sha256sum "$FIREWALL_INCLUDE" | awk '{print $1}')
-expect_apply_failure invalid-exact exact none "$EVIDENCE_DIR/invalid-exact.log"
-expect_apply_failure invalid-wildcard wildcard none "$EVIDENCE_DIR/invalid-wildcard.log"
-after_journal=$(sha256sum "$LAB_ROOT/state/journal.json" | awk '{print $1}')
-after_firewall=$(sha256sum "$FIREWALL_INCLUDE" | awk '{print $1}')
-[ "$before_journal" = "$after_journal" ] || fail "unsupported domain profile changed the journal"
-[ "$before_firewall" = "$after_firewall" ] || fail "unsupported domain profile changed the firewall"
+vpn_policy_sets() {
+    mark=$1
+    set4=$(awk -v mark="$mark" '$1 == "ip" && $2 == "daddr" && $3 ~ /^@/ && index($0, "| " mark " ") { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
+    set6=$(awk -v mark="$mark" '$1 == "ip6" && $2 == "daddr" && $3 ~ /^@/ && index($0, "| " mark " ") { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
+    case "$set4:$set6" in
+        *[!A-Za-z0-9_:]*) fail "VPN policy set selection is ambiguous" ;;
+        :) fail "VPN policy sets are missing" ;;
+    esac
+    printf '%s %s\n' "$set4" "$set6"
+}
+
+direct_domain_sets() {
+    set4=$(awk '$1 == "ip" && $2 == "daddr" && $3 ~ /^@/ && /ct mark set \(ct mark & 0x00ffffff\) return$/ { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
+    set6=$(awk '$1 == "ip6" && $2 == "daddr" && $3 ~ /^@/ && /ct mark set \(ct mark & 0x00ffffff\) return$/ { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
+    case "$set4:$set6" in
+        *[!A-Za-z0-9_:]*) fail "direct domain set selection is ambiguous" ;;
+        :) fail "direct domain sets are missing" ;;
+    esac
+    printf '%s %s\n' "$set4" "$set6"
+}
+
+flush_set_pair() {
+    ip netns exec "$NS_ROUTER" nft flush set inet routerd "$1"
+    ip netns exec "$NS_ROUTER" nft flush set inet routerd "$2"
+}
+
+query_domain_pair() {
+    name=$1
+    ip netns exec "$NS_CLIENT" dig +time=1 +tries=1 +short "@$ROUTER_LAN4" "$name" A | grep -Fx "$VPN4" >/dev/null || fail "$name A fixture missing"
+    ip netns exec "$NS_CLIENT" dig +time=1 +tries=1 +short "@$ROUTER_LAN4" "$name" AAAA | grep -Fx "$VPN6" >/dev/null || fail "$name AAAA fixture missing"
+}
+
+assert_set_pair_present() {
+    ip netns exec "$NS_ROUTER" nft get element inet routerd "$1" "{ $VPN4 }" >/dev/null || fail "$VPN4 did not populate $1"
+    ip netns exec "$NS_ROUTER" nft get element inet routerd "$2" "{ $VPN6 }" >/dev/null || fail "$VPN6 did not populate $2"
+}
+
+assert_set_pair_absent() {
+    if ip netns exec "$NS_ROUTER" nft get element inet routerd "$1" "{ $VPN4 }" >/dev/null 2>&1; then
+        fail "$VPN4 unexpectedly populated $1"
+    fi
+    if ip netns exec "$NS_ROUTER" nft get element inet routerd "$2" "{ $VPN6 }" >/dev/null 2>&1; then
+        fail "$VPN6 unexpectedly populated $2"
+    fi
+}
+
+assert_dns_profile() {
+    revision=$1
+    profile=$2
+    apex=$3
+    apex_expected=$4
+    descendant=$5
+    descendant_expected=$6
+    router_driver apply --revision "$revision" --profile "$profile" --fault none \
+        --dual-server --active-slot 1 --slot1-available=true --slot2-available=true
+    read -r profile_set4 profile_set6 <<EOF
+$(vpn_policy_sets 0x1000000)
+EOF
+    flush_set_pair "$profile_set4" "$profile_set6"
+    query_domain_pair "$apex"
+    if [ "$apex_expected" = present ]; then
+        assert_set_pair_present "$profile_set4" "$profile_set6"
+    else
+        assert_set_pair_absent "$profile_set4" "$profile_set6"
+    fi
+    flush_set_pair "$profile_set4" "$profile_set6"
+    query_domain_pair "$descendant"
+    if [ "$descendant_expected" = present ]; then
+        assert_set_pair_present "$profile_set4" "$profile_set6"
+    else
+        assert_set_pair_absent "$profile_set4" "$profile_set6"
+    fi
+    router_driver rollback
+    assert_journal_active baseline
+}
+
+note "asserting exact, wildcard, suffix, and overlap semantics through real dnsmasq"
+assert_dns_profile dns-suffix suffix "$VPN_APEX" present "$VPN_DOMAIN" present
+assert_dns_profile dns-exact exact "$VPN_DOMAIN" present "$VPN_EXACT_CHILD" absent
+assert_dns_profile dns-wildcard wildcard "$VPN_APEX" absent "$VPN_DOMAIN" present
+
+router_driver apply --revision dns-shared --profile shared --fault none \
+    --dual-server --active-slot 1 --slot1-available=true --slot2-available=true
+read -r shared_vpn4 shared_vpn6 <<EOF
+$(vpn_policy_sets 0x1000000)
+EOF
+read -r shared_direct4 shared_direct6 <<EOF
+$(direct_domain_sets)
+EOF
+flush_set_pair "$shared_vpn4" "$shared_vpn6"
+flush_set_pair "$shared_direct4" "$shared_direct6"
+query_domain_pair "$VPN_DOMAIN"
+assert_set_pair_present "$shared_vpn4" "$shared_vpn6"
+assert_set_pair_present "$shared_direct4" "$shared_direct6"
+client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" wan
+client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" wan
+router_driver rollback
+assert_journal_active baseline
 
 note "asserting validation and post-check compensation boundaries"
 expect_apply_failure invalid-nft suffix nft-validate "$EVIDENCE_DIR/invalid-nft.log"
@@ -178,19 +279,66 @@ assert_journal_active baseline
 expect_apply_failure invalid-postcheck suffix postcheck "$EVIDENCE_DIR/invalid-postcheck.log"
 assert_journal_active baseline
 populate_vpn_sets
-client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" vpn
+client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" vpn-1
+
+note "proving active-server switch preserves the established IPv6 connection mark"
+STICKY_READY="$LAB_ROOT/run/sticky.ready"
+STICKY_CONTINUE="$LAB_ROOT/run/sticky.continue"
+STICKY_LOG="$EVIDENCE_DIR/sticky-flow.log"
+rm -f "$STICKY_READY" "$STICKY_CONTINUE"
+ip netns exec "$NS_CLIENT" "$LAB_DRIVER" sticky-probe \
+    --target "[$VPN6]:$TCP_PORT" --source "$CLIENT6" --expect vpn-1 \
+    --ready-file "$STICKY_READY" --continue-file "$STICKY_CONTINUE" --timeout 30s \
+    >"$STICKY_LOG" 2>&1 &
+STICKY_PID=$!
+register_pid "$STICKY_PID"
+attempts=0
+while [ ! -f "$STICKY_READY" ]; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 100 ] || fail "sticky probe did not establish through slot 1"
+    sleep 0.05
+done
+router_driver apply --revision active-slot-2 --profile suffix --fault none \
+    --dual-server --active-slot 2 --slot1-available=true --slot2-available=true
+populate_vpn_sets
+client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" vpn-2
+printf '%s\n' continue >"$STICKY_CONTINUE"
+if ! wait "$STICKY_PID"; then
+    fail "established slot-1 flow did not survive the active-server switch"
+fi
+grep -Fx 'STICKY_PROBE_PASS vpn-1' "$STICKY_LOG" >/dev/null || fail "sticky flow evidence is missing"
+router_driver rollback
+assert_journal_active baseline
+populate_vpn_sets
 
 note "running twenty bounded tunnel-down fault cycles"
 FAULT_SUMMARY="$EVIDENCE_DIR/fault-summary.tsv"
-printf '%s\t%s\t%s\n' iteration recovery result >"$FAULT_SUMMARY"
+printf '%s\t%s\t%s\t%s\t%s\n' iteration slot interface recovery result >"$FAULT_SUMMARY"
 i=1
 while [ "$i" -le 20 ]; do
     revision=$(printf 'fault-%02d' "$i")
-    router_driver apply --revision "$revision" --profile suffix --fault none --available=false
+    if [ $((i % 2)) -eq 1 ]; then
+        slot=1
+        interface=vpn0
+    else
+        slot=2
+        interface=vpn1
+    fi
+    remove_vpn_link "$slot"
+    assert_interface_absent "$interface"
+    if [ "$slot" -eq 1 ]; then
+        router_driver apply --revision "$revision" --profile suffix --fault none \
+            --dual-server --active-slot 1 --slot1-available=false --slot2-available=true
+    else
+        router_driver apply --revision "$revision" --profile suffix --fault none \
+            --dual-server --active-slot 2 --slot1-available=true --slot2-available=false
+    fi
     state=$(jq -er '.state' "$LAB_ROOT/state/journal.json")
     [ "$state" = pending-confirmation ] || fail "$revision is not pending"
     populate_vpn_sets
-    assert_down_no_leak
+    assert_slot_down_no_leak "$slot"
+    restore_vpn_link "$slot"
+    assert_interface_present "$interface"
 
     if [ $((i % 2)) -eq 0 ]; then
         recovery=boot-recover
@@ -202,11 +350,11 @@ while [ "$i" -le 20 ]; do
     assert_journal_active baseline
     populate_vpn_sets
     if [ $((i % 2)) -eq 0 ]; then
-        client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" vpn
+        client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" vpn-1
     else
-        client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" vpn
+        client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" vpn-1
     fi
-    printf '%s\t%s\t%s\n' "$i" "$recovery" pass >>"$FAULT_SUMMARY"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$slot" "$interface" "$recovery" pass >>"$FAULT_SUMMARY"
     i=$((i + 1))
 done
 
@@ -216,26 +364,45 @@ ip -n "$NS_ROUTER" -4 rule del priority 10001
 ip -n "$NS_ROUTER" -6 rule del priority 10001
 ip -n "$NS_ROUTER" -4 route flush table 10001
 ip -n "$NS_ROUTER" -6 route flush table 10001
+ip -n "$NS_ROUTER" -4 rule del priority 10002
+ip -n "$NS_ROUTER" -6 rule del priority 10002
+ip -n "$NS_ROUTER" -4 route flush table 10002
+ip -n "$NS_ROUTER" -6 route flush table 10002
 dns_pid=$(sed -n '1p' "$LAB_ROOT/run/dnsmasq.pid")
 stop_pid_bounded "$dns_pid"
 rm -f "$LAB_ROOT/run/dnsmasq.pid" "$FIREWALL_INCLUDE" "$DNS_INCLUDE"
 router_driver recover
 assert_journal_active baseline
 populate_vpn_sets
-assert_up_matrix
+assert_up_matrix vpn-1
 
 stop_pid_bounded "$CAPTURE_WAN_PID"
-stop_pid_bounded "$CAPTURE_VPN_PID"
+stop_pid_bounded "$CAPTURE_ANY_PID"
 ip netns exec "$NS_ROUTER" nft -a list table inet routerd >"$EVIDENCE_DIR/nft-routerd.txt"
 ip netns exec "$NS_ROUTER" nft -a list table inet lab_nat >"$EVIDENCE_DIR/nft-counters.txt"
 ip -n "$NS_ROUTER" -4 rule show >"$EVIDENCE_DIR/ip-rule-v4.txt"
 ip -n "$NS_ROUTER" -6 rule show >"$EVIDENCE_DIR/ip-rule-v6.txt"
 ip -n "$NS_ROUTER" -4 route show table main >"$EVIDENCE_DIR/route-main-v4.txt"
 ip -n "$NS_ROUTER" -6 route show table main >"$EVIDENCE_DIR/route-main-v6.txt"
-ip -n "$NS_ROUTER" -4 route show table 10001 >"$EVIDENCE_DIR/route-vpn-v4.txt"
-ip -n "$NS_ROUTER" -6 route show table 10001 >"$EVIDENCE_DIR/route-vpn-v6.txt"
+ip -n "$NS_ROUTER" -4 route show table 10001 >"$EVIDENCE_DIR/route-slot1-v4.txt"
+ip -n "$NS_ROUTER" -6 route show table 10001 >"$EVIDENCE_DIR/route-slot1-v6.txt"
+ip -n "$NS_ROUTER" -4 route show table 10002 >"$EVIDENCE_DIR/route-slot2-v4.txt"
+ip -n "$NS_ROUTER" -6 route show table 10002 >"$EVIDENCE_DIR/route-slot2-v6.txt"
 jq . "$LAB_ROOT/state/journal.json" >"$EVIDENCE_DIR/journal.json"
 sed -n '1,200p' "$DNS_INCLUDE" >"$EVIDENCE_DIR/dnsmasq-active.conf"
+
+for text_evidence in "$EVIDENCE_DIR"/*.log "$EVIDENCE_DIR"/*.txt "$EVIDENCE_DIR"/*.conf "$EVIDENCE_DIR"/*.json "$EVIDENCE_DIR"/*.tsv; do
+    [ -f "$text_evidence" ] || continue
+    sed -i \
+        -e "s|$LAB_ROOT|<LAB_ROOT>|g" \
+        -e "s|$NS_CLIENT|<NS_CLIENT>|g" \
+        -e "s|$NS_ROUTER|<NS_ROUTER>|g" \
+        -e "s|$NS_WAN|<NS_WAN>|g" \
+        -e "s|$NS_VPN|<NS_VPN>|g" \
+        -e "s|$NS_INTERNET2|<NS_INTERNET2>|g" \
+        -e "s|$NS_INTERNET|<NS_INTERNET>|g" \
+        "$text_evidence"
+done
 assert_file_size_cap
 
 if [ -n "${NETWORK_NS_EVIDENCE_DIR:-}" ]; then

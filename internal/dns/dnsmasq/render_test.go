@@ -39,17 +39,99 @@ func TestRenderChunkingSuffixSemanticsAndTimeoutAlignment(t *testing.T) {
 	}
 }
 
-func TestRenderRejectsUnsupportedDomainMatchWithoutWideningIt(t *testing.T) {
-	for _, match := range []contracts.DomainMatch{contracts.DomainMatchExact, contracts.DomainMatchWildcard} {
-		t.Run(string(match), func(t *testing.T) {
+func TestRenderPreservesExactWildcardAndSuffixSemantics(t *testing.T) {
+	tests := []struct {
+		name       string
+		match      contracts.DomainMatch
+		wantTarget []string
+		wantShadow []string
+	}{
+		{
+			name:       "exact apex only",
+			match:      contracts.DomainMatchExact,
+			wantTarget: []string{"login.example"},
+			wantShadow: []string{"*.login.example"},
+		},
+		{
+			name:       "wildcard descendants only",
+			match:      contracts.DomainMatchWildcard,
+			wantTarget: []string{"*.login.example"},
+		},
+		{
+			name:       "suffix apex and descendants",
+			match:      contracts.DomainMatchSuffix,
+			wantTarget: []string{"login.example"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			plan := contracts.PolicyPlan{Entries: []contracts.RouteEntry{
-				domainEntry(string(match), "login.example", match, contracts.RouteClassVPN, contracts.OriginManual),
+				domainEntry("domain", "login.example", tt.match, contracts.RouteClassVPN, contracts.OriginManual),
 			}}
-			_, err := Render(plan, Options{})
-			if err == nil || !strings.Contains(err.Error(), "cannot be represented") {
-				t.Fatalf("Render() error = %v, want domain capability error", err)
+			bindings, err := nft.DomainBindings(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := Render(plan, Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(got)
+			targets := targetSpec(bindings[0].Set4, bindings[0].Set6)
+			for _, selector := range tt.wantTarget {
+				if !lineContainsSelectorAndTargets(text, selector, targets) {
+					t.Fatalf("selector %q does not target policy sets:\n%s", selector, text)
+				}
+			}
+			shadowTargets := targetSpec(nft.DNSShadowSet4, nft.DNSShadowSet6)
+			for _, selector := range tt.wantShadow {
+				if !lineContainsSelectorAndTargets(text, selector, shadowTargets) {
+					t.Fatalf("selector %q does not target shadow sets:\n%s", selector, text)
+				}
+			}
+			if tt.match == contracts.DomainMatchWildcard && lineContainsSelectorAndTargets(text, "login.example", targets) {
+				t.Fatalf("wildcard profile widened to the apex:\n%s", text)
+			}
+			if tt.match == contracts.DomainMatchExact && lineContainsSelectorAndTargets(text, "*.login.example", targets) {
+				t.Fatalf("exact profile widened to descendants:\n%s", text)
 			}
 		})
+	}
+}
+
+func TestRenderPreservesOverlappingDomainMemberships(t *testing.T) {
+	suffix := domainEntry("suffix", "example", contracts.DomainMatchSuffix, contracts.RouteClassVPN, contracts.OriginExternalVPN)
+	exact := domainEntry("exact", "login.example", contracts.DomainMatchExact, contracts.RouteClassDirect, contracts.OriginManual)
+	plan := contracts.PolicyPlan{Entries: []contracts.RouteEntry{suffix, exact}}
+	bindings, err := nft.DomainBindings(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("domain bindings = %d, want 2", len(bindings))
+	}
+	got, err := Render(plan, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+
+	var suffixTargets, exactTargets string
+	for _, binding := range bindings {
+		targets := targetSpec(binding.Set4, binding.Set6)
+		switch binding.Match {
+		case contracts.DomainMatchSuffix:
+			suffixTargets = targets
+		case contracts.DomainMatchExact:
+			exactTargets = targets
+		}
+	}
+	if !lineContainsAll(text, "login.example", suffixTargets, exactTargets) {
+		t.Fatalf("overlapping apex does not populate both policy memberships:\n%s", text)
+	}
+	if !lineContainsSelectorAndTargets(text, "*.login.example", suffixTargets) ||
+		lineContainsSelectorAndTargets(text, "*.login.example", exactTargets) {
+		t.Fatalf("overlapping descendants do not preserve suffix-only membership:\n%s", text)
 	}
 }
 
@@ -83,4 +165,21 @@ func domainEntry(id, pattern string, match contracts.DomainMatch, route contract
 		entry.Sequence = 1
 	}
 	return entry
+}
+
+func lineContainsSelectorAndTargets(text, selector, targets string) bool {
+	return lineContainsAll(text, "/"+selector+"/", targets)
+}
+
+func lineContainsAll(text string, values ...string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		matched := true
+		for _, value := range values {
+			matched = matched && strings.Contains(line, value)
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }

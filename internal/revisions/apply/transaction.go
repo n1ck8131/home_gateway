@@ -33,15 +33,16 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 type Transaction struct {
-	Runtime        Runtime
-	Journal        JournalStore
-	Clock          Clock
-	ConfirmTimeout time.Duration
-	Locker         Locker
-	Watchdog       Watchdog
-	mu             sync.Mutex
-	watchdogMu     sync.Mutex
-	watchdogCancel func()
+	Runtime         Runtime
+	Journal         JournalStore
+	Clock           Clock
+	ConfirmTimeout  time.Duration
+	RecoveryTimeout time.Duration
+	Locker          Locker
+	Watchdog        Watchdog
+	mu              sync.Mutex
+	watchdogMu      sync.Mutex
+	watchdogCancel  func()
 }
 
 func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultErr error) {
@@ -101,19 +102,14 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultEr
 		}
 		return fmt.Errorf("arm watchdog: %w", err)
 	}
-	defer func() {
-		if resultErr != nil {
-			tx.cancelWatchdog()
-		}
-	}()
 	if err := tx.Runtime.Activate(ctx, candidate); err != nil {
-		return tx.rollbackAfterFailure(ctx, pending, "activate", err)
+		return tx.rollbackAfterFailure(pending, "activate", err)
 	}
 	if err := tx.Runtime.Reload(ctx); err != nil {
-		return tx.rollbackAfterFailure(ctx, pending, "reload", err)
+		return tx.rollbackAfterFailure(pending, "reload", err)
 	}
 	if err := tx.Runtime.PostCheck(ctx); err != nil {
-		return tx.rollbackAfterFailure(ctx, pending, "post-check", err)
+		return tx.rollbackAfterFailure(pending, "post-check", err)
 	}
 	return nil
 }
@@ -155,8 +151,10 @@ func (tx *Transaction) Confirm() (resultErr error) {
 	return nil
 }
 
-func (tx *Transaction) Rollback(ctx context.Context) (resultErr error) {
-	release, err := tx.acquire(ctx)
+func (tx *Transaction) Rollback(_ context.Context) (resultErr error) {
+	recoveryCtx, cancel := tx.recoveryContext()
+	defer cancel()
+	release, err := tx.acquire(recoveryCtx)
 	if err != nil {
 		return err
 	}
@@ -173,16 +171,20 @@ func (tx *Transaction) Rollback(ctx context.Context) (resultErr error) {
 	if journal.State != StatePending {
 		return errors.New("no revision is pending confirmation")
 	}
-	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
+	if err := tx.Runtime.Preflight(recoveryCtx, ownedRevisions(journal)); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
-	err = tx.restore(ctx, journal, "explicit rollback")
-	tx.cancelWatchdog()
+	err = tx.restore(recoveryCtx, journal, "explicit rollback")
+	if err == nil {
+		tx.cancelWatchdog()
+	}
 	return err
 }
 
 func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
-	release, err := tx.acquire(ctx)
+	acquireCtx, acquireCancel := tx.recoveryContext()
+	defer acquireCancel()
+	release, err := tx.acquire(acquireCtx)
 	if err != nil {
 		return err
 	}
@@ -196,13 +198,20 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
+	if journal.State == StatePending {
+		recoveryCtx, cancel := tx.recoveryContext()
+		defer cancel()
+		if err := tx.Runtime.Preflight(recoveryCtx, ownedRevisions(journal)); err != nil {
+			return fmt.Errorf("preflight: %w", err)
+		}
+		err = tx.restore(recoveryCtx, journal, "boot/crash recovery")
+		if err == nil {
+			tx.cancelWatchdog()
+		}
+		return err
+	}
 	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
 		return fmt.Errorf("preflight: %w", err)
-	}
-	if journal.State == StatePending {
-		err = tx.restore(ctx, journal, "boot/crash recovery")
-		tx.cancelWatchdog()
-		return err
 	}
 	if journal.ActiveRevision == "" {
 		return nil
@@ -213,8 +222,10 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 	return nil
 }
 
-func (tx *Transaction) Expire(ctx context.Context) (resultErr error) {
-	release, err := tx.acquire(ctx)
+func (tx *Transaction) Expire(_ context.Context) (resultErr error) {
+	recoveryCtx, cancel := tx.recoveryContext()
+	defer cancel()
+	release, err := tx.acquire(recoveryCtx)
 	if err != nil {
 		return err
 	}
@@ -238,11 +249,13 @@ func (tx *Transaction) Expire(ctx context.Context) (resultErr error) {
 	if clock.Now().Before(journal.PendingDeadline) {
 		return nil
 	}
-	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
+	if err := tx.Runtime.Preflight(recoveryCtx, ownedRevisions(journal)); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
-	err = tx.restore(ctx, journal, "watchdog expiry")
-	tx.cancelWatchdog()
+	err = tx.restore(recoveryCtx, journal, "watchdog expiry")
+	if err == nil {
+		tx.cancelWatchdog()
+	}
 	return err
 }
 
@@ -315,12 +328,23 @@ func (tx *Transaction) cancelWatchdog() {
 	}
 }
 
-func (tx *Transaction) rollbackAfterFailure(ctx context.Context, journal Journal, boundary string, cause error) error {
+func (tx *Transaction) rollbackAfterFailure(journal Journal, boundary string, cause error) error {
+	ctx, cancel := tx.recoveryContext()
+	defer cancel()
 	err := tx.restore(ctx, journal, boundary)
 	if err != nil {
 		return errors.Join(fmt.Errorf("%s: %w", boundary, cause), err)
 	}
+	tx.cancelWatchdog()
 	return fmt.Errorf("%s: %w", boundary, cause)
+}
+
+func (tx *Transaction) recoveryContext() (context.Context, context.CancelFunc) {
+	timeout := tx.RecoveryTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func (tx *Transaction) restore(ctx context.Context, journal Journal, reason string) error {

@@ -3,9 +3,11 @@ package apply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,7 +60,7 @@ func TestLinuxRuntimePostCheckRequiresExpectedNFTPolicyRulesAndRoutes(t *testing
 		t.Fatal(err)
 	}
 	runner.outputs = map[string][]byte{
-		"nft list table inet routerd":  []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n"),
+		"nft list table inet routerd":  []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n"),
 		"ip -4 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -6 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
 		"ip -4 route show table 10001": []byte("blackhole default\n"),
@@ -68,15 +70,29 @@ func TestLinuxRuntimePostCheckRequiresExpectedNFTPolicyRulesAndRoutes(t *testing
 		t.Fatal(err)
 	}
 
-	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"foreign\"\n chain prerouting { }\n}\n")
+	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"foreign\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
 	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ownership marker") {
 		t.Fatalf("PostCheck() error = %v, want invalid ownership marker", err)
 	}
+	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
+
 	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n")
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "nft rule") {
+		t.Fatalf("PostCheck() error = %v, want missing nft rule", err)
+	}
+	runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
 
 	runner.outputs["ip -6 route show table 10001"] = nil
 	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "route table 10001") {
 		t.Fatalf("PostCheck() error = %v, want missing route", err)
+	}
+}
+
+func TestContainsTokenSequenceNormalizesNFTListFormatting(t *testing.T) {
+	expected := nftSemanticTokens("meta mark set (meta mark & 0x00ffffff) | 0x1000000 return;")
+	actual := []byte("meta mark set meta mark & 0x00ffffff | 0x01000000 return\n")
+	if !containsTokenSequence(actual, expected) {
+		t.Fatalf("containsTokenSequence() = false, want normalized semantic match: %v", expected)
 	}
 }
 
@@ -272,12 +288,16 @@ func TestLinuxRuntimeActivatesRoutesBeforeIncludesAndRestoresInitialState(t *tes
 			t.Fatalf("restored initial include %s still exists: %v", path, err)
 		}
 	}
-	last := runner.calls[len(runner.calls)-2:]
-	if last[0].program != "fw4" || !reflect.DeepEqual(last[0].args, []string{"reload"}) {
-		t.Fatalf("restore firewall reload call = %#v", last[0])
+	reloadIndex := -1
+	for index := 0; index+1 < len(runner.calls); index++ {
+		if runner.calls[index].program == "fw4" && reflect.DeepEqual(runner.calls[index].args, []string{"reload"}) &&
+			runner.calls[index+1].program == "/etc/init.d/dnsmasq" && reflect.DeepEqual(runner.calls[index+1].args, []string{"reload"}) {
+			reloadIndex = index
+			break
+		}
 	}
-	if last[1].program != "/etc/init.d/dnsmasq" || !reflect.DeepEqual(last[1].args, []string{"reload"}) {
-		t.Fatalf("restore reload calls = %#v", last)
+	if reloadIndex < 0 {
+		t.Fatalf("restore reload calls are missing: %#v", runner.calls)
 	}
 }
 
@@ -334,6 +354,10 @@ func TestLinuxRuntimeReconcilesActiveRevisionAfterReboot(t *testing.T) {
 		"nft list table inet routerd": []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n"),
 	}
 	runner.beforeRun = func(program string, args []string) error {
+		if program == "fw4" && reflect.DeepEqual(args, []string{"reload"}) {
+			runner.outputs["nft list table inet routerd"] = candidate.NFT
+			return nil
+		}
 		if program != "ip" || len(args) < 3 {
 			return nil
 		}
@@ -451,6 +475,12 @@ func TestLinuxRuntimeRestoreRemovesOnlyPreviouslyOwnedRulesAndRoutes(t *testing.
 	}
 	runner.calls = nil
 	runner.outputs = expectedKernelRouteOutputs()
+	runner.beforeRun = func(program string, args []string) error {
+		if program == "/etc/init.d/dnsmasq" && reflect.DeepEqual(args, []string{"reload"}) {
+			runner.outputs = emptyKernelOutputs()
+		}
+		return nil
+	}
 	if err := runtime.Restore(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
@@ -463,6 +493,67 @@ func TestLinuxRuntimeRestoreRemovesOnlyPreviouslyOwnedRulesAndRoutes(t *testing.
 	want := []string{"rule del", "rule del", "route del", "route del"}
 	if !reflect.DeepEqual(actions, want) {
 		t.Fatalf("rollback delete actions = %v, want %v", actions, want)
+	}
+}
+
+func TestLinuxRuntimeRestorePostChecksPopulatedSnapshot(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	baseline := testCandidate("baseline")
+	if err := runtime.Stage(context.Background(), baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), baseline.RevisionID); err != nil {
+		t.Fatal(err)
+	}
+
+	next := testCandidateForSlot("next", 2)
+	if err := runtime.Stage(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputs = expectedKernelRouteOutputsForSlot(1)
+	if err := runtime.Activate(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+
+	runner.outputs = expectedKernelRouteOutputsForSlot(2)
+	runner.beforeRun = func(program string, args []string) error {
+		if program == "/etc/init.d/dnsmasq" && reflect.DeepEqual(args, []string{"reload"}) {
+			runner.outputs = expectedKernelRouteOutputsForSlot(1)
+			runner.outputs["nft list table inet routerd"] = []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting {\n  ct direction reply return\n }\n}\n")
+		}
+		return nil
+	}
+	if err := runtime.Restore(context.Background(), baseline.RevisionID); err != nil {
+		t.Fatal(err)
+	}
+	assertFileEquals(t, runtime.FirewallIncludePath, baseline.NFT)
+	assertFileEquals(t, runtime.DNSIncludePath, baseline.DNS)
+}
+
+func TestLinuxRuntimeRestoreRejectsReloadSuccessWithWrongState(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputs = expectedKernelRouteOutputs()
+	runner.outputs["nft -j list tables"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd"}}]}`)
+
+	err := runtime.Restore(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "restore post-check") {
+		t.Fatalf("Restore() error = %v, want semantic post-check failure", err)
+	}
+	if !strings.Contains(err.Error(), "nft table remains") {
+		t.Fatalf("Restore() error = %v, want stale nft table evidence", err)
 	}
 }
 
@@ -573,8 +664,14 @@ func newTestLinuxRuntime(t *testing.T) (LinuxRuntime, *recordingRunner) {
 func testCandidate(revision string) Candidate {
 	return Candidate{
 		RevisionID: revision,
-		NFT:        []byte("table inet routerd { comment \"managed-by-routerd\"; }\n"),
-		DNS:        []byte("# routerd dnsmasq fragment\n"),
+		NFT: []byte("table inet routerd {\n" +
+			"  comment \"managed-by-routerd\";\n" +
+			"  chain prerouting {\n" +
+			"    type filter hook prerouting priority mangle; policy accept;\n" +
+			"    ct direction reply return\n" +
+			"  }\n" +
+			"}\n"),
+		DNS: []byte("# routerd dnsmasq fragment\n"),
 		Routes: []byte(`{
   "version": 1,
   "commands": [
@@ -588,12 +685,42 @@ func testCandidate(revision string) Candidate {
 	}
 }
 
+func testCandidateForSlot(revision string, slot int) Candidate {
+	candidate := testCandidate(revision)
+	if slot == 1 {
+		return candidate
+	}
+	table := 10000 + slot
+	mark := slot * 0x1000000
+	candidate.Routes = []byte(strings.NewReplacer(
+		"10001", strconv.Itoa(table),
+		"0x1000000", fmt.Sprintf("0x%x", mark),
+	).Replace(string(candidate.Routes)))
+	candidate.NFT = []byte(strings.Replace(string(candidate.NFT), "ct direction reply return", fmt.Sprintf("ct direction reply return comment \"slot-%d\"", slot), 1))
+	candidate.DNS = []byte(fmt.Sprintf("# routerd dnsmasq fragment slot %d\n", slot))
+	return candidate
+}
+
 func expectedKernelRouteOutputs() map[string][]byte {
+	return expectedKernelRouteOutputsForSlot(1)
+}
+
+func expectedKernelRouteOutputsForSlot(slot int) map[string][]byte {
+	table := 10000 + slot
+	mark := slot * 0x1000000
+	priority := strconv.Itoa(table)
+	rule := []byte(fmt.Sprintf("%d: from all fwmark 0x%x/0xff000000 lookup %d\n", table, mark, table))
 	return map[string][]byte{
-		"ip -4 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
-		"ip -6 rule show":              []byte("10001: from all fwmark 0x1000000/0xff000000 lookup 10001\n"),
-		"ip -4 route show table 10001": []byte("blackhole default\n"),
-		"ip -6 route show table 10001": []byte("blackhole default\n"),
+		"ip -4 rule show":                    rule,
+		"ip -6 rule show":                    rule,
+		"ip -4 route show table " + priority: []byte("blackhole default\n"),
+		"ip -6 route show table " + priority: []byte("blackhole default\n"),
+	}
+}
+
+func emptyKernelOutputs() map[string][]byte {
+	return map[string][]byte{
+		"nft -j list tables": []byte(`{"nftables":[]}`),
 	}
 }
 

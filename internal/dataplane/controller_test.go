@@ -50,7 +50,7 @@ func TestControllerApplyBuildsOneCandidate(t *testing.T) {
 	}
 }
 
-func TestControllerApplyDoesNotMutateWhenRenderFails(t *testing.T) {
+func TestControllerApplySupportsExactDomainWithoutWidening(t *testing.T) {
 	t.Parallel()
 
 	transaction := &fakeTransaction{}
@@ -75,12 +75,18 @@ func TestControllerApplyDoesNotMutateWhenRenderFails(t *testing.T) {
 		DNSOptions: dnsmasq.Options{},
 	}
 
-	err = controller.Apply(context.Background(), request)
-	if err == nil {
-		t.Fatal("Apply() error = nil, want unsupported exact-match error")
+	if err := controller.Apply(context.Background(), request); err != nil {
+		t.Fatalf("Apply() error = %v", err)
 	}
-	if transaction.applyCalls != 0 {
-		t.Fatalf("transaction Apply() calls = %d, want 0", transaction.applyCalls)
+	if transaction.applyCalls != 1 {
+		t.Fatalf("transaction Apply() calls = %d, want 1", transaction.applyCalls)
+	}
+	dns := string(transaction.candidate.DNS)
+	if !bytes.Contains(transaction.candidate.DNS, []byte("nftset=/example.com/")) {
+		t.Fatalf("exact apex selector is missing: %s", dns)
+	}
+	if !bytes.Contains(transaction.candidate.DNS, []byte("nftset=/*.example.com/4#inet#routerd#rd_dns_shadow4")) {
+		t.Fatalf("exact descendant shadow selector is missing: %s", dns)
 	}
 }
 

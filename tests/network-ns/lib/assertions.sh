@@ -45,17 +45,23 @@ populate_vpn_sets() {
     ip netns exec "$NS_CLIENT" dig +time=1 +tries=1 +short "@$ROUTER_LAN4" "$VPN_DOMAIN" AAAA | grep -Fx "$VPN6" >/dev/null || fail "AAAA fixture missing"
 }
 
-wan_tx_packets() {
-    ip -n "$NS_ROUTER" -j -s link show dev wan0 | jq -er '.[0].stats64.tx.packets // .[0].stats.tx.packets'
+forward_counter_packets() {
+    comment=$1
+    ip netns exec "$NS_ROUTER" nft -j list chain inet lab_nat forward |
+        jq -er --arg comment "$comment" '
+            [.nftables[] | .rule? | select(.comment == $comment) | .expr[] | .counter?.packets // empty]
+            | if length == 1 then .[0] else error("expected one forwarding counter") end
+        '
 }
 
 assert_up_matrix() {
-    client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" vpn
-    client_probe udp "$VPN4:$UDP_PORT" "$CLIENT4" vpn
-    client_probe udp-quic "$VPN4:$QUIC_PORT" "$CLIENT4" vpn
-    client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" vpn
-    client_probe udp "[$VPN6]:$UDP_PORT" "$CLIENT6" vpn
-    client_probe udp-quic "[$VPN6]:$QUIC_PORT" "$CLIENT6" vpn
+    vpn_token=${1:-vpn-1}
+    client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" "$vpn_token"
+    client_probe udp "$VPN4:$UDP_PORT" "$CLIENT4" "$vpn_token"
+    client_probe udp-quic "$VPN4:$QUIC_PORT" "$CLIENT4" "$vpn_token"
+    client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" "$vpn_token"
+    client_probe udp "[$VPN6]:$UDP_PORT" "$CLIENT6" "$vpn_token"
+    client_probe udp-quic "[$VPN6]:$QUIC_PORT" "$CLIENT6" "$vpn_token"
 
     client_probe tcp "$DIRECT4:$TCP_PORT" "$CLIENT4" wan
     client_probe tcp "[$DIRECT6]:$TCP_PORT" "$CLIENT6" wan
@@ -63,20 +69,26 @@ assert_up_matrix() {
     client_probe tcp "[$VPN6]:$TCP_PORT" "$WORK6" wan
 }
 
-assert_down_no_leak() {
-    before=$(wan_tx_packets)
+assert_slot_down_no_leak() {
+    slot=$1
+    table=$((10000 + slot))
+    before_wan=$(forward_counter_packets lab-wan-egress)
+    before_vpn1=$(forward_counter_packets lab-vpn-egress)
+    before_vpn2=$(forward_counter_packets lab-vpn2-egress)
     expect_probe_failure tcp "$VPN4:$TCP_PORT" "$CLIENT4"
     expect_probe_failure udp "$VPN4:$UDP_PORT" "$CLIENT4"
     expect_probe_failure udp-quic "$VPN4:$QUIC_PORT" "$CLIENT4"
     expect_probe_failure tcp "[$VPN6]:$TCP_PORT" "$CLIENT6"
     expect_probe_failure udp "[$VPN6]:$UDP_PORT" "$CLIENT6"
     expect_probe_failure udp-quic "[$VPN6]:$QUIC_PORT" "$CLIENT6"
-    after=$(wan_tx_packets)
-    if [ "$before" -ne "$after" ]; then
-        fail "VPN-class traffic leaked to WAN: tx packets $before -> $after"
-    fi
-    ip -n "$NS_ROUTER" -4 route show table 10001 | grep -Fx 'blackhole default' >/dev/null || fail "IPv4 VPN table is not fail-closed"
-    ip -n "$NS_ROUTER" -6 route show table 10001 | grep -F 'blackhole default' >/dev/null || fail "IPv6 VPN table is not fail-closed"
+    after_wan=$(forward_counter_packets lab-wan-egress)
+    after_vpn1=$(forward_counter_packets lab-vpn-egress)
+    after_vpn2=$(forward_counter_packets lab-vpn2-egress)
+    [ "$before_wan" -eq "$after_wan" ] || fail "VPN-class traffic leaked to WAN: $before_wan -> $after_wan"
+    [ "$before_vpn1" -eq "$after_vpn1" ] || fail "VPN-class traffic leaked to slot 1: $before_vpn1 -> $after_vpn1"
+    [ "$before_vpn2" -eq "$after_vpn2" ] || fail "VPN-class traffic leaked to slot 2: $before_vpn2 -> $after_vpn2"
+    ip -n "$NS_ROUTER" -4 route show table "$table" | grep -Fx 'blackhole default' >/dev/null || fail "IPv4 VPN table $table is not fail-closed"
+    ip -n "$NS_ROUTER" -6 route show table "$table" | grep -F 'blackhole default' >/dev/null || fail "IPv6 VPN table $table is not fail-closed"
 }
 
 assert_journal_active() {
@@ -90,7 +102,18 @@ expect_apply_failure() {
     profile=$2
     fault=$3
     output=$4
-    if router_driver apply --revision "$revision" --profile "$profile" --fault "$fault" --available=true >"$output" 2>&1; then
+    if router_driver apply --revision "$revision" --profile "$profile" --fault "$fault" \
+        --dual-server --active-slot 1 --slot1-available=true --slot2-available=true >"$output" 2>&1; then
         fail "apply $revision unexpectedly succeeded"
     fi
+}
+
+assert_interface_absent() {
+    if ip -n "$NS_ROUTER" link show dev "$1" >/dev/null 2>&1; then
+        fail "$1 unexpectedly exists"
+    fi
+}
+
+assert_interface_present() {
+    ip -n "$NS_ROUTER" link show dev "$1" >/dev/null 2>&1 || fail "$1 is missing"
 }

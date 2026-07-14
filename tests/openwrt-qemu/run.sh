@@ -173,7 +173,7 @@ wait_for_guest() {
 
 wait_for_guest
 guest_ssh 'mkdir -p /root/routerd-p2 && chmod 700 /root/routerd-p2'
-scp -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+scp -O -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$known_hosts" \
     "$driver" "$script_dir/guest-smoke.sh" "$dnsmasq_apk" "$ip_apk" \
     root@127.0.0.1:/root/routerd-p2/ >"$evidence/scp-upload.log" 2>&1
@@ -206,7 +206,7 @@ fi
 cat "$evidence/phase2.log"
 
 mkdir -p "$evidence/guest"
-scp -r -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+scp -O -r -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     -o "UserKnownHostsFile=$known_hosts" \
     root@127.0.0.1:/root/routerd-p2/evidence/. "$evidence/guest/" \
     >"$evidence/scp-download.log" 2>&1

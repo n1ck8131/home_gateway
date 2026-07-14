@@ -57,6 +57,8 @@ expect_apply_failure() {
 }
 
 assert_identity() {
+    # This file is provided by the pinned OpenWrt image.
+    # shellcheck disable=SC1091
     . /etc/openwrt_release
     [ "$DISTRIB_RELEASE" = 25.12.5 ] || fail "unexpected OpenWrt release $DISTRIB_RELEASE"
     [ "$DISTRIB_REVISION" = r33051-f5dae5ece4 ] || fail "unexpected OpenWrt revision $DISTRIB_REVISION"

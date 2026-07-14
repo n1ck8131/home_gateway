@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 
 NETWORK_NS_TIMEOUT_SECONDS=${NETWORK_NS_TIMEOUT_SECONDS:-900}
 case "$NETWORK_NS_TIMEOUT_SECONDS" in
@@ -25,7 +25,8 @@ fi
 
 sh "$SCRIPT_DIR/check-prereqs.sh"
 
-# shellcheck source=tests/network-ns/fixtures/endpoints.env
+# The runtime fixture is intentionally not a *.sh ShellCheck input.
+# shellcheck disable=SC1091
 . "$SCRIPT_DIR/fixtures/endpoints.env"
 # shellcheck source=tests/network-ns/lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"

@@ -212,7 +212,7 @@ $failure = $null
 try {
     $remotePrepared = $true
     Invoke-RemoteScript -Arguments @('prepare', $nonce) | Out-Null
-    $copyArguments = $connectionOptions + @(
+    $copyArguments = @('-O') + $connectionOptions + @(
         '--',
         $kmodPackage.FullName,
         $toolsPackage.FullName,

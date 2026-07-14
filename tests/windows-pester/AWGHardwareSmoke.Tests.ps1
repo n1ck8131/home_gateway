@@ -274,6 +274,7 @@ Describe 'rollback-safe AWG2 hardware smoke' {
         $calls = Get-Content -LiteralPath $log -Raw
         $calls | Should -Match 'sh.*-s.*--.*prepare'
         $calls | Should -Match '(?m)^SCP'
+        $calls | Should -Match ([regex]::Escape("SCP$([char]31)-O$([char]31)"))
         $calls | Should -Match 'sh.*-s.*--.*smoke'
         $calls | Should -Not -Match 'sh.*-s.*--.*cleanup'
     }

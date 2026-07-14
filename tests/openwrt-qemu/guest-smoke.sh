@@ -69,13 +69,17 @@ assert_identity() {
     done
 }
 
+package_is_installed_exact() {
+    apk info | grep -Fqx "$1"
+}
+
 assert_full_packages() {
     for package in \
         dnsmasq-full ip-full kmod-nf-conntrack-netlink libbpf1 libelf1 libgmp10 \
         libnetfilter-conntrack3 libnfnetlink0 libnettle8; do
-        apk info "$package" >/dev/null 2>&1 || fail "$package is not installed"
+        package_is_installed_exact "$package" || fail "$package is not installed"
     done
-    if apk info dnsmasq >/dev/null 2>&1; then
+    if package_is_installed_exact dnsmasq; then
         fail "plain dnsmasq is installed alongside dnsmasq-full"
     fi
     dnsmasq --version | grep -qw nftset || fail "dnsmasq lacks nftset support"
@@ -120,7 +124,7 @@ assert_runtime() {
 assert_identity
 
 if [ "$phase" = phase1 ]; then
-    apk info dnsmasq >/dev/null 2>&1 || fail "pinned base image lacks plain dnsmasq"
+    package_is_installed_exact dnsmasq || fail "pinned base image lacks plain dnsmasq"
     sha256sum /etc/config/firewall /etc/config/dhcp >"$root/base-config.sha256"
     if ! (CDPATH='' cd "$root" && sha256sum -c qemu-apks.sha256) \
         >"$evidence/apk-checksums.txt" 2>&1; then

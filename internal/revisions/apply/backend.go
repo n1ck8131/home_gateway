@@ -1190,7 +1190,7 @@ func (runtime LinuxRuntime) preflightRouteReconciliation(
 				continue
 			}
 			result, err := runtime.Runner.Run(ctx, "ip", command[1], "route", "show", "table", command[5])
-			if err != nil {
+			if err != nil && !routeTableDoesNotExist(result, command[1]) {
 				return routeReconciliation{}, fmt.Errorf("inspect route table %s for %s: %w", command[5], command[1], err)
 			}
 			routeOutputs[key] = append([]byte(nil), result.Stdout...)
@@ -1324,6 +1324,22 @@ func routeStateKey(command []string) string {
 
 func routeOutputEmpty(data []byte) bool {
 	return len(strings.Fields(string(data))) == 0
+}
+
+func routeTableDoesNotExist(result linux.Result, family string) bool {
+	if result.ExitCode != 2 || !routeOutputEmpty(result.Stdout) {
+		return false
+	}
+	expected := ""
+	switch family {
+	case "-4":
+		expected = "Error: ipv4: FIB table does not exist.\nDump terminated"
+	case "-6":
+		expected = "Error: ipv6: FIB table does not exist.\nDump terminated"
+	default:
+		return false
+	}
+	return string(bytes.TrimSpace(result.Stderr)) == expected
 }
 
 func routeOutputMatches(data []byte, expected []string) bool {

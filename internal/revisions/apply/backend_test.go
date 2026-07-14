@@ -20,10 +20,16 @@ type runnerCall struct {
 	args    []string
 }
 
+type runnerFailure struct {
+	result linux.Result
+	err    error
+}
+
 type recordingRunner struct {
 	calls       []runnerCall
 	fw4Output   []byte
 	outputs     map[string][]byte
+	failures    map[string]runnerFailure
 	failProgram string
 	failStderr  []byte
 	beforeRun   func(string, []string) error
@@ -36,6 +42,9 @@ func (runner *recordingRunner) Run(_ context.Context, program string, args ...st
 		if err := runner.beforeRun(program, clonedArgs); err != nil {
 			return linux.Result{}, err
 		}
+	}
+	if failure, exists := runner.failures[commandKey(program, args)]; exists {
+		return failure.result, failure.err
 	}
 	if runner.failProgram == program {
 		return linux.Result{Stderr: append([]byte(nil), runner.failStderr...)}, errors.New(program + " failed")
@@ -505,6 +514,61 @@ func TestLinuxRuntimeRejectsUnownedRouteTableCollision(t *testing.T) {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("include %s installed after route collision: %v", path, err)
 		}
+	}
+}
+
+func TestLinuxRuntimeActivateTreatsMissingFIBTableAsEmpty(t *testing.T) {
+	tests := []struct {
+		name    string
+		stderr4 string
+		stderr6 string
+		wantErr bool
+	}{
+		{
+			name:    "missing FIB tables",
+			stderr4: "Error: ipv4: FIB table does not exist.\nDump terminated\n",
+			stderr6: "Error: ipv6: FIB table does not exist.\nDump terminated\n",
+		},
+		{
+			name:    "different ip failure",
+			stderr4: "RTNETLINK answers: Operation not permitted\n",
+			stderr6: "RTNETLINK answers: Operation not permitted\n",
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime, runner := newTestLinuxRuntime(t)
+			candidate := testCandidate("revision-1")
+			if err := runtime.Stage(context.Background(), candidate); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.Snapshot(context.Background(), ""); err != nil {
+				t.Fatal(err)
+			}
+			runner.failures = map[string]runnerFailure{
+				"ip -4 route show table 10001": {
+					result: linux.Result{ExitCode: 2, Stderr: []byte(test.stderr4)},
+					err:    errors.New("ip exited with status 2"),
+				},
+				"ip -6 route show table 10001": {
+					result: linux.Result{ExitCode: 2, Stderr: []byte(test.stderr6)},
+					err:    errors.New("ip exited with status 2"),
+				},
+			}
+
+			err := runtime.Activate(context.Background(), candidate)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "inspect route table") {
+					t.Fatalf("Activate() error = %v, want route inspection failure", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

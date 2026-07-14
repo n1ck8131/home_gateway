@@ -177,6 +177,65 @@ func TestContainsTokenSequenceNormalizesNFTListFormatting(t *testing.T) {
 	}
 }
 
+func TestNFTSetInventoryAcceptsLineTerminatedNFTListing(t *testing.T) {
+	expected, err := nftSetInventory(testCandidateWithSets("expected").NFT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := `table inet routerd {
+	comment "managed-by-routerd"
+	set rd_local4 {
+		type ipv4_addr
+		flags interval
+		elements = { 10.0.0.0/8 }
+	}
+
+	set rd_local6 {
+		type ipv6_addr
+		flags interval
+		elements = { ::, ::1,
+			     fd00::/8 }
+	}
+
+	set rd_dns_shadow4 {
+		type ipv4_addr
+		timeout 1h
+	}
+
+	set rd_dns_shadow6 {
+		type ipv6_addr
+		timeout 1h
+	}
+}`
+
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{name: "LF", data: listed},
+		{name: "CRLF", data: strings.ReplaceAll(listed, "\n", "\r\n")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			active, err := nftSetInventory([]byte(test.data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(active) != len(expected) {
+				t.Fatalf("set inventory length = %d, want %d", len(active), len(expected))
+			}
+			for name, expectedSet := range expected {
+				activeSet, found := active[name]
+				if !found {
+					t.Fatalf("set %q is missing", name)
+				}
+				if err := verifyNFTSetSemantics(activeSet, expectedSet); err != nil {
+					t.Fatalf("set %q: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
 func TestLinuxRuntimePreflightRejectsUnownedStartupResources(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -774,7 +833,7 @@ func TestLinuxRuntimeRestoreRejectsStaticSetDriftButAllowsDynamicElements(t *tes
 	}
 }
 
-func TestLinuxRuntimeRestoreRejectsReloadSuccessWithWrongState(t *testing.T) {
+func TestLinuxRuntimeRestoreRemovesOwnedNFTTableAbsentFromSnapshot(t *testing.T) {
 	runtime, runner := newTestLinuxRuntime(t)
 	candidate := testCandidate("revision-1")
 	if err := runtime.Stage(context.Background(), candidate); err != nil {
@@ -788,13 +847,52 @@ func TestLinuxRuntimeRestoreRejectsReloadSuccessWithWrongState(t *testing.T) {
 	}
 	runner.outputs = expectedKernelRouteOutputs()
 	runner.outputs["nft -j list tables"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd"}}]}`)
+	runner.outputs["nft -j list table inet routerd"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd","comment":"managed-by-routerd"}}]}`)
+	runner.beforeRun = func(program string, args []string) error {
+		if program == "nft" && reflect.DeepEqual(args, []string{"delete", "table", "inet", "routerd"}) {
+			runner.outputs["nft -j list tables"] = []byte(`{"nftables":[]}`)
+		}
+		if program == "/etc/init.d/dnsmasq" && reflect.DeepEqual(args, []string{"reload"}) {
+			runner.outputs = emptyKernelOutputs()
+		}
+		return nil
+	}
+
+	if err := runtime.Restore(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		if call.program == "nft" && reflect.DeepEqual(call.args, []string{"delete", "table", "inet", "routerd"}) {
+			return
+		}
+	}
+	t.Fatalf("owned nft table delete is missing: %#v", runner.calls)
+}
+
+func TestLinuxRuntimeRestoreRefusesForeignNFTTableAbsentFromSnapshot(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	candidate := testCandidate("revision-1")
+	if err := runtime.Stage(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	runner.outputs = expectedKernelRouteOutputs()
+	runner.outputs["nft -j list tables"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd"}}]}`)
+	runner.outputs["nft -j list table inet routerd"] = []byte(`{"nftables":[{"table":{"family":"inet","name":"routerd","comment":"foreign"}}]}`)
 
 	err := runtime.Restore(context.Background(), "")
-	if err == nil || !strings.Contains(err.Error(), "restore post-check") {
-		t.Fatalf("Restore() error = %v, want semantic post-check failure", err)
+	if err == nil || !strings.Contains(err.Error(), "invalid ownership marker") {
+		t.Fatalf("Restore() error = %v, want foreign table rejection", err)
 	}
-	if !strings.Contains(err.Error(), "nft table remains") {
-		t.Fatalf("Restore() error = %v, want stale nft table evidence", err)
+	for _, call := range runner.calls {
+		if call.program == "nft" && reflect.DeepEqual(call.args, []string{"delete", "table", "inet", "routerd"}) {
+			t.Fatalf("foreign nft table was deleted: %#v", runner.calls)
+		}
 	}
 }
 
@@ -985,6 +1083,7 @@ func expectedKernelRouteOutputsForSlot(slot int) map[string][]byte {
 	priority := strconv.Itoa(table)
 	rule := []byte(fmt.Sprintf("%d: from all fwmark 0x%x/0xff000000 lookup %d\n", table, mark, table))
 	return map[string][]byte{
+		"nft -j list tables":                 []byte(`{"nftables":[]}`),
 		"ip -4 rule show":                    rule,
 		"ip -6 rule show":                    rule,
 		"ip -4 route show table " + priority: []byte("blackhole default\n"),

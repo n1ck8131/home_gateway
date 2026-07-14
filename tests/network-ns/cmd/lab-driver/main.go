@@ -535,7 +535,7 @@ func productionController(runtimeName, labRoot, fault string, confirmTimeout tim
 	runner := &labRunner{
 		exec:         linux.ExecRunner{},
 		firewallPath: filepath.Join(labRoot, "etc", "50-routerd.nft"),
-		dnsPath:      filepath.Join(labRoot, "etc", "routerd.conf"),
+		dnsPath:      filepath.Join(labRoot, "etc", "routerd.d", "routerd.conf"),
 		dnsBasePath:  filepath.Join(labRoot, "etc", "dnsmasq-base.conf"),
 		dnsPIDPath:   filepath.Join(labRoot, "run", "dnsmasq.pid"),
 		fault:        fault,

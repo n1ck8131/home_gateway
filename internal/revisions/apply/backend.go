@@ -164,19 +164,9 @@ func (runtime LinuxRuntime) verifyManagedIncludeOwnership(candidates []Candidate
 }
 
 func (runtime LinuxRuntime) verifyNFTTableOwnership(ctx context.Context, hasOwnedRevision bool) error {
-	result, err := runtime.Runner.Run(ctx, "nft", "-j", "list", "tables")
+	present, err := runtime.nftTablePresent(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect nft table inventory: %w", err)
-	}
-	tables, err := decodeNFTTableInventory(result.Stdout)
-	if err != nil {
-		return fmt.Errorf("decode nft table inventory: %w", err)
-	}
-	present := false
-	for _, item := range tables.Nftables {
-		if item.Table != nil && item.Table.Family == "inet" && item.Table.Name == routingnft.TableName {
-			present = true
-		}
 	}
 	if !present {
 		return nil
@@ -184,7 +174,7 @@ func (runtime LinuxRuntime) verifyNFTTableOwnership(ctx context.Context, hasOwne
 	if !hasOwnedRevision {
 		return fmt.Errorf("nft table %q exists without a journal-owned revision", routingnft.TableName)
 	}
-	result, err = runtime.Runner.Run(ctx, "nft", "-j", "list", "table", "inet", routingnft.TableName)
+	result, err := runtime.Runner.Run(ctx, "nft", "-j", "list", "table", "inet", routingnft.TableName)
 	if err != nil {
 		return fmt.Errorf("inspect owned nft table: %w", err)
 	}
@@ -204,6 +194,40 @@ func (runtime LinuxRuntime) verifyNFTTableOwnership(ctx context.Context, hasOwne
 	}
 	if owned != 1 {
 		return fmt.Errorf("nft table %q ownership inventory is incomplete", routingnft.TableName)
+	}
+	return nil
+}
+
+func (runtime LinuxRuntime) nftTablePresent(ctx context.Context) (bool, error) {
+	result, err := runtime.Runner.Run(ctx, "nft", "-j", "list", "tables")
+	if err != nil {
+		return false, err
+	}
+	tables, err := decodeNFTTableInventory(result.Stdout)
+	if err != nil {
+		return false, fmt.Errorf("decode nft table inventory: %w", err)
+	}
+	for _, item := range tables.Nftables {
+		if item.Table != nil && item.Table.Family == "inet" && item.Table.Name == routingnft.TableName {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (runtime LinuxRuntime) removeOwnedNFTTableIfPresent(ctx context.Context) error {
+	present, err := runtime.nftTablePresent(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect nft table before restore: %w", err)
+	}
+	if !present {
+		return nil
+	}
+	if err := runtime.verifyNFTTableOwnership(ctx, true); err != nil {
+		return fmt.Errorf("refuse to remove nft table during restore: %w", err)
+	}
+	if _, err := runtime.Runner.Run(ctx, "nft", "delete", "table", "inet", routingnft.TableName); err != nil {
+		return fmt.Errorf("remove owned nft table during restore: %w", err)
 	}
 	return nil
 }
@@ -808,7 +832,7 @@ func parseNFTSetSemantics(tokens []string) (nftSetSemantics, error) {
 				case "}":
 					elementDepth--
 				default:
-					if elementDepth == 1 {
+					if elementDepth == 1 && tokens[index] != ";" {
 						result.elements = append(result.elements, tokens[index])
 					}
 				}
@@ -1082,6 +1106,11 @@ func nftSemanticTokens(line string) []string {
 }
 
 func nftDocumentTokens(document string) []string {
+	document = strings.NewReplacer(
+		"\r\n", " ; ",
+		"\r", " ; ",
+		"\n", " ; ",
+	).Replace(document)
 	return nftTokens(document, " ; ")
 }
 
@@ -1231,6 +1260,11 @@ func (runtime LinuxRuntime) Restore(ctx context.Context, revision string) error 
 	}
 	if err := restoreManagedFile(runtime.DNSIncludePath, filepath.Join(active, dnsArtifactName), manifest.DNSPresent); err != nil {
 		return err
+	}
+	if !manifest.FirewallPresent {
+		if err := runtime.removeOwnedNFTTableIfPresent(ctx); err != nil {
+			return err
+		}
 	}
 	if err := runtime.Reload(ctx); err != nil {
 		return err

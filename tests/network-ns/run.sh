@@ -55,8 +55,8 @@ LAB_ROOT=$(mktemp -d "/tmp/routerd-netns-${token}-XXXXXX")
 EVIDENCE_DIR="$LAB_ROOT/evidence"
 EVIDENCE_IS_EXTERNAL=0
 LAB_DRIVER="$LAB_ROOT/bin/lab-driver"
-mkdir -p "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/run"
-chmod 700 "$LAB_ROOT" "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/run"
+mkdir -p "$LAB_ROOT/bin" "$LAB_ROOT/etc/routerd.d" "$LAB_ROOT/run"
+chmod 700 "$LAB_ROOT" "$LAB_ROOT/bin" "$LAB_ROOT/etc" "$LAB_ROOT/etc/routerd.d" "$LAB_ROOT/run"
 if [ -n "${NETWORK_NS_EVIDENCE_DIR:-}" ]; then
     case "$NETWORK_NS_EVIDENCE_DIR" in
         /*/) fail "NETWORK_NS_EVIDENCE_DIR must not have a trailing slash" ;;
@@ -75,7 +75,7 @@ trap cleanup_lab EXIT INT TERM HUP
 
 {
     printf '%s\n' 'port=53' 'interface=lan0' 'bind-interfaces' 'no-resolv' 'no-hosts' 'user=root' 'group=root'
-    printf 'conf-file=%s\n' "$LAB_ROOT/etc/routerd.conf"
+    printf 'conf-dir=%s\n' "$LAB_ROOT/etc/routerd.d"
     printf 'log-facility=%s\n' "$EVIDENCE_DIR/dnsmasq.log"
     printf 'host-record=%s,%s,%s\n' "$VPN_DOMAIN" "$VPN4" "$VPN6"
     printf 'host-record=%s,%s,%s\n' "$VPN_APEX" "$VPN4" "$VPN6"
@@ -152,7 +152,7 @@ assert_journal_active baseline
 populate_vpn_sets
 assert_up_matrix vpn-1
 
-DNS_INCLUDE="$LAB_ROOT/etc/routerd.conf"
+DNS_INCLUDE="$LAB_ROOT/etc/routerd.d/routerd.conf"
 FIREWALL_INCLUDE="$LAB_ROOT/etc/50-routerd.nft"
 VPN_SETS="$EVIDENCE_DIR/vpn-sets.txt"
 awk -F'#' '/\/vpn\.suite\.test\// { sub(/,6$/, "", $4); print $4, $7 }' "$DNS_INCLUDE" >"$VPN_SETS"

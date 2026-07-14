@@ -139,6 +139,9 @@ assert_runtime() {
 }
 
 assert_identity
+ensure_real_directory /usr/share/nftables.d 0755
+ensure_real_directory /usr/share/nftables.d/ruleset-post 0755
+ensure_real_directory /tmp/dnsmasq.d 0755
 
 if [ "$phase" = phase1 ]; then
     package_is_installed_exact dnsmasq || fail "pinned base image lacks plain dnsmasq"
@@ -166,9 +169,6 @@ if [ "$phase" = phase1 ]; then
     apk info -vv >"$evidence/packages.txt"
     cat /etc/openwrt_release >"$evidence/openwrt-release.txt"
     uname -a >"$evidence/uname.txt"
-
-    ensure_real_directory /usr/share/nftables.d 0755
-    ensure_real_directory /usr/share/nftables.d/ruleset-post 0755
 
     "$driver" apply --runtime openwrt --revision qemu-baseline --available=false
     "$driver" confirm --runtime openwrt

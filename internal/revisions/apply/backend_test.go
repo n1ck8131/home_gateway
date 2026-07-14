@@ -119,7 +119,8 @@ func TestLinuxRuntimePostCheckAcceptsCanonicalNFTListing(t *testing.T) {
 	candidate.NFT = []byte(strings.Replace(
 		string(candidate.NFT),
 		"    ct direction reply return\n",
-		"    ip daddr { 9.9.9.9 } meta mark set (meta mark & 0x00ffffff) | 0x1000000 "+
+		"    ct mark & 0xff000000 == 0x1000000 return\n"+
+			"    ip daddr { 9.9.9.9 } meta mark set (meta mark & 0x00ffffff) | 0x1000000 "+
 			"ct mark set (ct mark & 0x00ffffff) | 0x1000000 return\n"+
 			"    ip6 daddr { 2620:fe::9 } return\n"+
 			"    ct direction reply return\n",
@@ -129,6 +130,8 @@ func TestLinuxRuntimePostCheckAcceptsCanonicalNFTListing(t *testing.T) {
 	listed := strings.NewReplacer(
 		"{ 9.9.9.9 }", "9.9.9.9",
 		"{ 2620:fe::9 }", "2620:fe::9",
+		"ct mark & 0xff000000 == 0x1000000", "ct mark 0x01000000/8",
+		"ct mark & 0xff000000 == 0x2000000", "ct mark 0x02000000/8",
 		"meta mark & 0x00ffffff", "meta mark & 0x01ffffff",
 		"ct mark & 0x00ffffff", "ct mark & 0x01ffffff",
 		"| 0x1000000", "| 0x01000000",
@@ -137,6 +140,15 @@ func TestLinuxRuntimePostCheckAcceptsCanonicalNFTListing(t *testing.T) {
 
 	if err := runtime.PostCheck(context.Background()); err != nil {
 		t.Fatalf("PostCheck() error = %v, want canonical nft listing accepted", err)
+	}
+
+	driftedPrefix := strings.Replace(listed, "ct mark 0x01000000/8", "ct mark 0x03000000/8", 1)
+	if driftedPrefix == listed {
+		t.Fatal("canonical nft listing fixture is missing the ct mark prefix form")
+	}
+	runner.outputs["nft list table inet routerd"] = []byte(driftedPrefix)
+	if err := runtime.PostCheck(context.Background()); err == nil || !strings.Contains(err.Error(), "ordered rules") {
+		t.Fatalf("PostCheck() error = %v, want changed ct mark prefix rejected", err)
 	}
 
 	runner.outputs["nft list table inet routerd"] = []byte(strings.Replace(listed, "| 0x01000000", "| 0x02000000", 1))

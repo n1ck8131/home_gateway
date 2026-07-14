@@ -1127,6 +1127,7 @@ func nftComparableTokens(tokens []string) []string {
 			comparable = append(comparable, token)
 		}
 	}
+	comparable = canonicalizeNFTCTMarkPrefixes(comparable)
 	for index := 0; index+8 < len(comparable); index++ {
 		register := comparable[index]
 		if (register != "meta" && register != "ct") ||
@@ -1143,6 +1144,40 @@ func nftComparableTokens(tokens []string) []string {
 		}
 	}
 	return comparable
+}
+
+func canonicalizeNFTCTMarkPrefixes(tokens []string) []string {
+	canonical := make([]string, 0, len(tokens)+4)
+	for index := 0; index < len(tokens); index++ {
+		if index+2 >= len(tokens) || tokens[index] != "ct" || tokens[index+1] != "mark" {
+			canonical = append(canonical, tokens[index])
+			continue
+		}
+		valueText, prefixText, found := strings.Cut(tokens[index+2], "/")
+		if !found || strings.Contains(prefixText, "/") || !strings.HasPrefix(valueText, "0x") {
+			canonical = append(canonical, tokens[index])
+			continue
+		}
+		value, valueErr := strconv.ParseUint(strings.TrimPrefix(valueText, "0x"), 16, 32)
+		prefix, prefixErr := strconv.ParseUint(prefixText, 10, 8)
+		if valueErr != nil || prefixErr != nil || prefix > 32 {
+			canonical = append(canonical, tokens[index])
+			continue
+		}
+		mask := uint32(0)
+		if prefix != 0 {
+			mask = ^uint32(0) << (32 - uint(prefix))
+		}
+		if uint32(value)&^mask != 0 {
+			canonical = append(canonical, tokens[index])
+			continue
+		}
+		canonical = append(canonical,
+			"ct", "mark", "&", fmt.Sprintf("0x%x", mask), "=", "=", fmt.Sprintf("0x%x", value),
+		)
+		index += 2
+	}
+	return canonical
 }
 
 func slicesEqual(left, right []string) bool {

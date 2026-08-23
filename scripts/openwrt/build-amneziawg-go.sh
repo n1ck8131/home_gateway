@@ -37,7 +37,7 @@ go_bin="$root/.tools/go/bin/go"
 if [ ! -x "$go_bin" ]; then
 	go_bin="$(command -v go)"
 fi
-test "$("$go_bin" env GOVERSION)" = 'go1.26.5'
+test "$("$go_bin" env GOVERSION)" = 'go1.26.6'
 
 export GOWORK=off
 export GOTOOLCHAIN=local
@@ -58,7 +58,7 @@ binary_size="$(wc -c < "$output_dir/amneziawg-go" | tr -d ' ')"
 		"source_sha256=$locked_sha" \
 		'tag=v0.2.19' \
 		"commit=$locked_commit" \
-		'go_version=go1.26.5' \
+		'go_version=go1.26.6' \
 		'GOOS=linux' \
 		'GOARCH=arm64' \
 		'CGO_ENABLED=0' \

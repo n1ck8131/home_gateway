@@ -239,7 +239,7 @@ function Test-InstalledComponent {
                 $path = Join-Path $Root ".tools/go/bin/go$suffix"
                 if (-not (Test-Path -LiteralPath $path)) { return $false }
                 $output = @(& $path version 2>&1)
-                return $LASTEXITCODE -eq 0 -and ($output -join ' ') -match '\bgo1\.26\.5\b'
+                return $LASTEXITCODE -eq 0 -and ($output -join ' ') -match '\bgo1\.26\.6\b'
             }
             'pester' {
                 $path = Join-Path $Root '.tools/modules/Pester/6.0.0/Pester.psd1'
@@ -288,8 +288,8 @@ function Assert-BootstrapVersions {
     $goSuffix = if ($WindowsPlatform) { '.exe' } else { '' }
     $go = Join-Path $Root ".tools/go/bin/go$goSuffix"
     $goOutput = @(& $go version 2>&1)
-    if ($LASTEXITCODE -ne 0 -or ($goOutput -join ' ') -notmatch '\bgo1\.26\.5\b') {
-        throw 'Pinned Go version is not go1.26.5'
+    if ($LASTEXITCODE -ne 0 -or ($goOutput -join ' ') -notmatch '\bgo1\.26\.6\b') {
+        throw 'Pinned Go version is not go1.26.6'
     }
     $pesterPath = Join-Path $Root '.tools/modules/Pester/6.0.0/Pester.psd1'
     Import-Module $pesterPath -Force

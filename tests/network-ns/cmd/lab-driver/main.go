@@ -634,7 +634,7 @@ func applyRequest(revision, profile string, options requestOptions) (dataplane.A
 	if profile == "shared" {
 		entries = append(entries, contracts.RouteEntry{
 			ID: "manual-direct-shared", Pattern: "target.vpn.suite.test", Kind: contracts.EntryKindDomain,
-			Match: contracts.DomainMatchExact, Route: contracts.RouteClassDirect,
+			Match: contracts.DomainMatchSuffix, Route: contracts.RouteClassDirect,
 			Scope: contracts.Scope{Type: contracts.ScopeGlobal}, Origin: contracts.OriginManual,
 		})
 	}
@@ -668,6 +668,7 @@ type openWRTRunner struct {
 	exec      linux.ExecRunner
 	fault     string
 	faultUsed bool
+	reloaded  bool
 }
 
 func (runner *openWRTRunner) Run(ctx context.Context, program string, args ...string) (linux.Result, error) {
@@ -683,7 +684,10 @@ func (runner *openWRTRunner) Run(ctx context.Context, program string, args ...st
 	if err != nil {
 		return result, err
 	}
-	if !runner.faultUsed && runner.fault == "postcheck" && program == "nft" && equalArgs(args, "list", "table", "inet", nft.TableName) {
+	if program == "/etc/init.d/dnsmasq" && equalArgs(args, "reload") {
+		runner.reloaded = true
+	}
+	if !runner.faultUsed && runner.reloaded && runner.fault == "postcheck" && program == "nft" && equalArgs(args, "list", "table", "inet", nft.TableName) {
 		runner.faultUsed = true
 		return result, errors.New("injected OpenWrt post-check fault")
 	}
@@ -726,6 +730,7 @@ type labRunner struct {
 	dnsPIDPath   string
 	fault        string
 	faultUsed    bool
+	reloaded     bool
 }
 
 func (runner *labRunner) Run(ctx context.Context, program string, args ...string) (linux.Result, error) {
@@ -742,7 +747,11 @@ func (runner *labRunner) Run(ctx context.Context, program string, args ...string
 		if !equalArgs(args, "reload") {
 			return linux.Result{}, fmt.Errorf("lab dnsmasq service rejects argv %q", args)
 		}
-		return runner.reloadDNSMasq(ctx)
+		result, err := runner.reloadDNSMasq(ctx)
+		if err == nil {
+			runner.reloaded = true
+		}
+		return result, err
 	}
 	if !runner.faultUsed && runner.fault == "nft-validate" && program == "nft" && len(args) == 3 && args[0] == "-c" && args[1] == "-f" {
 		runner.faultUsed = true
@@ -752,7 +761,7 @@ func (runner *labRunner) Run(ctx context.Context, program string, args ...string
 		runner.faultUsed = true
 		return linux.Result{ExitCode: 70}, errors.New("injected dnsmasq validation fault")
 	}
-	if !runner.faultUsed && runner.fault == "postcheck" && program == "nft" && equalArgs(args, "list", "table", "inet", nft.TableName) {
+	if !runner.faultUsed && runner.reloaded && runner.fault == "postcheck" && program == "nft" && equalArgs(args, "list", "table", "inet", nft.TableName) {
 		runner.faultUsed = true
 		return linux.Result{ExitCode: 70}, errors.New("injected post-check fault")
 	}
@@ -761,26 +770,24 @@ func (runner *labRunner) Run(ctx context.Context, program string, args ...string
 
 func (runner *labRunner) fw4Print() (linux.Result, error) {
 	output := []byte("flush ruleset\n")
-	fragment, err := os.ReadFile(runner.firewallPath)
+	info, err := os.Lstat(runner.firewallPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return linux.Result{Stdout: output}, nil
 	}
 	if err != nil {
-		return linux.Result{}, fmt.Errorf("read lab firewall include: %w", err)
+		return linux.Result{}, fmt.Errorf("inspect lab firewall include: %w", err)
 	}
-	output = append(output, fragment...)
-	if len(output) == 0 || output[len(output)-1] != '\n' {
-		output = append(output, '\n')
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return linux.Result{}, errors.New("lab firewall include is not a regular file")
 	}
-	return linux.Result{Stdout: output}, nil
+	return linux.Result{Stdout: []byte(fmt.Sprintf(
+		"[!] Automatically including '%s'\nflush ruleset\ninclude %s\n",
+		runner.firewallPath,
+		strconv.Quote(runner.firewallPath),
+	))}, nil
 }
 
 func (runner *labRunner) fw4Reload(ctx context.Context) (linux.Result, error) {
-	if _, err := runner.exec.Run(ctx, "nft", "list", "table", "inet", nft.TableName); err == nil {
-		if _, err := runner.exec.Run(ctx, "nft", "delete", "table", "inet", nft.TableName); err != nil {
-			return linux.Result{}, fmt.Errorf("delete active lab nft table: %w", err)
-		}
-	}
 	if _, err := os.Stat(runner.firewallPath); errors.Is(err, os.ErrNotExist) {
 		return linux.Result{}, nil
 	} else if err != nil {

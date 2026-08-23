@@ -11,3 +11,4 @@
 | [ADR-0007](docs/adr/ADR-0007-mobile-peer-lifecycle.md) | Accepted | Mobile peer lifecycle |
 | [ADR-0008](docs/adr/ADR-0008-cisco-discovery.md) | Accepted | Cisco discovery |
 | [ADR-0009](docs/adr/ADR-0009-supply-chain-signing.md) | Accepted | Supply chain and signing |
+| [ADR-0010](docs/adr/ADR-0010-dnsmasq-domain-match-capability.md) | Accepted | dnsmasq domain match capability |

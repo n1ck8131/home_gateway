@@ -19,11 +19,12 @@ func TestRenderOwnedTableMarksParityAndProtocolIndependentRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(got)
+	if !strings.Contains(text, "}\ndestroy chain inet routerd prerouting\ntable inet routerd {\n") {
+		t.Fatalf("rendered ruleset is not an atomic owned-table replacement:\n%s", text)
+	}
 	for _, want := range []string{
 		"table inet routerd",
 		`comment "managed-by-routerd"`,
-		"set rd_dns_shadow4",
-		"set rd_dns_shadow6",
 		"ip daddr { 8.8.8.8 }",
 		"ip6 daddr { 2606:4700::/32 }",
 		"ct mark & 0xff000000",

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -458,10 +459,13 @@ func (runtime LinuxRuntime) Validate(ctx context.Context, candidate Candidate) e
 		return err
 	}
 	if present {
-		if len(installed) == 0 || !bytes.Contains(complete, installed) {
-			return errors.New("active firewall include is missing from fw4 print output")
+		if len(installed) == 0 {
+			return errors.New("active firewall include is empty")
 		}
-		complete = bytes.Replace(complete, installed, fragment, 1)
+		complete, err = replaceFW4Include(complete, fragment, runtime.FirewallIncludePath)
+		if err != nil {
+			return err
+		}
 	} else {
 		complete = append(append(complete, '\n'), fragment...)
 	}
@@ -485,6 +489,39 @@ func (runtime LinuxRuntime) Validate(ctx context.Context, candidate Candidate) e
 		return err
 	}
 	return nil
+}
+
+func replaceFW4Include(output []byte, fragment []byte, includePath string) ([]byte, error) {
+	directive := "include " + strconv.Quote(includePath)
+	notice := "[!] Automatically including '" + includePath + "'"
+	lines := strings.Split(string(output), "\n")
+	var complete bytes.Buffer
+	matches := 0
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == notice {
+			continue
+		}
+		if trimmed == directive || trimmed == directive+";" {
+			matches++
+			if matches > 1 {
+				return nil, errors.New("active firewall include is duplicated in fw4 print output")
+			}
+			complete.Write(fragment)
+			if len(fragment) > 0 && fragment[len(fragment)-1] != '\n' {
+				complete.WriteByte('\n')
+			}
+			continue
+		}
+		complete.WriteString(line)
+		if index < len(lines)-1 {
+			complete.WriteByte('\n')
+		}
+	}
+	if matches == 0 {
+		return nil, errors.New("active firewall include is missing from fw4 print output")
+	}
+	return complete.Bytes(), nil
 }
 
 func withBoundedStderr(err error, stderr []byte) error {
@@ -594,6 +631,21 @@ func (runtime LinuxRuntime) Activate(ctx context.Context, candidate Candidate) e
 		return err
 	}
 	active := filepath.Join(runtime.Root, "active")
+	previousNFT, previousNFTPresent, err := readOptionalRegularFile(filepath.Join(active, nftArtifactName))
+	if err != nil {
+		return err
+	}
+	if previousNFTPresent {
+		tablePresent, err := runtime.nftTablePresent(ctx)
+		if err != nil {
+			return fmt.Errorf("inspect nft table before stale-set cleanup: %w", err)
+		}
+		if tablePresent {
+			if err := runtime.removeStaleNFTSets(ctx, previousNFT); err != nil {
+				return fmt.Errorf("remove stale nft sets before activation: %w", err)
+			}
+		}
+	}
 	temporary := active + ".next"
 	if err := copyArtifacts(source, temporary); err != nil {
 		return err
@@ -641,6 +693,20 @@ func (runtime LinuxRuntime) PostCheck(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	rollbackNFT, rollbackPresent, err := readOptionalRegularFile(filepath.Join(runtime.Root, "lkg", nftArtifactName))
+	if err != nil {
+		return err
+	}
+	if rollbackPresent {
+		return runtime.verifySnapshotState(
+			ctx,
+			active,
+			snapshotManifest{FirewallPresent: true, DNSPresent: true},
+			artifact,
+			iprule.Artifact{},
+			rollbackNFT,
+		)
+	}
 	return runtime.verifySnapshotState(ctx, active, snapshotManifest{FirewallPresent: true, DNSPresent: true}, artifact, iprule.Artifact{})
 }
 
@@ -650,13 +716,14 @@ func (runtime LinuxRuntime) verifySnapshotState(
 	manifest snapshotManifest,
 	desired iprule.Artifact,
 	previous iprule.Artifact,
+	allowedNFTArtifacts ...[]byte,
 ) error {
 	if manifest.FirewallPresent {
 		expected, err := readRegularFile(filepath.Join(directory, nftArtifactName))
 		if err != nil {
 			return fmt.Errorf("read expected nft artifact: %w", err)
 		}
-		if err := runtime.verifyActiveNFTTable(ctx, expected); err != nil {
+		if err := runtime.verifyActiveNFTTable(ctx, expected, allowedNFTArtifacts...); err != nil {
 			return err
 		}
 	} else if err := runtime.verifyNFTTableAbsent(ctx); err != nil {
@@ -665,7 +732,7 @@ func (runtime LinuxRuntime) verifySnapshotState(
 	return runtime.verifyRouteState(ctx, desired, previous)
 }
 
-func (runtime LinuxRuntime) verifyActiveNFTTable(ctx context.Context, expected []byte) error {
+func (runtime LinuxRuntime) verifyActiveNFTTable(ctx context.Context, expected []byte, allowedArtifacts ...[]byte) error {
 	nftResult, err := runtime.Runner.Run(ctx, "nft", "list", "table", "inet", routingnft.TableName)
 	if err != nil {
 		return err
@@ -697,9 +764,6 @@ func (runtime LinuxRuntime) verifyActiveNFTTable(ctx context.Context, expected [
 	if err != nil {
 		return fmt.Errorf("inspect active nft table: %w", err)
 	}
-	if len(activeSets) != len(expectedSets) {
-		return fmt.Errorf("routerd nft set inventory drifted: active=%d expected=%d", len(activeSets), len(expectedSets))
-	}
 	for name, expectedSet := range expectedSets {
 		activeSet, found := activeSets[name]
 		if !found {
@@ -709,7 +773,94 @@ func (runtime LinuxRuntime) verifyActiveNFTTable(ctx context.Context, expected [
 			return fmt.Errorf("routerd nft set %q drifted: %w", name, err)
 		}
 	}
+	allowedSets := make(map[string]nftSetSemantics)
+	for _, artifact := range allowedArtifacts {
+		sets, err := nftSetInventory(artifact)
+		if err != nil {
+			return fmt.Errorf("inspect allowed nft artifact: %w", err)
+		}
+		for name, set := range sets {
+			if _, active := expectedSets[name]; !active {
+				allowedSets[name] = set
+			}
+		}
+	}
+	for name, activeSet := range activeSets {
+		if _, expected := expectedSets[name]; expected {
+			continue
+		}
+		allowedSet, allowed := allowedSets[name]
+		if !allowed {
+			return fmt.Errorf("routerd nft set %q is unexpected", name)
+		}
+		if err := verifyNFTSetSemantics(activeSet, allowedSet); err != nil {
+			return fmt.Errorf("allowed routerd nft set %q drifted: %w", name, err)
+		}
+	}
 	return nil
+}
+
+func (runtime LinuxRuntime) removeStaleNFTSets(ctx context.Context, expected []byte) error {
+	result, err := runtime.Runner.Run(ctx, "nft", "list", "table", "inet", routingnft.TableName)
+	if err != nil {
+		return err
+	}
+	expectedSets, err := nftSetInventory(expected)
+	if err != nil {
+		return fmt.Errorf("inspect expected nft sets before cleanup: %w", err)
+	}
+	activeSets, err := nftSetInventory(result.Stdout)
+	if err != nil {
+		return fmt.Errorf("inspect active nft sets before cleanup: %w", err)
+	}
+	stale := make([]string, 0)
+	for name, set := range activeSets {
+		if _, retained := expectedSets[name]; retained {
+			continue
+		}
+		if !managedDynamicSet(name, set.typeName) {
+			return fmt.Errorf("refuse to remove unexpected nft set %q", name)
+		}
+		stale = append(stale, name)
+	}
+	sort.Strings(stale)
+	for _, name := range stale {
+		if _, err := runtime.Runner.Run(ctx, "nft", "delete", "set", "inet", routingnft.TableName, name); err != nil {
+			return fmt.Errorf("remove stale nft set %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func managedDynamicSet(name, typeName string) bool {
+	switch name {
+	case "rd_dns_shadow4":
+		return typeName == "ipv4_addr"
+	case "rd_dns_shadow6":
+		return typeName == "ipv6_addr"
+	}
+	prefix := ""
+	wantType := ""
+	switch {
+	case strings.HasPrefix(name, "rd4_"):
+		prefix = "rd4_"
+		wantType = "ipv4_addr"
+	case strings.HasPrefix(name, "rd6_"):
+		prefix = "rd6_"
+		wantType = "ipv6_addr"
+	default:
+		return false
+	}
+	suffix := strings.TrimPrefix(name, prefix)
+	if len(suffix) != 16 || typeName != wantType {
+		return false
+	}
+	for _, value := range suffix {
+		if value < '0' || (value > '9' && value < 'a') || value > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 type nftSetSemantics struct {
@@ -1268,6 +1419,15 @@ func (runtime LinuxRuntime) Restore(ctx context.Context, revision string) error 
 	}
 	if err := runtime.Reload(ctx); err != nil {
 		return err
+	}
+	if manifest.FirewallPresent {
+		expectedNFT, err := readRegularFile(filepath.Join(active, nftArtifactName))
+		if err != nil {
+			return err
+		}
+		if err := runtime.removeStaleNFTSets(ctx, expectedNFT); err != nil {
+			return fmt.Errorf("remove stale nft sets after restore: %w", err)
+		}
 	}
 	if err := runtime.verifySnapshotIncludes(active, manifest); err != nil {
 		return err

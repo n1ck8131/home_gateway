@@ -18,7 +18,8 @@ $adrPaths = @(
     'docs/adr/ADR-0006-state-secrets-backup.md',
     'docs/adr/ADR-0007-mobile-peer-lifecycle.md',
     'docs/adr/ADR-0008-cisco-discovery.md',
-    'docs/adr/ADR-0009-supply-chain-signing.md'
+    'docs/adr/ADR-0009-supply-chain-signing.md',
+    'docs/adr/ADR-0010-dnsmasq-domain-match-capability.md'
 )
 $required = @(
     'SPEC.md',

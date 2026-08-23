@@ -219,8 +219,8 @@ vpn_policy_sets() {
 }
 
 direct_domain_sets() {
-    set4=$(awk '$1 == "ip" && $2 == "daddr" && $3 ~ /^@/ && /ct mark set \(ct mark & 0x00ffffff\) return$/ { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
-    set6=$(awk '$1 == "ip6" && $2 == "daddr" && $3 ~ /^@/ && /ct mark set \(ct mark & 0x00ffffff\) return$/ { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
+    set4=$(awk '$1 == "ip" && $2 == "daddr" && $3 ~ /^@rd4_/ && $NF == "return" && $0 !~ /meta mark set/ { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
+    set6=$(awk '$1 == "ip6" && $2 == "daddr" && $3 ~ /^@rd6_/ && $NF == "return" && $0 !~ /meta mark set/ { sub(/^@/, "", $3); print $3 }' "$FIREWALL_INCLUDE" | sort -u)
     case "$set4:$set6" in
         *[!A-Za-z0-9_:]*) fail "direct domain set selection is ambiguous" ;;
         :) fail "direct domain sets are missing" ;;
@@ -283,10 +283,35 @@ EOF
     assert_journal_active baseline
 }
 
-note "asserting exact, wildcard, suffix, and overlap semantics through real dnsmasq"
+note "asserting DNS set elements survive an atomic rules reload and rollback"
+read -r preserved_set4 preserved_set6 <<EOF
+$(vpn_policy_sets 0x1000000)
+EOF
+assert_set_pair_present "$preserved_set4" "$preserved_set6"
+router_driver apply --revision dns-preserve --profile suffix --fault none \
+    --dual-server --active-slot 1 --slot1-available=true --slot2-available=true
+read -r reloaded_set4 reloaded_set6 <<EOF
+$(vpn_policy_sets 0x1000000)
+EOF
+[ "$preserved_set4:$preserved_set6" = "$reloaded_set4:$reloaded_set6" ] ||
+    fail "unchanged DNS policy selected different nft sets during reload"
+assert_set_pair_present "$reloaded_set4" "$reloaded_set6"
+router_driver rollback
+assert_journal_active baseline
+assert_set_pair_present "$preserved_set4" "$preserved_set6"
+
+note "asserting suffix semantics and fail-safe exact/wildcard rejection through real dnsmasq"
 assert_dns_profile dns-suffix suffix "$VPN_APEX" present "$VPN_DOMAIN" present
-assert_dns_profile dns-exact exact "$VPN_DOMAIN" present "$VPN_EXACT_CHILD" absent
-assert_dns_profile dns-wildcard wildcard "$VPN_APEX" absent "$VPN_DOMAIN" present
+expect_apply_failure dns-exact exact none "$EVIDENCE_DIR/unsupported-exact.log"
+grep -F 'cannot be represented safely by dnsmasq nftset' "$EVIDENCE_DIR/unsupported-exact.log" >/dev/null ||
+    fail "exact-domain rejection did not expose the dnsmasq capability boundary"
+assert_journal_active baseline
+expect_apply_failure dns-wildcard wildcard none "$EVIDENCE_DIR/unsupported-wildcard.log"
+grep -F 'cannot be represented safely by dnsmasq nftset' "$EVIDENCE_DIR/unsupported-wildcard.log" >/dev/null ||
+    fail "wildcard-domain rejection did not expose the dnsmasq capability boundary"
+assert_journal_active baseline
+populate_vpn_sets
+assert_up_matrix vpn-1
 
 router_driver apply --revision dns-shared --profile shared --fault none \
     --dual-server --active-slot 1 --slot1-available=true --slot2-available=true

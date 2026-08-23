@@ -1,5 +1,7 @@
 # P2 Production Dataplane Implementation Plan
 
+Status: Completed on 2026-08-24 with the DNS capability amendment below.
+
 ## Goal
 
 Implement the production routing backend that consumes the deterministic P1
@@ -38,7 +40,12 @@ implement production API/UI, Cisco discovery, source downloads, or failover.
 ### DNS rendering
 
 - Generate separate IPv4 and IPv6 nft sets and deterministic chunked
-  `dnsmasq-full` nftset directives for exact, suffix and wildcard domains.
+  `dnsmasq-full` nftset directives for suffix domains.
+- Reject exact and wildcard matches before the apply transaction. The
+  `dnsmasq-full` nftset adapter cannot represent them without widening or
+  dropping the requested hostname match. ADR-0010 records this capability
+  boundary; P1 keeps the logical match types for a future hostname-aware
+  adapter.
 - A/AAAA/CNAME population and expiry are verified against a real dnsmasq in
   the integration lab.
 - nft set default timeouts and dnsmasq cache limits are explicit and aligned;
@@ -74,8 +81,9 @@ Create:
 
 Write failing tests first for owned names, mark/table collision rejection,
 stable output, IPv4/IPv6 parity, terminal routes, connection marks,
-protocol-independent rules, domain chunking and timeout alignment. Then add the
-smallest renderer and runner implementation needed to pass.
+protocol-independent rules, suffix-domain chunking, unsupported-match rejection
+and timeout alignment. Then add the smallest renderer and runner implementation
+needed to pass.
 
 ### 2. Transactional apply and boot recovery
 
@@ -193,13 +201,15 @@ repeat of the affected checks plus the final regression batch.
 
 ## Exit criteria
 
-- P1 `PolicyPlan` produces byte-stable nft, ip-rule and dnsmasq candidates.
+- P1 `PolicyPlan` produces byte-stable nft and ip-rule candidates. The P2
+  dnsmasq adapter produces byte-stable suffix candidates and rejects exact or
+  wildcard candidates before transaction staging.
 - WAN remains the system default; VPN-class IPv4/IPv6 cannot fall through to
   `main` when the tunnel is absent.
 - Owned marks/tables/chains are collision-checked and established flows retain
   their server mark.
-- A/AAAA/CNAME nftset population, expiry and direct-over-VPN collision behavior
-  pass with real dnsmasq/nft in netns.
+- Suffix-based A/AAAA/CNAME nftset population, expiry and direct-over-VPN
+  collision behavior pass with real dnsmasq/nft in netns.
 - Invalid nft/DNS, post-check failure, watchdog expiry, crash and boot recovery
   restore last-known-good state without losing WAN management.
 - Netns and pinned OpenWrt QEMU gates pass, including 20 consecutive fault

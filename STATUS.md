@@ -1,7 +1,7 @@
 # Project Status
 
-Current phase: P2 Production Dataplane planning
-Release level: P1-software-verified; P2-not-implemented
+Current phase: P2 Production Dataplane closure
+Release level: P2-software-verified; P3-hardware-not-run
 
 ## P0A Foundation
 
@@ -22,9 +22,11 @@ Release level: P1-software-verified; P2-not-implemented
 
 ## P2 Production Dataplane
 
-- State: planning
+- State: complete for the software and emulated OpenWrt scope
 - Plan: [P2 production dataplane implementation plan](docs/superpowers/plans/2026-07-13-p02-production-dataplane.md)
-- Implementation: awaiting explicit plan confirmation
+- Implementation: deterministic nftables, policy-routing and suffix-DNS rendering; transactional apply, commit-confirm watchdog, rollback and boot reconciliation
+- DNS capability boundary: exact and wildcard domain matches fail before transaction staging because dnsmasq nftset cannot preserve those semantics; [ADR-0010](docs/adr/ADR-0010-dnsmasq-domain-match-capability.md) records the decision
+- Local evidence on 2026-08-24: full Windows verification and focused Go tests passed with no callable Go vulnerabilities; the Ubuntu 24.04 network namespace suite passed all traffic assertions and 20 tunnel fault cycles; the pinned OpenWrt 25.12.5 QEMU suite passed validation faults, post-check rollback, watchdog rollback, crash recovery and reboot/LKG reconciliation
 - Branch: `phase/p2-dataplane`, based on completed `phase/p1-policy-core`
 
 ## External gates
@@ -37,5 +39,5 @@ Release level: P1-software-verified; P2-not-implemented
 ## Blockers
 
 - P1 software blockers: none
-- P2 planning blockers: none
-- Hardware evidence remains intentionally deferred to the phase gates above; P1 does not claim hardware compatibility or throughput.
+- P2 software blockers: none
+- P3 still requires the exact GL-MT6000 kernel module/UAPI smoke, router package lifecycle and a real router-to-VPS AWG2 handshake. P2 does not claim hardware compatibility or throughput.

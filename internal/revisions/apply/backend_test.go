@@ -403,6 +403,122 @@ func TestLinuxRuntimeRejectsFirewallPrintDrift(t *testing.T) {
 	}
 }
 
+func TestLinuxRuntimeValidatesActiveFirewallByExpandingFW4Include(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	active := testCandidateForSlot("active", 1)
+	if err := runtime.Stage(context.Background(), active); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Snapshot(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Activate(context.Background(), active); err != nil {
+		t.Fatal(err)
+	}
+
+	next := testCandidateForSlot("next", 2)
+	if err := runtime.Stage(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+	runner.fw4Output = []byte(fmt.Sprintf(
+		"[!] Automatically including '%s'\ntable inet fw4 {}\ninclude %s\n",
+		runtime.FirewallIncludePath,
+		strconv.Quote(runtime.FirewallIncludePath),
+	))
+	runner.beforeRun = func(program string, args []string) error {
+		if program != "nft" || len(args) != 3 || !reflect.DeepEqual(args[:2], []string{"-c", "-f"}) {
+			return nil
+		}
+		complete, err := os.ReadFile(args[2])
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(complete, []byte("Automatically including")) || bytes.Contains(complete, []byte("include ")) {
+			return errors.New("fw4 include metadata was not replaced")
+		}
+		if !bytes.Contains(complete, next.NFT) {
+			return errors.New("staged firewall fragment is missing")
+		}
+		return nil
+	}
+
+	if err := runtime.Validate(context.Background(), next); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReplaceFW4IncludeRejectsDuplicateDirective(t *testing.T) {
+	path := "/usr/share/nftables.d/ruleset-post/50-routerd.nft"
+	directive := "include " + strconv.Quote(path)
+	_, err := replaceFW4Include([]byte(directive+"\n  "+directive+";\n"), []byte("table inet routerd {}\n"), path)
+	if err == nil || !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("replaceFW4Include() error = %v, want duplicate rejection", err)
+	}
+}
+
+func TestLinuxRuntimeAllowsOnlyLastKnownGoodDynamicSetsDuringPostCheck(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	expected := testCandidate("active").NFT
+	lastKnownGood := []byte(strings.Replace(
+		string(expected),
+		"  chain prerouting {",
+		"  set rd4_0123456789abcdef { type ipv4_addr; flags timeout; timeout 3600s; }\n  chain prerouting {",
+		1,
+	))
+	runner.outputs["nft list table inet routerd"] = lastKnownGood
+
+	if err := runtime.verifyActiveNFTTable(context.Background(), expected, lastKnownGood); err != nil {
+		t.Fatalf("verifyActiveNFTTable() error = %v, want LKG set accepted", err)
+	}
+	if err := runtime.verifyActiveNFTTable(context.Background(), expected); err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("verifyActiveNFTTable() error = %v, want unowned extra-set rejection", err)
+	}
+}
+
+func TestLinuxRuntimeRemovesOnlyStaleManagedDynamicSets(t *testing.T) {
+	runtime, runner := newTestLinuxRuntime(t)
+	expected := testCandidate("active").NFT
+	listed := []byte(strings.Replace(
+		string(expected),
+		"  chain prerouting {",
+		"  set rd4_0123456789abcdef { type ipv4_addr; flags timeout; timeout 3600s; }\n"+
+			"  set rd_dns_shadow6 { type ipv6_addr; flags timeout; timeout 3600s; }\n"+
+			"  chain prerouting {",
+		1,
+	))
+	runner.outputs["nft list table inet routerd"] = listed
+
+	if err := runtime.removeStaleNFTSets(context.Background(), expected); err != nil {
+		t.Fatal(err)
+	}
+	var deleted []string
+	for _, call := range runner.calls {
+		if call.program == "nft" && len(call.args) == 5 && reflect.DeepEqual(call.args[:4], []string{"delete", "set", "inet", "routerd"}) {
+			deleted = append(deleted, call.args[4])
+		}
+	}
+	want := []string{"rd4_0123456789abcdef", "rd_dns_shadow6"}
+	if !reflect.DeepEqual(deleted, want) {
+		t.Fatalf("deleted stale sets = %v, want %v; calls = %#v", deleted, want, runner.calls)
+	}
+
+	runner.calls = nil
+	runner.outputs["nft list table inet routerd"] = []byte(strings.Replace(
+		string(expected),
+		"  chain prerouting {",
+		"  set foreign { type ipv4_addr; }\n  chain prerouting {",
+		1,
+	))
+	if err := runtime.removeStaleNFTSets(context.Background(), expected); err == nil || !strings.Contains(err.Error(), "refuse") {
+		t.Fatalf("removeStaleNFTSets() error = %v, want foreign-set rejection", err)
+	}
+	for _, call := range runner.calls {
+		if call.program == "nft" && len(call.args) > 0 && call.args[0] == "delete" {
+			t.Fatalf("foreign set deletion attempted: %#v", runner.calls)
+		}
+	}
+}
+
 func TestLinuxRuntimeActivatesRoutesBeforeIncludesAndRestoresInitialState(t *testing.T) {
 	runtime, runner := newTestLinuxRuntime(t)
 	candidate := testCandidate("revision-1")
@@ -509,6 +625,7 @@ func TestLinuxRuntimeReconcilesActiveRevisionAfterReboot(t *testing.T) {
 
 	runner.calls = nil
 	runner.outputs = map[string][]byte{
+		"nft -j list tables":          []byte(`{"nftables":[]}`),
 		"nft list table inet routerd": []byte("table inet routerd {\n comment \"managed-by-routerd\"\n chain prerouting { }\n}\n"),
 	}
 	runner.beforeRun = func(program string, args []string) error {

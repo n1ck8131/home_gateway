@@ -50,7 +50,7 @@ func TestControllerApplyBuildsOneCandidate(t *testing.T) {
 	}
 }
 
-func TestControllerApplySupportsExactDomainWithoutWidening(t *testing.T) {
+func TestControllerApplyRejectsExactDomainBeforeTransaction(t *testing.T) {
 	t.Parallel()
 
 	transaction := &fakeTransaction{}
@@ -75,18 +75,12 @@ func TestControllerApplySupportsExactDomainWithoutWidening(t *testing.T) {
 		DNSOptions: dnsmasq.Options{},
 	}
 
-	if err := controller.Apply(context.Background(), request); err != nil {
-		t.Fatalf("Apply() error = %v", err)
+	err = controller.Apply(context.Background(), request)
+	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("cannot be represented safely")) {
+		t.Fatalf("Apply() error = %v, want fail-safe dnsmasq capability error", err)
 	}
-	if transaction.applyCalls != 1 {
-		t.Fatalf("transaction Apply() calls = %d, want 1", transaction.applyCalls)
-	}
-	dns := string(transaction.candidate.DNS)
-	if !bytes.Contains(transaction.candidate.DNS, []byte("nftset=/example.com/")) {
-		t.Fatalf("exact apex selector is missing: %s", dns)
-	}
-	if !bytes.Contains(transaction.candidate.DNS, []byte("nftset=/*.example.com/4#inet#routerd#rd_dns_shadow4")) {
-		t.Fatalf("exact descendant shadow selector is missing: %s", dns)
+	if transaction.applyCalls != 0 {
+		t.Fatalf("transaction Apply() calls = %d, want 0", transaction.applyCalls)
 	}
 }
 

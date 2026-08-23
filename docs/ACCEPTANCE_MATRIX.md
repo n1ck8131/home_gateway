@@ -22,16 +22,17 @@ P0 is complete for its software scope. The hardware gates remain open and no P0 
 
 P1 is complete for its pure software scope. DNS rendering/application, packet-policy enforcement, and hardware behavior remain owned by later phases.
 
-## P2 production dataplane plan
+## P2 production dataplane
 
-| Gate | State | Planned evidence |
+| Gate | State | Evidence |
 |---|---|---|
-| Deterministic nft, policy-routing and dnsmasq rendering | planned | focused Go tests and byte-stable golden fixtures |
-| Transactional apply, commit-confirm and last-known-good recovery | planned | state-machine unit tests plus invalid apply, crash and boot recovery integration tests |
-| Linux network namespace safety matrix | planned | `sudo tests/network-ns/run.sh`, packet captures/counters and 20 consecutive fault-injection loops |
-| OpenWrt x86_64 QEMU dataplane smoke | planned | pinned-image package/config, validation, rollback and reboot-persistence evidence |
+| Deterministic nft, policy-routing and suffix-dnsmasq rendering | local-passed | Focused Go tests cover byte stability, nested suffix memberships, ownership, IPv4/IPv6 parity and fail-closed routes |
+| Exact and wildcard domain adapter boundary | local-passed | The renderer and production controller reject unsupported matches before transaction staging; ADR-0010 records the hostname-aware adapter requirement |
+| Transactional apply, commit-confirm and last-known-good recovery | local-passed | State-machine tests and OpenWrt QEMU cover invalid candidates, post-check rollback, watchdog expiry, crash recovery and reboot reconciliation |
+| Linux network namespace safety matrix | local-passed | Ubuntu 24.04 suite passed the traffic matrix, real dnsmasq/nft suffix DNS checks and 20 consecutive tunnel fault cycles on 2026-08-24 |
+| OpenWrt x86_64 QEMU dataplane smoke | local-passed | Pinned OpenWrt 25.12.5 suite passed package/config, validation, rollback and reboot/LKG checks on 2026-08-24 |
 
-P2 implementation is not started until the phase plan is explicitly approved.
+P2 is complete for its software and emulated OpenWrt scope. P3 owns physical GL-MT6000, exact-kernel AWG2 and router-to-VPS evidence.
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|

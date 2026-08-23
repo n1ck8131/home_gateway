@@ -36,8 +36,10 @@ uses bounded TERM/KILL/wait cleanup. It does not invoke WSL, Docker or QEMU.
 The emitted evidence directory is rejected if it exceeds 50 MiB.
 
 The suite proves IPv4/IPv6 direct, VPN, scoped work-PC direct, TCP, UDP,
-QUIC-shaped UDP, exact-apex, wildcard-subdomain, suffix and overlapping-domain
-matching through real A/AAAA/CNAME nftset population and expiry. It also covers
-shared-IP direct precedence, sticky established flows across an active-slot
-switch, invalid validation rollback, explicit rollback, crash/boot recovery,
-and twenty alternating physical tunnel-link removal/recreation no-leak cycles.
+QUIC-shaped UDP, suffix and overlapping-domain matching through real
+A/AAAA/CNAME nftset population and expiry. It verifies that exact and wildcard
+matches fail before transaction staging because dnsmasq nftset cannot preserve
+those semantics. It also covers DNS set retention across rules reload, shared-IP
+direct precedence, sticky established flows across an active-slot switch,
+invalid validation rollback, explicit rollback, crash/boot recovery, and twenty
+alternating physical tunnel-link removal/recreation no-leak cycles.

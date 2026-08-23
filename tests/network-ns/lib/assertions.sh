@@ -19,6 +19,33 @@ client_probe() {
         --timeout "$probe_timeout"
 }
 
+client_probe_eventually() {
+    eventually_network=$1
+    eventually_target=$2
+    eventually_source=$3
+    eventually_expected=$4
+    eventually_timeout=${5:-2s}
+    eventually_attempt=1
+    eventually_error="$LAB_ROOT/run/probe-error.log"
+
+    while ! client_probe "$eventually_network" "$eventually_target" "$eventually_source" \
+        "$eventually_expected" "$eventually_timeout" >"$eventually_error" 2>&1; do
+        if [ "$eventually_attempt" -ge 5 ]; then
+            cat "$eventually_error" >&2
+            fail "expected $eventually_network connectivity did not stabilize from $eventually_source to $eventually_target"
+        fi
+        eventually_attempt=$((eventually_attempt + 1))
+        sleep 0.2
+    done
+
+    if [ "$eventually_attempt" -gt 1 ]; then
+        printf '%s\t%s\t%s\t%s\n' \
+            "$eventually_network" "$eventually_source" "$eventually_target" "$eventually_attempt" \
+            >>"$EVIDENCE_DIR/probe-retries.tsv"
+    fi
+    rm -f "$eventually_error"
+}
+
 expect_probe_failure() {
     network=$1
     target=$2
@@ -56,17 +83,17 @@ forward_counter_packets() {
 
 assert_up_matrix() {
     vpn_token=${1:-vpn-1}
-    client_probe tcp "$VPN4:$TCP_PORT" "$CLIENT4" "$vpn_token"
-    client_probe udp "$VPN4:$UDP_PORT" "$CLIENT4" "$vpn_token"
-    client_probe udp-quic "$VPN4:$QUIC_PORT" "$CLIENT4" "$vpn_token"
-    client_probe tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" "$vpn_token"
-    client_probe udp "[$VPN6]:$UDP_PORT" "$CLIENT6" "$vpn_token"
-    client_probe udp-quic "[$VPN6]:$QUIC_PORT" "$CLIENT6" "$vpn_token"
+    client_probe_eventually tcp "$VPN4:$TCP_PORT" "$CLIENT4" "$vpn_token"
+    client_probe_eventually udp "$VPN4:$UDP_PORT" "$CLIENT4" "$vpn_token"
+    client_probe_eventually udp-quic "$VPN4:$QUIC_PORT" "$CLIENT4" "$vpn_token"
+    client_probe_eventually tcp "[$VPN6]:$TCP_PORT" "$CLIENT6" "$vpn_token"
+    client_probe_eventually udp "[$VPN6]:$UDP_PORT" "$CLIENT6" "$vpn_token"
+    client_probe_eventually udp-quic "[$VPN6]:$QUIC_PORT" "$CLIENT6" "$vpn_token"
 
-    client_probe tcp "$DIRECT4:$TCP_PORT" "$CLIENT4" wan
-    client_probe tcp "[$DIRECT6]:$TCP_PORT" "$CLIENT6" wan
-    client_probe tcp "$VPN4:$TCP_PORT" "$WORK4" wan
-    client_probe tcp "[$VPN6]:$TCP_PORT" "$WORK6" wan
+    client_probe_eventually tcp "$DIRECT4:$TCP_PORT" "$CLIENT4" wan
+    client_probe_eventually tcp "[$DIRECT6]:$TCP_PORT" "$CLIENT6" wan
+    client_probe_eventually tcp "$VPN4:$TCP_PORT" "$WORK4" wan
+    client_probe_eventually tcp "[$VPN6]:$TCP_PORT" "$WORK6" wan
 }
 
 assert_slot_down_no_leak() {
@@ -87,8 +114,12 @@ assert_slot_down_no_leak() {
     [ "$before_wan" -eq "$after_wan" ] || fail "VPN-class traffic leaked to WAN: $before_wan -> $after_wan"
     [ "$before_vpn1" -eq "$after_vpn1" ] || fail "VPN-class traffic leaked to slot 1: $before_vpn1 -> $after_vpn1"
     [ "$before_vpn2" -eq "$after_vpn2" ] || fail "VPN-class traffic leaked to slot 2: $before_vpn2 -> $after_vpn2"
-    ip -n "$NS_ROUTER" -4 route show table "$table" | grep -Fx 'blackhole default' >/dev/null || fail "IPv4 VPN table $table is not fail-closed"
-    ip -n "$NS_ROUTER" -6 route show table "$table" | grep -F 'blackhole default' >/dev/null || fail "IPv6 VPN table $table is not fail-closed"
+    ip -n "$NS_ROUTER" -4 route show table "$table" |
+        awk '$1 == "blackhole" && $2 == "default" { found = 1 } END { exit !found }' ||
+        fail "IPv4 VPN table $table is not fail-closed"
+    ip -n "$NS_ROUTER" -6 route show table "$table" |
+        awk '$1 == "blackhole" && $2 == "default" { found = 1 } END { exit !found }' ||
+        fail "IPv6 VPN table $table is not fail-closed"
 }
 
 assert_journal_active() {

@@ -17,6 +17,17 @@ dns_include=/tmp/dnsmasq.d/routerd.conf
 mkdir -p "$evidence"
 
 fail() {
+    if [ -r "$journal" ]; then
+        cp "$journal" "$evidence/failure.journal.json" 2>/dev/null || true
+    fi
+    nft list table inet routerd >"$evidence/failure.nft" 2>"$evidence/failure.nft.stderr" || true
+    fw4 print >"$evidence/failure.fw4" 2>&1 || true
+    if [ -r "$firewall_include" ]; then
+        cp "$firewall_include" "$evidence/failure.include.nft" 2>/dev/null || true
+    fi
+    if [ -r /etc/routerd/dataplane/lkg/50-routerd.nft ]; then
+        cp /etc/routerd/dataplane/lkg/50-routerd.nft "$evidence/failure.lkg.nft" 2>/dev/null || true
+    fi
     printf 'QEMU_GUEST_FAIL: %s\n' "$*" >&2
     exit 1
 }
@@ -45,8 +56,12 @@ journal_value() {
 assert_journal() {
     expected_state="$1"
     expected_active="$2"
-    [ "$(journal_value .state)" = "$expected_state" ] || fail "journal state is not $expected_state"
-    [ "$(journal_value .active_revision)" = "$expected_active" ] || fail "active revision is not $expected_active"
+    actual_state="$(journal_value .state)"
+    actual_active="$(journal_value .active_revision)"
+    [ "$actual_state" = "$expected_state" ] ||
+        fail "journal state is $actual_state, expected $expected_state"
+    [ "$actual_active" = "$expected_active" ] ||
+        fail "active revision is $actual_active, expected $expected_active"
 }
 
 record_runtime() {
@@ -87,7 +102,7 @@ assert_identity() {
 }
 
 package_is_installed_exact() {
-    apk info | grep -Fqx "$1"
+    apk info 2>/dev/null | grep -Fqx "$1"
 }
 
 assert_full_packages() {
@@ -168,33 +183,47 @@ if [ "$phase" = phase1 ]; then
     fi
     assert_full_packages
     /etc/init.d/dnsmasq restart
-    apk info -vv >"$evidence/packages.txt"
+    apk info -vv >"$evidence/packages.txt" 2>"$evidence/packages.stderr"
     cat /etc/openwrt_release >"$evidence/openwrt-release.txt"
     uname -a >"$evidence/uname.txt"
 
+    printf 'QEMU_GUEST_STAGE baseline\n'
     "$driver" apply --runtime openwrt --revision qemu-baseline --available=false
     "$driver" confirm --runtime openwrt
     assert_journal committed qemu-baseline
     assert_runtime
     record_runtime baseline
+    dns_set4="$(awk '$1 == "set" && $2 ~ /^rd4_[0-9a-f]+$/ { print $2; exit }' "$firewall_include")"
+    dns_set6="$(awk '$1 == "set" && $2 ~ /^rd6_[0-9a-f]+$/ { print $2; exit }' "$firewall_include")"
+    [ -n "$dns_set4" ] && [ -n "$dns_set6" ] || fail "dynamic DNS sets are missing"
+    nft add element inet routerd "$dns_set4" '{ 203.0.113.77 timeout 1h }'
+    nft add element inet routerd "$dns_set6" '{ 2001:db8::77 timeout 1h }'
 
+    printf 'QEMU_GUEST_STAGE validation-failures\n'
     expect_apply_failure nft-validate qemu-invalid-nft
     expect_apply_failure dns-validate qemu-invalid-dns
 
+    printf 'QEMU_GUEST_STAGE postcheck-rollback\n'
     if "$driver" apply --runtime openwrt --revision qemu-postcheck --available=false --fault postcheck \
         >"$evidence/qemu-postcheck.stdout" 2>"$evidence/qemu-postcheck.stderr"; then
         fail "post-check fault unexpectedly succeeded"
     fi
     assert_journal rolled-back qemu-baseline
     [ "$(journal_value .rollback_result)" = 'post-check: restored' ] || fail "post-check rollback result is wrong"
+    nft get element inet routerd "$dns_set4" '{ 203.0.113.77 }' >/dev/null ||
+        fail "IPv4 DNS set element was lost across apply and rollback"
+    nft get element inet routerd "$dns_set6" '{ 2001:db8::77 }' >/dev/null ||
+        fail "IPv6 DNS set element was lost across apply and rollback"
     assert_runtime
 
+    printf 'QEMU_GUEST_STAGE watchdog-rollback\n'
     "$driver" apply --runtime openwrt --revision qemu-timeout --available=false \
         --confirm-timeout 3s --expect-timeout
     assert_journal rolled-back qemu-baseline
     [ "$(journal_value .rollback_result)" = 'watchdog expiry: restored' ] || fail "watchdog rollback result is wrong"
     assert_runtime
 
+    printf 'QEMU_GUEST_STAGE crash-recovery\n'
     "$driver" apply --runtime openwrt --revision qemu-crash --available=false --confirm-timeout 30s
     [ "$(journal_value .state)" = pending-confirmation ] || fail "crash fixture is not pending"
     "$driver" recover --runtime openwrt
@@ -202,6 +231,7 @@ if [ "$phase" = phase1 ]; then
     [ "$(journal_value .rollback_result)" = 'boot/crash recovery: restored' ] || fail "crash recovery result is wrong"
     assert_runtime
 
+    printf 'QEMU_GUEST_STAGE pre-reboot-lkg\n'
     "$driver" apply --runtime openwrt --revision qemu-lkg --available=false
     "$driver" confirm --runtime openwrt
     assert_journal committed qemu-lkg

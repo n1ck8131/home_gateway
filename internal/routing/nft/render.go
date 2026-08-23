@@ -13,8 +13,6 @@ const (
 	TableName        = "routerd"
 	OwnershipComment = "managed-by-routerd"
 	SetTimeout       = 3600
-	DNSShadowSet4    = "rd_dns_shadow4"
-	DNSShadowSet6    = "rd_dns_shadow6"
 )
 
 type Inventory struct {
@@ -43,17 +41,21 @@ func Render(plan contracts.PolicyPlan, inventory Inventory) ([]byte, error) {
 	}
 
 	var out strings.Builder
-	out.WriteString("table inet routerd {\n")
+	// nft merges declarations into existing objects. Declare every owned set,
+	// then destroy and rebuild only the rule chain in the same batch. This
+	// replaces rules atomically while preserving dnsmasq-populated elements.
+	fmt.Fprintf(&out, "table inet %s {\n", TableName)
 	fmt.Fprintf(&out, "  comment %q;\n", OwnershipComment)
 	writeLocalSets(&out)
-	fmt.Fprintf(&out, "  set %s { type ipv4_addr; flags timeout; timeout %ds; }\n", DNSShadowSet4, SetTimeout)
-	fmt.Fprintf(&out, "  set %s { type ipv6_addr; flags timeout; timeout %ds; }\n", DNSShadowSet6, SetTimeout)
 	for _, group := range groups {
 		if group.kind == contracts.EntryKindDomain {
 			fmt.Fprintf(&out, "  set %s { type ipv4_addr; flags timeout; timeout %ds; }\n", group.set4, SetTimeout)
 			fmt.Fprintf(&out, "  set %s { type ipv6_addr; flags timeout; timeout %ds; }\n", group.set6, SetTimeout)
 		}
 	}
+	out.WriteString("}\n")
+	fmt.Fprintf(&out, "destroy chain inet %s prerouting\n", TableName)
+	fmt.Fprintf(&out, "table inet %s {\n", TableName)
 	out.WriteString("  chain prerouting {\n")
 	out.WriteString("    type filter hook prerouting priority mangle; policy accept;\n")
 	out.WriteString("    ct direction reply return\n")

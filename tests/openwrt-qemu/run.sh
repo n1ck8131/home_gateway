@@ -181,6 +181,113 @@ guest_ssh() {
         root@127.0.0.1 "$@"
 }
 
+guest_evidence_name_allowed() {
+    case "$1" in
+        ./apk-checksums.txt|./apk-install.stderr|./apk-install.stdout|./assert-runtime.fw4|\
+        ./baseline.fw4|./baseline.ipv4-routes|./baseline.ipv4-rules|./baseline.ipv6-routes|\
+        ./baseline.ipv6-rules|./baseline.journal.json|./baseline.nft|./failure.fw4|\
+        ./failure.include.nft|./failure.journal.json|./failure.lkg.nft|./failure.nft|\
+        ./failure.nft.stderr|./openwrt-release.txt|./packages.stderr|./packages.txt|\
+        ./post-reboot.fw4|./post-reboot.ipv4-routes|./post-reboot.ipv4-rules|\
+        ./post-reboot.ipv6-routes|./post-reboot.ipv6-rules|./post-reboot.journal.json|\
+        ./post-reboot.nft|./pre-reboot.fw4|./pre-reboot.ipv4-routes|\
+        ./pre-reboot.ipv4-rules|./pre-reboot.ipv6-routes|./pre-reboot.ipv6-rules|\
+        ./pre-reboot.journal.json|./pre-reboot.nft|./qemu-invalid-dns.stderr|\
+        ./qemu-invalid-dns.stdout|./qemu-invalid-nft.stderr|./qemu-invalid-nft.stdout|\
+        ./qemu-postcheck.stderr|./qemu-postcheck.stdout|./uname.txt)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+validate_guest_evidence_archive() {
+    archive="$1"
+    entries="$evidence/guest-evidence.entries"
+    types="$evidence/guest-evidence.types"
+    tar -tf "$archive" >"$entries" || return 1
+    tar -tvf "$archive" >"$types" || return 1
+    [ -s "$entries" ] || return 1
+    entry_count="$(wc -l <"$entries")"
+    type_count="$(wc -l <"$types")"
+    [ "$entry_count" = "$type_count" ] || return 1
+    if sort "$entries" | uniq -d | grep -q .; then
+        printf 'guest evidence archive contains duplicate entries\n' >&2
+        return 1
+    fi
+    while IFS= read -r entry; do
+        if ! IFS= read -r type_line <&3; then
+            return 1
+        fi
+        entry_type="${type_line%"${type_line#?}"}"
+        case "$entry" in
+            ./|.)
+                [ "$entry_type" = d ] || return 1
+                continue
+                ;;
+        esac
+        if ! guest_evidence_name_allowed "$entry"; then
+            printf 'guest evidence archive contains disallowed entry: %s\n' "$entry" >&2
+            return 1
+        fi
+        if [ "$entry_type" != - ]; then
+            printf 'guest evidence archive entry is not a regular file: %s\n' "$entry" >&2
+            return 1
+        fi
+    done 3<"$types" <"$entries"
+}
+
+receive_guest_evidence_archive() {
+    archive="$1"
+    archive_pipe="$work_root/guest-evidence.pipe"
+    [ ! -e "$archive_pipe" ] || return 1
+    mkfifo -m 0600 "$archive_pipe" || return 1
+    guest_ssh 'tar -C /root/routerd-p2/evidence -cf - .' \
+        >"$archive_pipe" 2>"$evidence/guest-evidence.stderr" &
+    transfer_pid=$!
+    if head -c 52428801 "$archive_pipe" >"$archive"; then
+        receive_status=0
+    else
+        receive_status=$?
+    fi
+    archive_bytes="$(wc -c <"$archive")"
+    if [ "$receive_status" -ne 0 ] || [ "$archive_bytes" -gt 52428800 ]; then
+        kill -TERM "$transfer_pid" 2>/dev/null || true
+        wait "$transfer_pid" 2>/dev/null || true
+        rm -f "$archive_pipe"
+        if [ "$archive_bytes" -gt 52428800 ]; then
+            printf 'guest evidence archive exceeds 50 MiB\n' >&2
+        fi
+        return 1
+    fi
+    if wait "$transfer_pid"; then
+        transfer_status=0
+    else
+        transfer_status=$?
+    fi
+    rm -f "$archive_pipe"
+    [ "$transfer_status" -eq 0 ]
+}
+
+collect_guest_evidence() {
+    guest_directory="$evidence/guest"
+    if [ -L "$guest_directory" ]; then
+        return 1
+    fi
+    mkdir -p "$guest_directory"
+    [ -d "$guest_directory" ] || return 1
+    [ -z "$(find "$guest_directory" -mindepth 1 -maxdepth 1 -print -quit)" ] || return 1
+    receive_guest_evidence_archive "$evidence/guest-evidence.tar" || return 1
+    archive_size_kib="$(du -sk "$evidence/guest-evidence.tar" | awk '{print $1}')"
+    [ "$archive_size_kib" -le 51200 ] || return 1
+    validate_guest_evidence_archive "$evidence/guest-evidence.tar" || return 1
+    tar --extract --touch --no-same-owner --no-same-permissions \
+        --directory "$guest_directory" --file "$evidence/guest-evidence.tar"
+    rm -f "$evidence/guest-evidence.tar"
+}
+
 wait_for_guest() {
     attempts=0
     while [ "$attempts" -lt 90 ]; do
@@ -206,6 +313,7 @@ scp -O -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
 guest_ssh 'chmod 700 /root/routerd-p2/lab-driver /root/routerd-p2/guest-smoke.sh'
 
 if ! guest_ssh '/root/routerd-p2/guest-smoke.sh phase1' >"$evidence/phase1.log" 2>&1; then
+    collect_guest_evidence || true
     cat "$evidence/phase1.log" >&2
     fail 'guest phase1 failed'
 fi
@@ -226,16 +334,13 @@ done
 wait_for_guest
 
 if ! guest_ssh '/root/routerd-p2/guest-smoke.sh phase2' >"$evidence/phase2.log" 2>&1; then
+    collect_guest_evidence || true
     cat "$evidence/phase2.log" >&2
     fail 'guest phase2 failed'
 fi
 cat "$evidence/phase2.log"
 
-mkdir -p "$evidence/guest"
-scp -O -r -P "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    -o "UserKnownHostsFile=$known_hosts" \
-    root@127.0.0.1:/root/routerd-p2/evidence/. "$evidence/guest/" \
-    >"$evidence/scp-download.log" 2>&1
+collect_guest_evidence
 
 printf 'OPENWRT_QEMU_P2_PASS\n'
 printf 'EVIDENCE_DIR=%s\n' "$output_dir"

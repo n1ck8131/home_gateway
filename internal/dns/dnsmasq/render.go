@@ -45,7 +45,16 @@ func Render(plan contracts.PolicyPlan, options Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	groups := buildSelectorGroups(bindings)
+	for _, binding := range bindings {
+		if binding.Match != contracts.DomainMatchSuffix {
+			return nil, fmt.Errorf(
+				"%s domain %q cannot be represented safely by dnsmasq nftset without widening its match; use suffix or a hostname-aware adapter",
+				binding.Match,
+				binding.Patterns[0],
+			)
+		}
+	}
+	groups := buildSuffixSelectorGroups(bindings)
 	var out strings.Builder
 	fmt.Fprintf(&out, "# routerd managed; nft-timeout=%ds\ncache-rr=ANY\nmax-cache-ttl=%d\n", options.SetTimeoutSeconds, options.CacheTTLSeconds)
 	for _, group := range groups {
@@ -70,14 +79,15 @@ type selectorGroup struct {
 	selectors []string
 }
 
-// buildSelectorGroups expands every domain boundary into the effective set
-// memberships dnsmasq must apply there. This preserves broader overlapping
-// policies when dnsmasq selects a more-specific domain expression.
-func buildSelectorGroups(bindings []nft.DomainBinding) []selectorGroup {
+// buildSuffixSelectorGroups expands every suffix boundary into the effective
+// set memberships dnsmasq must apply there. dnsmasq selects only the longest
+// matching suffix, so a more-specific selector must retain every broader
+// membership explicitly.
+func buildSuffixSelectorGroups(bindings []nft.DomainBinding) []selectorGroup {
 	boundarySet := make(map[string]struct{})
 	for _, binding := range bindings {
 		for _, pattern := range binding.Patterns {
-			boundarySet[canonicalDomain(pattern)] = struct{}{}
+			boundarySet[canonicalSuffix(pattern)] = struct{}{}
 		}
 	}
 	boundaries := make([]string, 0, len(boundarySet))
@@ -88,22 +98,9 @@ func buildSelectorGroups(bindings []nft.DomainBinding) []selectorGroup {
 
 	selectorsByTargets := make(map[string][]string)
 	for _, boundary := range boundaries {
-		apexTargets := targetsForDomain(boundary, bindings)
-		descendantTargets := targetsForDomain("routerd-probe."+boundary, bindings)
-		if apexTargets == descendantTargets {
-			if apexTargets != "" {
-				selectorsByTargets[apexTargets] = append(selectorsByTargets[apexTargets], boundary)
-			}
-			continue
-		}
-		if apexTargets != "" {
-			selectorsByTargets[apexTargets] = append(selectorsByTargets[apexTargets], boundary)
-		}
-		if descendantTargets == "" && apexTargets != "" {
-			descendantTargets = targetSpec(nft.DNSShadowSet4, nft.DNSShadowSet6)
-		}
-		if descendantTargets != "" {
-			selectorsByTargets[descendantTargets] = append(selectorsByTargets[descendantTargets], "*."+boundary)
+		targets := targetsForSuffix(boundary, bindings)
+		if targets != "" {
+			selectorsByTargets[targets] = append(selectorsByTargets[targets], boundary)
 		}
 	}
 
@@ -121,12 +118,13 @@ func buildSelectorGroups(bindings []nft.DomainBinding) []selectorGroup {
 	return result
 }
 
-func targetsForDomain(domain string, bindings []nft.DomainBinding) string {
+func targetsForSuffix(domain string, bindings []nft.DomainBinding) string {
 	targets := make([]string, 0, len(bindings))
 	for _, binding := range bindings {
 		matched := false
 		for _, pattern := range binding.Patterns {
-			if domainMatches(domain, pattern, binding.Match) {
+			pattern = canonicalSuffix(pattern)
+			if domain == pattern || strings.HasSuffix(domain, "."+pattern) {
 				matched = true
 				break
 			}
@@ -143,22 +141,6 @@ func targetSpec(set4, set6 string) string {
 	return fmt.Sprintf("4#inet#%s#%s,6#inet#%s#%s", nft.TableName, set4, nft.TableName, set6)
 }
 
-func domainMatches(domain, pattern string, match contracts.DomainMatch) bool {
-	domain = canonicalDomain(domain)
-	pattern = canonicalDomain(pattern)
-	subdomain := domain != pattern && strings.HasSuffix(domain, "."+pattern)
-	switch match {
-	case contracts.DomainMatchExact:
-		return domain == pattern
-	case contracts.DomainMatchSuffix:
-		return domain == pattern || subdomain
-	case contracts.DomainMatchWildcard:
-		return subdomain
-	default:
-		return false
-	}
-}
-
-func canonicalDomain(domain string) string {
-	return strings.ToLower(strings.TrimPrefix(strings.TrimSuffix(strings.TrimSpace(domain), "."), "*."))
+func canonicalSuffix(domain string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 }

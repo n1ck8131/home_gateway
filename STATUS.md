@@ -35,6 +35,7 @@ Release level: P2-software-verified; P3-hardware-not-run
 - State: started; physical gates not run
 - Plan: [P3 single-server AmneziaWG implementation plan](docs/superpowers/plans/2026-08-24-p03-single-awg.md)
 - First slice: `server-agent health --json` provides process-scoped liveness only; it does not claim AWG, VPS or tunnel health and exposes no network listener
+- P3.1 evidence for commit `bdaec0b30f3152c47f37cca7f88f663b8b310976`: [CI run 32700597504](https://github.com/n1ck8131/home_gateway/actions/runs/32700597504), [OpenWrt QEMU run 32700597472](https://github.com/n1ck8131/home_gateway/actions/runs/32700597472) and [OpenWrt SDK run 32700597475](https://github.com/n1ck8131/home_gateway/actions/runs/32700597475) passed
 - Next implementation: pinned idempotent VPS deployment and real AWG health, followed by GL-MT6000 peer/package integration
 - Branch: `phase/p3-single-awg`, based on closed P2 commit `c5adeae`
 

@@ -10,6 +10,8 @@ router:
   wan:
     mode: dhcp
     vlan_id: null
+    device: wan
+    gateway: SET_DURING_INSTALL
 workstation:
   id: work-pc
   hostname: SET_DURING_INSTALL
@@ -22,9 +24,35 @@ workstation:
       mac: SET_DURING_INSTALL
 servers:
   - id: primary-1
-    host: SET_DURING_INSTALL
+    endpoint_ip: SET_PUBLIC_STATIC_IP_DURING_INSTALL
+    endpoint_port: 51820
     ssh_user: bootstrap
+    recovery_user: vpnctl
+    target:
+      os_family: ubuntu
+      arch: amd64
+    adapter:
+      id: amneziawg-linux-systemd
+      version: SET_PINNED_VERSION_DURING_INSTALL
     country: SET_DURING_INSTALL
     priority: 10
+    routing:
+      slot: 1
+      interface: awg0
+      tunnel_addresses:
+        - SET_PRIVATE_IPV4_32_DURING_INSTALL
+        - SET_PRIVATE_IPV6_128_DURING_INSTALL
+      route_allowed_ips: 0
+      nohostroute: 1
+      main_default_route_unchanged: true
+    public_keys:
+      server: SET_PUBLIC_KEY_DURING_INSTALL
+      router_peer: SET_PUBLIC_KEY_DURING_INSTALL
+    secret_refs:
+      server_awg_private_key: ref-1
+      server_ssh_deploy_key: ssh-deploy-primary-1
+      router_awg_private_key:
+        kind: routerd-openwrt-peer-private-key
+        name: primary-1
     transports:
       - amneziawg2

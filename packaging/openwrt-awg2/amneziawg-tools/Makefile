@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=amneziawg-tools
 PKG_VERSION:=1.0.20260618.2
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_SOURCE_VERSION:=1.0.20260618-2
 PKG_SOURCE:=v$(PKG_SOURCE_VERSION).tar.gz
 PKG_SOURCE_URL:=https://github.com/amnezia-vpn/amneziawg-tools/archive/refs/tags/

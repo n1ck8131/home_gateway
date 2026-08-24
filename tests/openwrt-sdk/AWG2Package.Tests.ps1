@@ -121,6 +121,7 @@ Describe 'pinned AWG2 OpenWrt packages' {
 
         $packageVersion.Success | Should -BeTrue
         $packageVersion.Groups['Value'].Value | Should -Be '1.0.20260618.2'
+        $script:Tools | Should -Match '(?m)^PKG_RELEASE:=2$'
     }
 
     It 'declares the required package contracts' {
@@ -144,6 +145,14 @@ Describe 'pinned AWG2 OpenWrt packages' {
         $script:Helper | Should -Match 'renew_handler=1'
         $script:Helper | Should -Match 'peer_detect=1'
         $script:Helper | Should -Match 'proto_config_add_string "addresses"'
+        $script:Helper | Should -Match 'proto_config_add_string "private_key_file"'
+        $script:Helper | Should -Match 'config_get private_key_file'
+        $script:Helper | Should -Match '/etc/routerd/secrets'
+        $script:Helper | Should -Match "stat -c '%u:%a'"
+        $script:Helper | Should -Match '0:600'
+        $script:Helper | Should -Match 'mktemp -d /tmp/amneziawg\.XXXXXX'
+        $script:Helper | Should -Match "trap 'proto_amneziawg_cleanup_runtime_config' EXIT HUP INT TERM"
+        $script:Helper | Should -Not -Match '/etc/routerd/secrets/runtime'
         $script:Helper | Should -Match 'proto_amneziawg_renew'
     }
 

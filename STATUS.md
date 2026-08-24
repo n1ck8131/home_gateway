@@ -1,7 +1,7 @@
 # Project Status
 
 Current phase: P3 Single-server AmneziaWG
-Release level: P2-software-verified; P3-hardware-not-run
+Release level: P2-software-verified; P3.2/P3.3-software-locally-verified; P3-hosted-pending; P3-hardware-not-run
 
 ## P0A Foundation
 
@@ -32,11 +32,14 @@ Release level: P2-software-verified; P3-hardware-not-run
 
 ## P3 Single-server AmneziaWG
 
-- State: started; physical gates not run
+- State: P3.1 accepted; P3.2 and P3.3 software boundaries locally verified, hosted evidence pending; physical gates not run
 - Plan: [P3 single-server AmneziaWG implementation plan](docs/superpowers/plans/2026-08-24-p03-single-awg.md)
 - First slice: `server-agent health --json` provides process-scoped liveness only; it does not claim AWG, VPS or tunnel health and exposes no network listener
 - P3.1 evidence for commit `bdaec0b30f3152c47f37cca7f88f663b8b310976`: [CI run 32700597504](https://github.com/n1ck8131/home_gateway/actions/runs/32700597504), [OpenWrt QEMU run 32700597472](https://github.com/n1ck8131/home_gateway/actions/runs/32700597472) and [OpenWrt SDK run 32700597475](https://github.com/n1ck8131/home_gateway/actions/runs/32700597475) passed
-- Next implementation: pinned idempotent VPS deployment and real AWG health, followed by GL-MT6000 peer/package integration
+- P3.2 software: hash-verified non-secret VPS bundle, pre-mutation snapshot/idempotent deployment saga, recovery-gated SSH hardening and redacted AWG transport health
+- P3.3 software: strict OpenWrt peer/UCI plan, WAN endpoint host-route ordering, stale secret/mark cleanup, P2 fail-closed binding and guarded `private_key_file` support
+- Current evidence: full repository `verify`, focused Go/Pester/shell checks, pinned ShellCheck, two clean byte-identical OpenWrt SDK outputs and independent QA/security audits pass locally; hosted evidence is still being collected
+- Next implementation after this validation: P3.4 router package lifecycle, then P3.5 physical router/VPS acceptance
 - Branch: `phase/p3-single-awg`, based on closed P2 commit `c5adeae`
 
 ## External gates

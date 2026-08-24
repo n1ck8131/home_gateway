@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "sanitized_example": true,
+  "bundle_id": "p3-example",
+  "server_id": "nl-example",
+  "target": {
+    "os_family": "ubuntu",
+    "arch": "amd64"
+  },
+  "endpoint": {
+    "ip": "203.0.113.10",
+    "port": 51820
+  },
+  "adapter": {
+    "id": "amneziawg-linux-systemd",
+    "version": "v1.0.0"
+  },
+  "recovery_account": {
+    "user": "vpnctl"
+  },
+  "tunnel": {
+    "interface_name": "awg0",
+    "listen_port": 51820,
+    "server_tunnel_prefix": "10.44.0.0/24",
+    "router_peer_address": "10.44.0.2",
+    "router_peer_public_key": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+  },
+  "awg_parameters": {
+    "jc": 4,
+    "jmin": 10,
+    "jmax": 50,
+    "s1": 142,
+    "s2": 41,
+    "s3": 56,
+    "s4": 11,
+    "h1": "684141592-1751861769",
+    "h2": "1957920865-2010016669",
+    "h3": "2043550980-2107134838",
+    "h4": "2127672251-2132651859",
+    "i1": "<r 2>",
+    "i2": "<r 3>",
+    "i3": "<rd 4>",
+    "i4": "<rc 4>",
+    "i5": "<b 0x0102>"
+  },
+  "secrets": {
+    "awg_private_key_ref": "awg-private-example",
+    "ssh_deploy_key_ref": "ssh-deploy-example"
+  },
+  "artifacts": [
+    {
+      "role": "server-agent",
+      "name": "server-agent",
+      "path": "artifacts/server-agent_linux_amd64",
+      "sha256": "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      "size_bytes": 1
+    },
+    {
+      "role": "awg-adapter",
+      "name": "awg-adapter",
+      "path": "artifacts/amneziawg-adapter_linux_amd64",
+      "sha256": "d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35",
+      "size_bytes": 1
+    },
+    {
+      "role": "systemd-unit",
+      "name": "server-agent.service",
+      "path": "artifacts/server-agent.service",
+      "sha256": "4e07408562bedb8b60ce05c1decfe3ad16b72230967de01f640b7e4729b49fce",
+      "size_bytes": 1
+    },
+    {
+      "role": "nftables",
+      "name": "server-nftables",
+      "path": "artifacts/server.nft",
+      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
+      "size_bytes": 1
+    },
+    {
+      "role": "sysctl",
+      "name": "server-sysctl",
+      "path": "artifacts/99-home-gateway.conf",
+      "sha256": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
+      "size_bytes": 1
+    },
+    {
+      "role": "sshd-policy",
+      "name": "sshd-policy",
+      "path": "artifacts/99-home-gateway-sshd.conf",
+      "sha256": "e7f6c011776e8db7cd330b54174fd76f7d0216b612387a5ffcfb81e6f0919683",
+      "size_bytes": 1
+    }
+  ]
+}

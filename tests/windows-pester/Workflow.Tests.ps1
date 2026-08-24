@@ -55,6 +55,7 @@ Describe 'pinned GitHub workflows' {
         $script:OpenWrt | Should -Match 'artifacts/awg-go-run2'
         $script:OpenWrt | Should -Match 'diff -ru --no-dereference artifacts/awg-go-run1 artifacts/awg-go-run2'
         $script:OpenWrt | Should -Match '\.tools/bin/shellcheck'
+        $script:OpenWrt | Should -Match 'packaging/openwrt-awg2/amneziawg-tools/files/amneziawg\.sh'
     }
 
     It 'uploads only verified outputs and fails closed for missing files' {

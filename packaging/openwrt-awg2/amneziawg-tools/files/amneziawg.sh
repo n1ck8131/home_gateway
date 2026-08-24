@@ -23,6 +23,7 @@ proto_amneziawg_init_config() {
 	# shellcheck disable=SC2034
 	peer_detect=1
 	proto_config_add_string "private_key"
+	proto_config_add_string "private_key_file"
 	proto_config_add_int "listen_port"
 	proto_config_add_int "mtu"
 	proto_config_add_string "fwmark"
@@ -112,7 +113,9 @@ proto_amneziawg_setup_peer() {
 }
 
 ensure_key_is_generated() {
-	local private_key ucitmp oldmask
+	local private_key private_key_file ucitmp oldmask
+	config_get private_key_file "$1" "private_key_file"
+	[ -n "$private_key_file" ] && return 0
 	private_key="$(uci get network."$1".private_key)"
 	if [ "$private_key" = "generate" ]; then
 		oldmask="$(umask)"
@@ -126,11 +129,75 @@ ensure_key_is_generated() {
 	fi
 }
 
+proto_amneziawg_resolve_private_key() {
+	local private_key="$1"
+	local private_key_file="$2"
+	local secrets_root="$3"
+	local key_name metadata resolved_key
+
+	if [ -n "$private_key" ] && [ -n "$private_key_file" ]; then
+		echo "amneziawg private key and private key file are mutually exclusive" >&2
+		return 1
+	fi
+	if [ -z "$private_key_file" ]; then
+		[ -n "$private_key" ] || {
+			echo "amneziawg private key is missing" >&2
+			return 1
+		}
+		printf '%s\n' "$private_key"
+		return 0
+	fi
+
+	case "$secrets_root" in
+		/*) ;;
+		*) echo "amneziawg secret root is invalid" >&2; return 1 ;;
+	esac
+	case "$private_key_file" in
+		"$secrets_root"/*) ;;
+		*) echo "amneziawg private key file is outside the secret root" >&2; return 1 ;;
+	esac
+	key_name="${private_key_file#"$secrets_root"/}"
+	case "$key_name" in
+		'' | *..* | *[!A-Za-z0-9._-]*)
+			echo "amneziawg private key file name is invalid" >&2
+			return 1
+			;;
+	esac
+	if [ -L "$private_key_file" ] || [ ! -f "$private_key_file" ]; then
+		echo "amneziawg private key file must be a regular non-symlink file" >&2
+		return 1
+	fi
+	metadata="$(stat -c '%u:%a' "$private_key_file")" || {
+		echo "amneziawg private key file metadata is unavailable" >&2
+		return 1
+	}
+	if [ "$metadata" != "0:600" ]; then
+		echo "amneziawg private key file must be owned by root with mode 0600" >&2
+		return 1
+	fi
+	resolved_key="$(cat "$private_key_file")" || {
+		echo "amneziawg private key file cannot be read" >&2
+		return 1
+	}
+	if [ -z "$resolved_key" ]; then
+		echo "amneziawg private key file is empty" >&2
+		return 1
+	fi
+	printf '%s\n' "$resolved_key"
+}
+
+proto_amneziawg_cleanup_runtime_config() {
+	if [ -n "${AWG_RUNTIME_CONFIG:-}" ]; then
+		rm -f "$AWG_RUNTIME_CONFIG"
+		rmdir "${AWG_RUNTIME_CONFIG%/*}" 2>/dev/null || true
+		AWG_RUNTIME_CONFIG=
+	fi
+}
+
 proto_amneziawg_setup() {
 	local config="$1"
-	local wg_dir="/tmp/wireguard"
-	local wg_cfg="${wg_dir}/${config}"
-	local private_key listen_port addresses mtu fwmark ip6prefix nohostroute tunlink
+	local wg_dir wg_cfg oldmask
+	local private_key private_key_file listen_port addresses mtu fwmark ip6prefix nohostroute tunlink
 	local awg_jc awg_jmin awg_jmax awg_s1 awg_s2 awg_s3 awg_s4
 	local awg_h1 awg_h2 awg_h3 awg_h4 awg_i1 awg_i2 awg_i3 awg_i4 awg_i5
 	local address prefix
@@ -138,6 +205,7 @@ proto_amneziawg_setup() {
 	ensure_key_is_generated "${config}"
 	config_load network
 	config_get private_key "${config}" "private_key"
+	config_get private_key_file "${config}" "private_key_file"
 	config_get listen_port "${config}" "listen_port"
 	config_get addresses "${config}" "addresses"
 	config_get mtu "${config}" "mtu"
@@ -161,6 +229,21 @@ proto_amneziawg_setup() {
 	config_get awg_i3 "${config}" "awg_i3"
 	config_get awg_i4 "${config}" "awg_i4"
 	config_get awg_i5 "${config}" "awg_i5"
+	private_key="$(proto_amneziawg_resolve_private_key \
+		"$private_key" "$private_key_file" "/etc/routerd/secrets")" || {
+		proto_setup_failed "${config}"
+		exit 1
+	}
+	oldmask="$(umask)"
+	umask 077
+	wg_dir="$(mktemp -d /tmp/amneziawg.XXXXXX)" || {
+		umask "$oldmask"
+		proto_setup_failed "${config}"
+		exit 1
+	}
+	wg_cfg="${wg_dir}/setconf.conf"
+	AWG_RUNTIME_CONFIG="$wg_cfg"
+	trap 'proto_amneziawg_cleanup_runtime_config' EXIT HUP INT TERM
 
 	if proto_amneziawg_is_kernel_mode; then
 		logger -t "amneziawg" "info: using kernel-space kmod-amneziawg for ${WG}"
@@ -174,9 +257,9 @@ proto_amneziawg_setup() {
 	[ -n "${mtu}" ] && ip link set mtu "${mtu}" dev "${config}"
 	proto_init_update "${config}" 1
 
-	umask 077
-	mkdir -p "${wg_dir}"
 	echo "[Interface]" > "${wg_cfg}"
+	chmod 0600 "${wg_cfg}"
+	umask "$oldmask"
 	echo "PrivateKey=${private_key}" >> "${wg_cfg}"
 	[ -n "${listen_port}" ] && echo "ListenPort=${listen_port}" >> "${wg_cfg}"
 	[ -n "${fwmark}" ] && echo "FwMark=${fwmark}" >> "${wg_cfg}"
@@ -200,7 +283,8 @@ proto_amneziawg_setup() {
 	config_foreach proto_amneziawg_setup_peer "amneziawg_${config}"
 	"${WG}" setconf "${config}" "${wg_cfg}"
 	local WG_RETURN=$?
-	rm -f "${wg_cfg}"
+	proto_amneziawg_cleanup_runtime_config
+	trap - EXIT HUP INT TERM
 	if [ ${WG_RETURN} -ne 0 ]; then
 		sleep 5
 		proto_setup_failed "${config}"

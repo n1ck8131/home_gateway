@@ -5,7 +5,7 @@
 | OpenWrt target metadata | 25.12.5 / r33051-f5dae5ece4 | verified-upstream | Official profiles.json and sha256sums |
 | AWG2 kernel source | v1.0.20260611 / 2a6e1a02ac024f54a23e18f894a279b7f870b8fb | verified-upstream | Official tag and source hash |
 | AWG2 tools source | v1.0.20260618-2 / 61e741780e8465a67a7d7fb6cffe14a8a15d624a | verified-upstream | Official tag and source hash |
-| AWG2 OpenWrt packages | `amneziawg-tools-1.0.20260618.2-r1.apk`; `kmod-amneziawg-6.12.94.1.0.20260611-r1.apk` | built-in-sdk | [SDK run 29273568884](https://github.com/n1ck8131/home_gateway/actions/runs/29273568884), two clean output trees byte-identical. Tools: 32,434 bytes, SHA-256 `c22cb283a55e52b285bef68abfea18c9be908d1ff17f82d601bd919391570c7e`. Kmod: 40,954 bytes, SHA-256 `db46f2e467ff1d891bad7f83affdbde59ad05e53a9a4a2e53173a83586093205` |
+| AWG2 OpenWrt packages | `amneziawg-tools-1.0.20260618.2-r2.apk`; `kmod-amneziawg-6.12.94.1.0.20260611-r1.apk` | built-in-sdk | Local pinned SDK validation on 2026-08-24 produced two clean byte-identical output trees; hosted confirmation is pending. Tools: 33,118 bytes, SHA-256 `2eae2da601281c8ece9bf86bb6245d1af42fa736f0b738e030dc2014a0930ff9`. Kmod: 40,954 bytes, SHA-256 `db46f2e467ff1d891bad7f83affdbde59ad05e53a9a4a2e53173a83586093205` |
 | AWG2 userspace contingency | v0.2.19 / 1cc94272ca8e9e223a5fe76382f5880f09d3c12d | built-in-sdk | `linux/arm64`, `CGO_ENABLED=0`, 3,276,962 bytes, SHA-256 `e7f06b35cbc8523ef2db201afa64a15c4f7d56dbb8e2698da8bf727d0b5e10cb`; same reproducible SDK run |
 | AWG2 hardware UAPI | Exact Flint 2 kernel | prepared-for-hardware | P3 precondition |
 | Router-to-VPS handshake | Exact router and VPS | blocked | P3 owns this field gate |

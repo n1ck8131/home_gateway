@@ -18,10 +18,43 @@ grep -Eq 'config_get_bool route_allowed_ips .* 0$' "$helper"
 grep -q 'renew_handler=1' "$helper"
 grep -q 'peer_detect=1' "$helper"
 grep -q 'proto_config_add_string "addresses"' "$helper"
+grep -q 'proto_config_add_string "private_key_file"' "$helper"
+grep -q 'config_get private_key_file' "$helper"
+grep -q '/etc/routerd/secrets' "$helper"
+grep -q "stat -c '%u:%a'" "$helper"
+grep -q '0:600' "$helper"
+grep -q 'mktemp -d /tmp/amneziawg.XXXXXX' "$helper"
+grep -q "trap 'proto_amneziawg_cleanup_runtime_config' EXIT HUP INT TERM" "$helper"
+if grep -q '/etc/routerd/secrets/runtime' "$helper"; then exit 1; fi
 grep -q 'proto_amneziawg_renew' "$helper"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
+if INCLUDE_ONLY=1 WG=/bin/true sh -c '. "$1"; proto_amneziawg_resolve_private_key key /etc/routerd/secrets/key /etc/routerd/secrets' sh "$helper" >/dev/null 2>&1; then
+	echo 'simultaneous inline and file keys unexpectedly succeeded' >&2
+	exit 1
+fi
+if INCLUDE_ONLY=1 WG=/bin/true sh -c '. "$1"; proto_amneziawg_resolve_private_key "" /etc/routerd/secrets/../shadow /etc/routerd/secrets' sh "$helper" >/dev/null 2>&1; then
+	echo 'private key traversal unexpectedly succeeded' >&2
+	exit 1
+fi
+mkdir -p "$tmp/bin" "$tmp/secrets"
+: > "$tmp/secrets/awg-test.key"
+cat > "$tmp/bin/stat" <<'EOF'
+#!/bin/sh
+printf '%s\n' '0:600'
+EOF
+cat > "$tmp/bin/cat" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'fixture-value'
+EOF
+chmod +x "$tmp/bin/stat" "$tmp/bin/cat"
+resolved_key="$(PATH="$tmp/bin:$PATH" INCLUDE_ONLY=1 WG=/bin/true sh -c '. "$1"; proto_amneziawg_resolve_private_key "" "$2" "$3"' sh "$helper" "$tmp/secrets/awg-test.key" "$tmp/secrets")"
+[ "$resolved_key" = 'fixture-value' ] || {
+	echo 'private key file did not resolve through the guarded path' >&2
+	exit 1
+}
+
 if INCLUDE_ONLY=1 WG="$tmp/missing" sh "$helper" >/dev/null 2>&1; then
 	echo 'missing backend unexpectedly succeeded' >&2
 	exit 1

@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "sanitized_example": true,
+  "server_id": "primary",
+  "slot": 1,
+  "interface": "awg0",
+  "uci_interface": "awg0",
+  "uci_peer": "awg0_peer",
+  "endpoint": {
+    "ip": "203.0.113.10",
+    "port": 51820,
+    "wan_gateway": "203.0.113.1",
+    "wan_device": "wan"
+  },
+  "private_key_ref": {
+    "kind": "routerd-openwrt-peer-private-key",
+    "name": "primary"
+  },
+  "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+  "addresses": ["10.71.0.2/32", "fd71::2/128"],
+  "allowed_ips": ["0.0.0.0/0", "::/0"],
+  "awg": {
+    "jc": 4,
+    "jmin": 10,
+    "jmax": 50,
+    "s1": 142,
+    "s2": 41,
+    "s3": 56,
+    "s4": 11,
+    "h1": "684141592-1751861769",
+    "h2": "1957920865-2010016669",
+    "h3": "2043550980-2107134838",
+    "h4": "2127672251-2132651859",
+    "i1": "<r 2>",
+    "i2": "<r 3>",
+    "i3": "<rd 4>",
+    "i4": "<rc 4>",
+    "i5": "<b 0x0102>"
+  },
+  "persistent_keepalive": 25,
+  "route_allowed_ips": 0,
+  "nohostroute": 1
+}

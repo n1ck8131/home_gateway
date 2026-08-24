@@ -34,6 +34,19 @@ P1 is complete for its pure software scope. DNS rendering/application, packet-po
 
 P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13bb81d83c3425146e1604368ea7eda2`. [OpenWrt SDK run 32672264264](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264) also passed the pinned reproducibility and ShellCheck regression. P3 owns physical GL-MT6000, exact-kernel AWG2 and router-to-VPS evidence.
 
+## P3.2 and P3.3 software boundary
+
+| Gate | State | Evidence |
+|---|---|---|
+| Hash-verified non-secret VPS bundle, deployment compensation and transport health contracts | automated-passed | [CI run 32712734828](https://github.com/n1ck8131/home_gateway/actions/runs/32712734828) passed the complete Go and repository verification suites for commit `52a896717e0f01359d6eaedb4db9d9e949ac5000` |
+| Strict OpenWrt peer/UCI plan, WAN endpoint host route, stale-secret cleanup and P2 fail-closed binding | automated-passed | The same CI run passed the OpenWrt plan/saga regressions, Linux race suite and network namespace evidence gate |
+| AWG2 package and netifd-helper reproducibility | automated-passed | [OpenWrt SDK run 32712734846](https://github.com/n1ck8131/home_gateway/actions/runs/32712734846) built the package and userspace trees twice, compared them byte-identical and passed the helper ShellCheck gate |
+| P2 rollback and last-known-good regression under the P3 changes | automated-passed | [OpenWrt QEMU run 32712734929](https://github.com/n1ck8131/home_gateway/actions/runs/32712734929) passed the pinned OpenWrt rollback and recovery suite |
+| Exact GL-MT6000 kernel module/UAPI | hardware-not-run | P3.5 requires the resettable target router, exact firmware/kernel and wired recovery path |
+| Live VPS hardening and router-to-VPS AWG2 handshake | hardware-not-run | P3.5 requires approved inventory, strict host keys, out-of-band recovery and secret material supplied outside Git |
+
+P3.2 and P3.3 are complete for their software-contract scope at commit `52a896717e0f01359d6eaedb4db9d9e949ac5000`. This is not the P3 exit gate: P3.4 router package lifecycle and P3.5 physical VPS/router acceptance remain open.
+
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
 | Domain, IDNA, public-suffix and CIDR normalization | P1 | automated |

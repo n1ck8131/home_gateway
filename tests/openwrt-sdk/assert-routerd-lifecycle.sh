@@ -69,18 +69,27 @@ mkdir -p "$keys_dir"
 apk_run() {
 	command_name="$1"
 	shift
+	case "$command_name" in
+	add)
+		set -- "$command_name" --no-network --no-cache --no-scripts \
+			--arch "$package_arch" --repositories-file "$repositories_file" \
+			--allow-untrusted "$@"
+		if [ "$(id -u)" -ne 0 ]; then
+			set -- --usermode "$@"
+		fi
+		;;
+	del)
+		set -- "$command_name" --no-network --no-cache --no-scripts \
+			--arch "$package_arch" --repositories-file "$repositories_file" \
+			--allow-untrusted "$@"
+		;;
+	*) fail "unsupported apk lifecycle command: $command_name" ;;
+	esac
 	"$apk_host" \
 		--root "$lifecycle_root" \
 		--keys-dir "$keys_dir" \
 		--no-logfile \
 		--preserve-env \
-		"$command_name" \
-		--no-network \
-		--no-cache \
-		--no-scripts \
-		--arch "$package_arch" \
-		--repositories-file "$repositories_file" \
-		--allow-untrusted \
 		"$@"
 }
 

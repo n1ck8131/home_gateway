@@ -118,6 +118,8 @@ Describe 'routerd OpenWrt APK contract' {
         $script:Lifecycle | Should -Match 'mktemp -d'
         $script:Lifecycle | Should -Match 'routerd-apk-lifecycle\.XXXXXX'
         $script:Lifecycle | Should -Match '--root "\$lifecycle_root"'
+        $script:Lifecycle | Should -Match 'if \[ "\$\(id -u\)" -ne 0 \]'
+        $script:Lifecycle | Should -Match 'set -- --usermode "\$@"'
         $script:Lifecycle | Should -Match '--no-network'
         $script:Lifecycle | Should -Match '--no-scripts'
         $script:Lifecycle | Should -Match '--repositories-file'

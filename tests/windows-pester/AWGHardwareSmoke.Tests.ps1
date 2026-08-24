@@ -45,6 +45,7 @@ $script:NewIsolatedSmokeFixture = {
         'kernel_vermagic=5a6c1f71be683ae9980b15d3ce73e24d'
         'package_architecture=aarch64_cortex-a53'
     ) | Set-Content -LiteralPath (Join-Path $packages 'build-metadata.txt') -Encoding ASCII
+    $lockPath = Join-Path $manifestDirectory 'versions.lock.yaml'
     @"
 {
   "amneziawg": {
@@ -54,13 +55,14 @@ $script:NewIsolatedSmokeFixture = {
     }
   }
 }
-"@ | Set-Content -LiteralPath (Join-Path $manifestDirectory 'versions.lock.yaml') -Encoding UTF8
+"@ | Set-Content -LiteralPath $lockPath -Encoding UTF8
 
     return [pscustomobject]@{
         Wrapper = $wrapper
         Packages = $packages
         Kmod = $kmod
         Tools = $tools
+        Lock = $lockPath
     }
 }
 
@@ -88,7 +90,7 @@ end {
     if ($command -match 'apk list -I') { 'kernel-6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1 installed'; exit 0 }
     if ($command -match 'apk info -e') { exit 1 }
     if ($command -match 'lsmod') { 'Module Size Used by'; exit 0 }
-    if ($command -match 'ip link show awg-p0') { exit 1 }
+    if ($command -match 'ip link show awg-p0') { [Console]::Error.WriteLine('Device awg-p0 does not exist'); exit 1 }
     if ($command -match 'test -e /tmp/home-gateway-p0') { exit 1 }
     if ($args -contains 'sh' -and $args -contains '-s' -and $args -contains '--') {
         $separatorIndex = [array]::IndexOf($args, '--')
@@ -115,9 +117,15 @@ exit /b %ERRORLEVEL%
         [System.IO.File]::WriteAllText($sshPath, $sshShim + "`n", $utf8NoBom)
         chmod +x $sshPath
     }
-    @'
+@'
 Add-Content -LiteralPath $env:AWG_FAKE_LOG -Value ('SCP' + [char]31 + ($args -join [char]31))
 if ($env:AWG_FAKE_SCP_EXIT) { exit [int]$env:AWG_FAKE_SCP_EXIT }
+if ($args.Count -ge 2 -and $args[-1] -match '/SHA256SUMS$') {
+    $rawContent = Get-Content -LiteralPath $args[-2] -Raw
+    if ($rawContent.Contains("`r")) { exit 88 }
+    $content = $rawContent.Replace("`n", '|')
+    Add-Content -LiteralPath $env:AWG_FAKE_LOG -Value ('SCPCONTENT' + [char]31 + $content)
+}
 exit 0
 '@ | Set-Content -LiteralPath (Join-Path $Directory 'scp.ps1') -Encoding UTF8
     if ($isWindowsHost) {
@@ -179,7 +187,7 @@ $script:InvokeChildPowerShell = {
 Describe 'rollback-safe AWG2 hardware smoke' {
     BeforeEach {
         $script:KnownHosts = Join-Path $TestDrive 'known_hosts'
-        New-Item -ItemType File -Force $script:KnownHosts | Out-Null
+        [IO.File]::WriteAllText($script:KnownHosts, 'router.test ssh-ed25519 fixture-public-host-key', [Text.Encoding]::ASCII)
         $script:Fixture = & $script:NewIsolatedSmokeFixture -Root $TestDrive
         $script:Packages = $script:Fixture.Packages
         $script:TestWrapperPath = $script:Fixture.Wrapper
@@ -216,6 +224,49 @@ Describe 'rollback-safe AWG2 hardware smoke' {
         }
     }
 
+    It 'rejects an empty host-key trust file before resolving SSH' {
+        Clear-Content -LiteralPath $script:KnownHosts
+        $emptyPath = Join-Path $TestDrive 'no-transport'
+        New-Item -ItemType Directory $emptyPath | Out-Null
+        $priorPath = $env:PATH
+        try {
+            $env:PATH = $emptyPath
+            $output = @(& $script:Pwsh -NoProfile -File $script:TestWrapperPath -RouterHost 'router.test' -PackageDirectory $script:Packages -KnownHostsFile $script:KnownHosts 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $env:PATH = $priorPath
+        }
+        $exitCode | Should -Not -Be 0
+        ($output -join [Environment]::NewLine) | Should -Match 'non-empty regular file'
+    }
+
+    It 'rejects a reparse point in the host-key trust path before SSH' {
+        $targetDirectory = Join-Path $TestDrive 'known-hosts-target'
+        $linkedDirectory = Join-Path $TestDrive 'known-hosts-link'
+        New-Item -ItemType Directory -Path $targetDirectory | Out-Null
+        $targetKnownHosts = Join-Path $targetDirectory 'known_hosts'
+        [IO.File]::WriteAllText($targetKnownHosts, 'router.test ssh-ed25519 fixture-public-host-key', [Text.Encoding]::ASCII)
+        try {
+            $itemType = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'Junction' } else { 'SymbolicLink' }
+            New-Item -ItemType $itemType -Path $linkedDirectory -Target $targetDirectory -ErrorAction Stop | Out-Null
+        } catch {
+            $script:Wrapper | Should -Match 'reparse-point path component'
+            return
+        }
+        $emptyPath = Join-Path $TestDrive 'reparse-no-transport'
+        New-Item -ItemType Directory $emptyPath | Out-Null
+        $priorPath = $env:PATH
+        try {
+            $env:PATH = $emptyPath
+            $output = @(& $script:Pwsh -NoProfile -File $script:TestWrapperPath -RouterHost 'router.test' -PackageDirectory $script:Packages -KnownHostsFile (Join-Path $linkedDirectory 'known_hosts') 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $env:PATH = $priorPath
+        }
+        $exitCode | Should -Not -Be 0
+        ($output -join [Environment]::NewLine) | Should -Match 'symlink or reparse-point path component'
+    }
+
     It 'runs only a strict read-only preflight without ConfirmInstall' {
         $fakeBin = Join-Path $TestDrive 'fake-bin'
         $log = Join-Path $TestDrive 'transport.log'
@@ -246,10 +297,51 @@ Describe 'rollback-safe AWG2 hardware smoke' {
             $call | Should -Match 'BatchMode=yes'
             $call | Should -Match 'StrictHostKeyChecking=yes'
             $call | Should -Match ([regex]::Escape("UserKnownHostsFile=$((Resolve-Path $script:KnownHosts).Path)"))
+            $call | Should -Match ([regex]::Escape("GlobalKnownHostsFile=$((Resolve-Path $script:KnownHosts).Path)"))
             $call | Should -Match 'ConnectTimeout=10'
         }
         $calls | Should -Not -Match '^SCP'
         $calls | Should -Not -Match 'sh.*-s.*--'
+    }
+
+    It 'accepts but never transfers an additional hash-pinned routerd artifact' {
+        $routerdFixture = & $script:NewIsolatedSmokeFixture -Root (Join-Path $TestDrive 'routerd-case')
+        $routerdPackages = $routerdFixture.Packages
+        $routerdName = 'routerd_0.3.4_aarch64_cortex-a53.apk'
+        $routerdPath = Join-Path $routerdPackages $routerdName
+        Set-Content -LiteralPath $routerdPath -Value 'routerd fixture' -NoNewline
+        $routerdHash = (Get-FileHash -LiteralPath $routerdPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        Add-Content -LiteralPath (Join-Path $routerdPackages 'SHA256SUMS') -Value "$routerdHash  $routerdName" -Encoding ASCII
+        $lock = Get-Content -LiteralPath $routerdFixture.Lock -Raw | ConvertFrom-Json
+        $lock | Add-Member -NotePropertyName routerd -NotePropertyValue ([pscustomobject]@{
+            artifact = [pscustomobject]@{ filename = $routerdName; sha256 = $routerdHash }
+        })
+        [IO.File]::WriteAllText($routerdFixture.Lock, ($lock | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+
+        $fakeBin = Join-Path $TestDrive 'fake-routerd-output'
+        $log = Join-Path $TestDrive 'routerd-output.log'
+        $stdout = Join-Path $TestDrive 'routerd-output.stdout'
+        $stderr = Join-Path $TestDrive 'routerd-output.stderr'
+        & $script:NewFakeAwgTransport -Directory $fakeBin
+        $priorPath = $env:PATH
+        $priorLog = $env:AWG_FAKE_LOG
+        try {
+            $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$priorPath"
+            $env:AWG_FAKE_LOG = $log
+            $command = & $script:NewConfirmInstallCommand -Wrapper $routerdFixture.Wrapper -Packages $routerdPackages -KnownHosts $script:KnownHosts
+            $process = & $script:InvokeChildPowerShell -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command) -Stdout $stdout -Stderr $stderr
+        } finally {
+            $env:PATH = $priorPath
+            $env:AWG_FAKE_LOG = $priorLog
+        }
+        $process.ExitCode | Should -Be 0 -Because $process.Output
+        $process.Output | Should -Match 'AWG2_HARDWARE_SMOKE_PASS'
+        $calls = Get-Content -LiteralPath $log -Raw
+        $calls | Should -Match '(?m)^SCP'
+        $calls | Should -Match 'SCPCONTENT'
+        $calls | Should -Match ([regex]::Escape((Split-Path -Leaf $routerdFixture.Kmod)))
+        $calls | Should -Match ([regex]::Escape((Split-Path -Leaf $routerdFixture.Tools)))
+        $calls | Should -Not -Match ([regex]::Escape($routerdName))
     }
 
     It 'completes ConfirmInstall through prepare, copy and remote smoke' {
@@ -338,7 +430,7 @@ Describe 'rollback-safe AWG2 hardware smoke' {
         $stdout = Join-Path $TestDrive 'cleanup-failure.stdout'
         $stderr = Join-Path $TestDrive 'cleanup-failure.stderr'
         $weirdKnownHosts = Join-Path $TestDrive 'known`$()''hosts'
-        New-Item -ItemType File -Force $weirdKnownHosts | Out-Null
+        [IO.File]::WriteAllText($weirdKnownHosts, 'router.test ssh-ed25519 fixture-public-host-key', [Text.Encoding]::ASCII)
         & $script:NewFakeAwgTransport -Directory $fakeBin
         $priorPath = $env:PATH
         $priorLog = $env:AWG_FAKE_LOG
@@ -396,7 +488,10 @@ Describe 'rollback-safe AWG2 hardware smoke' {
         $script:Wrapper | Should -Match "BatchMode=yes"
         $script:Wrapper | Should -Match "StrictHostKeyChecking=yes"
         $script:Wrapper | Should -Match 'UserKnownHostsFile=\$knownHosts'
+        $script:Wrapper | Should -Match 'GlobalKnownHostsFile=\$knownHosts'
         $script:Wrapper | Should -Match "ConnectTimeout=10"
+        $script:Wrapper | Should -Match 'FileAttributes\]::ReparsePoint'
+        $script:Wrapper | Should -Match 'Length -le 0'
         $script:Wrapper | Should -Match 'if \(-not \$ConfirmInstall\)'
         $script:Wrapper | Should -Match '\$PSCmdlet\.ShouldProcess'
         $script:Wrapper | Should -Match 'finally'

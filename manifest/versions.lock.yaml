@@ -30,6 +30,20 @@
     "kernel_version": "6.12.94",
     "kernel_vermagic": "a7bc15f451f9652701ba04af9cfb0b95"
   },
+  "routerd": {
+    "version": "0.3.4",
+    "release": 2,
+    "go_version": "1.26.6",
+    "package_arch": "aarch64_cortex-a53",
+    "artifact": {
+      "filename": "routerd_0.3.4_aarch64_cortex-a53.apk",
+      "sha256": "b44a00d78849b697b29d2645fe3095bbf8de921777f62d7542d596191d108ee4"
+    },
+    "lifecycle_r1": {
+      "filename": "routerd-0.3.4-r1.apk",
+      "sha256": "4b06ec4b46968aa92a1911effd3da1c0e6cccd473c82b9e1b028ccd7f94b2c01"
+    }
+  },
   "amneziawg": {
     "kernel_commit": "2a6e1a02ac024f54a23e18f894a279b7f870b8fb",
     "tools_commit": "61e741780e8465a67a7d7fb6cffe14a8a15d624a",

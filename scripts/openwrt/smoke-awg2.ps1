@@ -41,12 +41,30 @@ if ($WhatIfPreference) {
     return
 }
 
-$knownHosts = (Resolve-Path -LiteralPath $KnownHostsFile).Path
+$knownHostsLexicalPath = [IO.Path]::GetFullPath($KnownHostsFile)
+$knownHostsComponent = $knownHostsLexicalPath
+while ($knownHostsComponent) {
+    if (Test-Path -LiteralPath $knownHostsComponent) {
+        $componentItem = Get-Item -LiteralPath $knownHostsComponent -Force
+        if (($componentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Known hosts cannot contain a symlink or reparse-point path component'
+        }
+    }
+    $componentParent = Split-Path -Parent $knownHostsComponent
+    if (-not $componentParent -or $componentParent -eq $knownHostsComponent) { break }
+    $knownHostsComponent = $componentParent
+}
+$knownHosts = (Resolve-Path -LiteralPath $knownHostsLexicalPath).Path
+$knownHostsItem = Get-Item -LiteralPath $knownHosts
+if (($knownHostsItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $knownHostsItem.Length -le 0) {
+    throw 'Known hosts must be a non-empty regular file, not a symlink or reparse point'
+}
 $sshCommand = (Get-Command -Name ssh -ErrorAction Stop).Source
 $connectionOptions = @(
     '-o', 'BatchMode=yes',
     '-o', 'StrictHostKeyChecking=yes',
     '-o', "UserKnownHostsFile=$knownHosts",
+    '-o', "GlobalKnownHostsFile=$knownHosts",
     '-o', 'ConnectTimeout=10'
 )
 $target = "$SshUser@$RouterHost"
@@ -58,8 +76,14 @@ function Invoke-CheckedNative {
         [Parameter(Mandatory)][string[]]$Arguments,
         [Parameter()][int[]]$AllowedExitCodes = @(0)
     )
-    $output = @(& $FilePath @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
+    $priorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $priorPreference
+    }
     if ($exitCode -notin $AllowedExitCodes) {
         throw "$FilePath failed with exit code $exitCode"
     }
@@ -80,13 +104,16 @@ function Invoke-RemoteScript {
         [Parameter()][int[]]$AllowedExitCodes = @(0)
     )
     $priorEncoding = [Console]::OutputEncoding
+    $priorPreference = $ErrorActionPreference
     try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $ErrorActionPreference = 'Continue'
         $remoteArguments = @('sh', '-s', '--') + $Arguments
         $output = @(Get-Content -LiteralPath $remoteScript -Raw -Encoding UTF8 | & $sshCommand @connectionOptions $target @remoteArguments 2>&1)
         $exitCode = $LASTEXITCODE
     } finally {
         [Console]::OutputEncoding = $priorEncoding
+        $ErrorActionPreference = $priorPreference
     }
     if ($exitCode -notin $AllowedExitCodes) {
         throw "remote smoke script failed with exit code $exitCode"
@@ -136,8 +163,19 @@ if ($trustedKmod.filename -notmatch '^kmod-amneziawg-' -or
 }
 $expectedNames = @($trustedKmod.filename, $trustedTools.filename)
 $packageFiles = @(Get-ChildItem -LiteralPath $packageRoot -File -Filter '*.apk')
-if ($packageFiles.Count -ne 2 -or @($packageFiles | Where-Object { $_.Name -notin $expectedNames }).Count -ne 0) {
-    throw 'PackageDirectory must contain exactly the two filenames in the trusted versions lock'
+$trustedRouterd = $null
+if ($packageFiles.Count -eq 3) {
+    $trustedRouterd = $lock.routerd.artifact
+    if ($null -eq $trustedRouterd -or
+        $trustedRouterd.filename -notmatch '^routerd_[A-Za-z0-9._+-]+\.apk$' -or
+        $trustedRouterd.sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw 'The additional routerd package is not pinned by the trusted versions lock'
+    }
+    $expectedNames += [string]$trustedRouterd.filename
+}
+if ($packageFiles.Count -ne $expectedNames.Count -or
+    @($packageFiles | Where-Object { $_.Name -notin $expectedNames }).Count -ne 0) {
+    throw 'PackageDirectory must contain exactly the trusted AWG2 files and optional pinned routerd APK'
 }
 $kmodPackage = Get-Item -LiteralPath (Join-Path $packageRoot $trustedKmod.filename)
 $toolsPackage = Get-Item -LiteralPath (Join-Path $packageRoot $trustedTools.filename)
@@ -145,14 +183,18 @@ $sumPath = Join-Path $packageRoot 'SHA256SUMS'
 $metadataPath = Join-Path $packageRoot 'build-metadata.txt'
 if (-not (Test-Path -LiteralPath $sumPath -PathType Leaf)) { throw 'SHA256SUMS is missing' }
 if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) { throw 'build-metadata.txt is missing' }
-$packages = @($kmodPackage, $toolsPackage)
-foreach ($package in $packages) {
+$verifiedPackages = @($kmodPackage, $toolsPackage)
+if ($trustedRouterd) {
+    $verifiedPackages += Get-Item -LiteralPath (Join-Path $packageRoot $trustedRouterd.filename)
+}
+foreach ($package in $verifiedPackages) {
     if ($package.Name -notmatch '^[A-Za-z0-9._+-]+$') { throw "Unsafe package filename: $($package.Name)" }
 }
 $trustedHashes = @{}
 $trustedHashes[$trustedKmod.filename] = [string]$trustedKmod.sha256
 $trustedHashes[$trustedTools.filename] = [string]$trustedTools.sha256
-foreach ($package in $packages) {
+if ($trustedRouterd) { $trustedHashes[$trustedRouterd.filename] = [string]$trustedRouterd.sha256 }
+foreach ($package in $verifiedPackages) {
     $actual = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $trustedHashes[$package.Name]) { throw "Trusted SHA256 mismatch for $($package.Name)" }
 }
@@ -161,8 +203,8 @@ foreach ($line in Get-Content -LiteralPath $sumPath -Encoding UTF8) {
     if ($line -notmatch '^([0-9a-fA-F]{64})  ([A-Za-z0-9._+-]+)$') { throw 'Invalid SHA256SUMS format' }
     $sumEntries[$Matches[2]] = $Matches[1].ToLowerInvariant()
 }
-if ($sumEntries.Count -ne 2) { throw 'SHA256SUMS must contain only the two expected APKs' }
-foreach ($package in $packages) {
+if ($sumEntries.Count -ne $verifiedPackages.Count) { throw 'SHA256SUMS must contain only the verified APKs' }
+foreach ($package in $verifiedPackages) {
     if (-not $sumEntries.ContainsKey($package.Name)) { throw "SHA256SUMS is missing $($package.Name)" }
     $actual = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $sumEntries[$package.Name]) { throw "Local SHA256 mismatch for $($package.Name)" }
@@ -203,38 +245,56 @@ if (-not $ConfirmInstall) {
 }
 if (-not $PSCmdlet.ShouldProcess($target, 'temporarily install and roll back AWG2 smoke packages')) { return }
 
-$nonce = [guid]::NewGuid().ToString('N')
-"AWG2_RECOVERY_TOKEN=$nonce"
-$remotePrepared = $false
-$smokePassed = $false
-$cleanupConfirmed = $false
-$failure = $null
+$transportSumFile = New-TemporaryFile
 try {
-    $remotePrepared = $true
-    Invoke-RemoteScript -Arguments @('prepare', $nonce) | Out-Null
-    $copyArguments = @('-O') + $connectionOptions + @(
-        '--',
-        $kmodPackage.FullName,
-        $toolsPackage.FullName,
-        $sumPath,
-        "${target}:$remoteDirectory/"
-    )
-    Invoke-CheckedNative -FilePath $scpCommand -Arguments $copyArguments | Out-Null
-    Invoke-RemoteScript -Arguments @('smoke', $nonce, $kmodPackage.Name, $toolsPackage.Name, $kernelAbi) | Out-Null
-    $smokePassed = $true
-    $cleanupConfirmed = $true
-} catch {
-    $failure = $_
-} finally {
-    if ($remotePrepared -and -not $cleanupConfirmed) {
-        try {
-            Invoke-RemoteScript -Arguments @('cleanup', $nonce) | Out-Null
-            $cleanupConfirmed = $true
-        } catch {
-            Write-RecoveryCommand -Nonce $nonce
+    $transportSum = @(
+        "$($trustedHashes[$kmodPackage.Name])  $($kmodPackage.Name)"
+        "$($trustedHashes[$toolsPackage.Name])  $($toolsPackage.Name)"
+    ) -join "`n"
+    [IO.File]::WriteAllText($transportSumFile.FullName, $transportSum + "`n", [Text.Encoding]::ASCII)
+
+    $nonce = [guid]::NewGuid().ToString('N')
+    "AWG2_RECOVERY_TOKEN=$nonce"
+    $remotePrepared = $false
+    $smokePassed = $false
+    $cleanupConfirmed = $false
+    $failure = $null
+    try {
+        $remotePrepared = $true
+        Invoke-RemoteScript -Arguments @('prepare', $nonce) | Out-Null
+        $packageCopyArguments = @('-O') + $connectionOptions + @(
+            '--',
+            $kmodPackage.FullName,
+            $toolsPackage.FullName,
+            "${target}:$remoteDirectory/"
+        )
+        Invoke-CheckedNative -FilePath $scpCommand -Arguments $packageCopyArguments | Out-Null
+        $sumCopyArguments = @('-O') + $connectionOptions + @(
+            '--',
+            $transportSumFile.FullName,
+            "${target}:$remoteDirectory/SHA256SUMS"
+        )
+        Invoke-CheckedNative -FilePath $scpCommand -Arguments $sumCopyArguments | Out-Null
+        Invoke-RemoteScript -Arguments @('smoke', $nonce, $kmodPackage.Name, $toolsPackage.Name, $kernelAbi) | Out-Null
+        $smokePassed = $true
+        $cleanupConfirmed = $true
+    } catch {
+        $failure = $_
+    } finally {
+        if ($remotePrepared -and -not $cleanupConfirmed) {
+            try {
+                Invoke-RemoteScript -Arguments @('cleanup', $nonce) | Out-Null
+                $cleanupConfirmed = $true
+            } catch {
+                Write-RecoveryCommand -Nonce $nonce
+            }
         }
     }
+    if ($failure) { throw $failure }
+    if (-not $smokePassed -or -not $cleanupConfirmed) { throw 'AWG2 smoke cleanup was not confirmed' }
+} finally {
+    if ($transportSumFile -and (Test-Path -LiteralPath $transportSumFile.FullName)) {
+        Remove-Item -LiteralPath $transportSumFile.FullName -Force
+    }
 }
-if ($failure) { throw $failure }
-if (-not $smokePassed -or -not $cleanupConfirmed) { throw 'AWG2 smoke cleanup was not confirmed' }
 'AWG2_HARDWARE_SMOKE_PASS'

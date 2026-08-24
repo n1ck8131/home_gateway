@@ -1,7 +1,7 @@
 # Project Status
 
 Current phase: P3 Single-server AmneziaWG
-Release level: P2-software-verified; P3.2/P3.3-software-verified; P3.4/P3.5-open; P3-hardware-not-run
+Release level: P2-software-verified; P3.2/P3.3-software-verified; P3.4-package-software-verified; P3.5-preflight-implemented; P3-hardware-not-run
 
 ## P0A Foundation
 
@@ -32,21 +32,23 @@ Release level: P2-software-verified; P3.2/P3.3-software-verified; P3.4/P3.5-open
 
 ## P3 Single-server AmneziaWG
 
-- State: P3.1 through P3.3 software boundaries verified; P3.4, P3.5 and physical gates remain open
+- State: P3.1 through P3.4 software boundaries verified; P3.5 physical acceptance and every physical gate remain open
 - Plan: [P3 single-server AmneziaWG implementation plan](docs/superpowers/plans/2026-08-24-p03-single-awg.md)
 - First slice: `server-agent health --json` provides process-scoped liveness only; it does not claim AWG, VPS or tunnel health and exposes no network listener
 - P3.1 evidence for commit `bdaec0b30f3152c47f37cca7f88f663b8b310976`: [CI run 32700597504](https://github.com/n1ck8131/home_gateway/actions/runs/32700597504), [OpenWrt QEMU run 32700597472](https://github.com/n1ck8131/home_gateway/actions/runs/32700597472) and [OpenWrt SDK run 32700597475](https://github.com/n1ck8131/home_gateway/actions/runs/32700597475) passed
 - P3.2 software: hash-verified non-secret VPS bundle, pre-mutation snapshot/idempotent deployment saga, recovery-gated SSH hardening and redacted AWG transport health
 - P3.3 software: strict OpenWrt peer/UCI plan, WAN endpoint host-route ordering, stale secret/mark cleanup, P2 fail-closed binding and guarded `private_key_file` support
-- Local evidence: full Windows and Ubuntu repository `verify`, focused Go/Pester/shell checks, pinned ShellCheck, two clean byte-identical OpenWrt SDK outputs and independent QA/security audits passed
+- P3.4 package software: pinned Go cross-build of a static `linux/arm64` `routerd`, exact `aarch64_cortex-a53` APK metadata and payload, procd init contract, isolated r1-to-r2 install/upgrade/remove checks with unowned UCI/dataplane state preservation, and two clean byte-identical SDK output trees
+- P3.5 preparation: strict-host-key, read-only router preflight with exact board/OpenWrt/kernel/ABI checks, WAN route invariants, optional fresh-handshake validation and redacted evidence; the sanitized inventory is deliberately non-executable
+- Local evidence: full repository verification, focused Go/Pester/shell checks, pinned ShellCheck, two clean byte-identical OpenWrt SDK outputs and independent QA/security audits passed
 - Hosted evidence for commit `52a896717e0f01359d6eaedb4db9d9e949ac5000`: [CI run 32712734828](https://github.com/n1ck8131/home_gateway/actions/runs/32712734828) passed Windows/Linux verification, Linux race tests and the network namespace evidence gate; [OpenWrt QEMU run 32712734929](https://github.com/n1ck8131/home_gateway/actions/runs/32712734929) passed the rollback/LKG regression; [OpenWrt SDK run 32712734846](https://github.com/n1ck8131/home_gateway/actions/runs/32712734846) reproduced byte-identical clean package and userspace outputs and passed the helper ShellCheck gate
-- Next implementation after this validation: P3.4 router package lifecycle, then P3.5 physical router/VPS acceptance
+- Next gate: run the P3.5 physical router/VPS acceptance bundle after the real inventory, independently verified host keys, wired/OOB recovery and external secret delivery are available
 - Branch: `phase/p3-single-awg`, based on closed P2 commit `c5adeae`
 
 ## External gates
 
-- GL-MT6000 hardware smoke, including exact-kernel module/UAPI verification: not-run
-- Router-to-VPS AWG2 handshake: P3 gate
+- GL-MT6000 hardware smoke, including exact-kernel module/UAPI verification and real `routerd` procd/boot/LKG behavior: not-run
+- Router-to-VPS AWG2 handshake and P3.5 physical acceptance: blocked on external inputs
 - Second VPS failover: P9 gate
 - Cisco field test: P7 gate
 
@@ -54,4 +56,4 @@ Release level: P2-software-verified; P3.2/P3.3-software-verified; P3.4/P3.5-open
 
 - P1 software blockers: none
 - P2 software blockers: none
-- P3 still requires the exact GL-MT6000 kernel module/UAPI smoke, router package lifecycle and a real router-to-VPS AWG2 handshake. P2 does not claim hardware compatibility or throughput.
+- P3 still requires the exact GL-MT6000 kernel module/UAPI smoke, real package/procd/boot/LKG lifecycle, persistent router/VPS deployment and a real AWG2 handshake. Package and preflight automation do not claim hardware compatibility, throughput or `single-site core-ready`.

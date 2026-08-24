@@ -1,8 +1,13 @@
 # Home Gateway
 
-Safety-first home gateway control plane for OpenWrt on GL.iNet Flint 2. The deterministic policy engine owns routing decisions; P0 builds only the reproducible foundation and compatibility evidence.
+Safety-first home gateway control plane for OpenWrt on GL.iNet Flint 2. The
+deterministic policy engine owns routing decisions and keeps VPN-class traffic
+fail-closed.
 
-Current phase: P0 Foundation and Compatibility.
+Current phase: P3 Single-server AmneziaWG. P3.4 covers the reproducible
+`routerd` package boundary. P3.5 remains a physical router/VPS gate; repository
+tests do not prove ARM execution, procd boot behavior, LKG recovery or a live
+AWG2 handshake.
 
 ## Safety invariants
 
@@ -33,3 +38,6 @@ make PWSH=./.tools/pwsh/pwsh verify
 - [Current status](STATUS.md)
 - [Accepted decisions](DECISIONS.md)
 - [Security model](docs/SECURITY.md)
+- [Compatibility evidence](docs/COMPATIBILITY.md)
+- [Acceptance matrix](docs/ACCEPTANCE_MATRIX.md)
+- [P3 physical acceptance runbook](docs/P3_PHYSICAL_ACCEPTANCE.md)

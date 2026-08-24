@@ -16,4 +16,6 @@
 *.test
 inventory.local.yaml
 routerd.local.yaml
+p3-acceptance.local.json
+known_hosts.local
 secrets.local/

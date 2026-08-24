@@ -22,13 +22,23 @@ jobs:
           cache: true
       - shell: pwsh
         run: ./scripts/bootstrap-dev.ps1 -IncludePowerShell
-      - run: sudo apt-get update && sudo apt-get install --yes curl jq make tar xz-utils zstd
+      - name: Verify routerd package contracts
+        shell: pwsh
+        run: |
+          Import-Module ./.tools/modules/Pester/6.0.0/Pester.psd1 -Force
+          $configuration = New-PesterConfiguration
+          $configuration.Run.Path = './tests/openwrt-sdk/RouterdPackage.Tests.ps1'
+          $configuration.Run.Exit = $true
+          $configuration.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $configuration
+      - run: sudo apt-get update && sudo apt-get install --yes binutils curl file jq make tar xz-utils zstd
       - name: Build and compare clean outputs
         shell: sh
         run: |
           tests/openwrt-sdk/assert-awg2-helper.sh
           sh tests/openwrt-sdk/assert-apk-dependencies.sh
           sh tests/openwrt-sdk/assert-awg2-smoke-rollback.sh
+          sh -n tests/openwrt-sdk/assert-routerd-lifecycle.sh
           OUTPUT_DIR="$PWD/artifacts/openwrt-run1" scripts/openwrt/build-packages.sh
           rm -rf .cache/openwrt-sdk
           OUTPUT_DIR="$PWD/artifacts/openwrt-run2" scripts/openwrt/build-packages.sh
@@ -37,6 +47,7 @@ jobs:
           OUTPUT_DIR="$PWD/artifacts/awg-go-run2" scripts/openwrt/build-amneziawg-go.sh
           diff -ru --no-dereference artifacts/awg-go-run1 artifacts/awg-go-run2
           .tools/bin/shellcheck packaging/openwrt-awg2/amneziawg-tools/files/amneziawg.sh scripts/openwrt/*.sh tests/network-ns/*.sh tests/network-ns/lib/*.sh tests/openwrt-sdk/*.sh tests/openwrt-qemu/*.sh
+          .tools/bin/shellcheck -e SC2034 packaging/openwrt-apk/routerd/files/routerd.init
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: verified-openwrt-outputs

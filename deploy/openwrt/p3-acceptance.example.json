@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "sanitized_example": true,
+  "router": {
+    "host": "router.example.invalid",
+    "ssh_user": "root",
+    "board_name": "glinet,gl-mt6000",
+    "openwrt_release": "25.12.5",
+    "openwrt_revision": "r33051-f5dae5ece4",
+    "package_arch": "aarch64_cortex-a53",
+    "kernel_version": "6.12.94",
+    "kernel_abi": "kernel-6.12.94~5a6c1f71be683ae9980b15d3ce73e24d-r1",
+    "management_ipv4": "192.0.2.1",
+    "wan_device": "wan"
+  },
+  "vps": {
+    "endpoint_ipv4": "203.0.113.10",
+    "endpoint_port": 51820,
+    "expected_country": "NL"
+  },
+  "tunnel": {
+    "interface": "awg0",
+    "expected_up": false,
+    "max_handshake_age_seconds": 180
+  },
+  "recovery": {
+    "wired_management_verified": false,
+    "factory_image_verified": false,
+    "vps_console_verified": false
+  }
+}

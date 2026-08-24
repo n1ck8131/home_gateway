@@ -41,17 +41,18 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 | Hash-verified non-secret VPS bundle, deployment compensation and transport health contracts | automated-passed | [CI run 32712734828](https://github.com/n1ck8131/home_gateway/actions/runs/32712734828) passed the complete Go and repository verification suites for commit `52a896717e0f01359d6eaedb4db9d9e949ac5000` |
 | Strict OpenWrt peer/UCI plan, WAN endpoint host route, stale-secret cleanup and P2 fail-closed binding | automated-passed | The same CI run passed the OpenWrt plan/saga regressions, Linux race suite and network namespace evidence gate |
 | AWG2 package and netifd-helper reproducibility | automated-passed | [OpenWrt SDK run 32712734846](https://github.com/n1ck8131/home_gateway/actions/runs/32712734846) built the package and userspace trees twice, compared them byte-identical and passed the helper ShellCheck gate |
-| P2 rollback and last-known-good regression under the P3 changes | automated-passed | [OpenWrt QEMU run 32712734929](https://github.com/n1ck8131/home_gateway/actions/runs/32712734929) passed the pinned OpenWrt rollback and recovery suite |
-| Static ARM64 `routerd` APK and reproducible SDK output | automated-passed | P3.4 validates pinned Go provenance, static AArch64 ELF metadata, exact APK identity/payload/maintainer scripts and two byte-identical clean SDK output trees |
-| Isolated APK install, r1-to-r2 upgrade, remove and unowned state preservation | automated-passed | SDK-host `apk --root --no-network --no-scripts` checks owned file replacement/removal while preserving mock UCI and dataplane state; package scripts are inspected but not executed on ARM |
-| Strict read-only P3.5 preflight and redacted evidence contract | automated-passed | Pester fake-transport tests cover sanitized-input rejection, recovery gates, strict host keys, fixed read-only SSH argv, route invariants and fresh/stale/wrong-endpoint handshake behavior; no real SSH was run |
+| P2 rollback and last-known-good regression under the P3 changes | automated-passed | [OpenWrt QEMU run 32728418833](https://github.com/n1ck8131/home_gateway/actions/runs/32728418833) passed the pinned OpenWrt rollback and recovery suite for commit `9c5903c3ff1d474a3112a20d784d9ab128afad1a` |
+| Static ARM64 `routerd` APK and reproducible SDK output | automated-passed | [OpenWrt SDK run 32728418835](https://github.com/n1ck8131/home_gateway/actions/runs/32728418835) validated pinned Go provenance, static AArch64 ELF metadata, exact APK identity/payload/maintainer scripts and two byte-identical clean SDK output trees |
+| Isolated APK install, r1-to-r2 upgrade, remove and unowned state preservation | automated-passed | The same SDK run exercised non-root `apk --root --usermode --no-network --no-scripts` install/upgrade and guarded remove while preserving mock UCI and dataplane state; package scripts were inspected but not executed on ARM |
+| Strict read-only P3.5 preflight and redacted evidence contract | automated-passed | [CI run 32728418853](https://github.com/n1ck8131/home_gateway/actions/runs/32728418853) passed Pester fake-transport coverage for sanitized-input rejection, recovery gates, strict host keys, fixed read-only SSH argv, route invariants and fresh/stale/wrong-endpoint handshake behavior; no real SSH was run |
 | Exact GL-MT6000 kernel module/UAPI | hardware-not-run | P3.5 requires the resettable target router, exact firmware/kernel and wired recovery path |
 | Real `routerd` ARM/procd/boot/LKG lifecycle | hardware-not-run | Static init metadata and isolated host-root package operations do not execute the ARM binary or OpenWrt procd/boot recovery path |
 | Live VPS hardening and router-to-VPS AWG2 handshake | hardware-not-run | P3.5 requires approved inventory, strict host keys, out-of-band recovery and secret material supplied outside Git |
 
 P3.2 and P3.3 are complete for their software-contract scope at commit
 `52a896717e0f01359d6eaedb4db9d9e949ac5000`. P3.4 is complete only for its
-package-software boundary, and the P3.5 preflight automation is implemented.
+package-software boundary at commit `9c5903c3ff1d474a3112a20d784d9ab128afad1a`,
+and the P3.5 preflight automation is implemented and hosted-tested there.
 This is not the P3 exit gate: physical package/procd/boot/LKG behavior and the
 complete VPS/router evidence bundle remain open, so the project does not claim
 `single-site core-ready`.

@@ -1,6 +1,6 @@
 # Project Status
 
-Current phase: P2 Production Dataplane complete; P3 next
+Current phase: P3 Single-server AmneziaWG
 Release level: P2-software-verified; P3-hardware-not-run
 
 ## P0A Foundation
@@ -29,6 +29,14 @@ Release level: P2-software-verified; P3-hardware-not-run
 - Local evidence on 2026-08-24: full Windows verification and focused Go tests passed with no callable Go vulnerabilities; the Ubuntu 24.04 network namespace suite passed all traffic assertions and 20 tunnel fault cycles; the pinned OpenWrt 25.12.5 QEMU suite passed validation faults, post-check rollback, watchdog rollback, crash recovery and reboot/LKG reconciliation
 - Hosted evidence for commit `150ffffb13bb81d83c3425146e1604368ea7eda2`: [CI run 32672264290](https://github.com/n1ck8131/home_gateway/actions/runs/32672264290) passed Windows/Linux verification, Linux race tests and the `network-ns-evidence` gate; [OpenWrt QEMU run 32672264286](https://github.com/n1ck8131/home_gateway/actions/runs/32672264286) passed with `openwrt-qemu-evidence`; [OpenWrt SDK run 32672264264](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264) reproduced the pinned package/userspace outputs and ShellCheck gate
 - Branch: `phase/p2-dataplane`, based on completed `phase/p1-policy-core`
+
+## P3 Single-server AmneziaWG
+
+- State: started; physical gates not run
+- Plan: [P3 single-server AmneziaWG implementation plan](docs/superpowers/plans/2026-08-24-p03-single-awg.md)
+- First slice: `server-agent health --json` provides process-scoped liveness only; it does not claim AWG, VPS or tunnel health and exposes no network listener
+- Next implementation: pinned idempotent VPS deployment and real AWG health, followed by GL-MT6000 peer/package integration
+- Branch: `phase/p3-single-awg`, based on closed P2 commit `c5adeae`
 
 ## External gates
 

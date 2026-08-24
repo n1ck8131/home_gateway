@@ -2,6 +2,11 @@
 
 Status: Completed on 2026-08-24 with the DNS capability amendment below.
 
+Hosted closure evidence for commit `150ffffb13bb81d83c3425146e1604368ea7eda2`:
+[CI](https://github.com/n1ck8131/home_gateway/actions/runs/32672264290),
+[OpenWrt QEMU](https://github.com/n1ck8131/home_gateway/actions/runs/32672264286), and
+[OpenWrt SDK](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264).
+
 ## Goal
 
 Implement the production routing backend that consumes the deterministic P1

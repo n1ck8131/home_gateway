@@ -26,13 +26,13 @@ P1 is complete for its pure software scope. DNS rendering/application, packet-po
 
 | Gate | State | Evidence |
 |---|---|---|
-| Deterministic nft, policy-routing and suffix-dnsmasq rendering | local-passed | Focused Go tests cover byte stability, nested suffix memberships, ownership, IPv4/IPv6 parity and fail-closed routes |
-| Exact and wildcard domain adapter boundary | local-passed | The renderer and production controller reject unsupported matches before transaction staging; ADR-0010 records the hostname-aware adapter requirement |
-| Transactional apply, commit-confirm and last-known-good recovery | local-passed | State-machine tests and OpenWrt QEMU cover invalid candidates, post-check rollback, watchdog expiry, crash recovery and reboot reconciliation |
-| Linux network namespace safety matrix | local-passed | Ubuntu 24.04 suite passed the traffic matrix, real dnsmasq/nft suffix DNS checks and 20 consecutive tunnel fault cycles on 2026-08-24 |
-| OpenWrt x86_64 QEMU dataplane smoke | local-passed | Pinned OpenWrt 25.12.5 suite passed package/config, validation, rollback and reboot/LKG checks on 2026-08-24 |
+| Deterministic nft, policy-routing and suffix-dnsmasq rendering | automated-passed | [CI run 32672264290](https://github.com/n1ck8131/home_gateway/actions/runs/32672264290) passed Windows/Linux verification and Linux race tests for commit `150ffffb13bb81d83c3425146e1604368ea7eda2` |
+| Exact and wildcard domain adapter boundary | automated-passed | The same CI run proves rejection before transaction staging; ADR-0010 records the hostname-aware adapter requirement |
+| Transactional apply, commit-confirm and last-known-good recovery | automated-passed | [CI run 32672264290](https://github.com/n1ck8131/home_gateway/actions/runs/32672264290) and [OpenWrt QEMU run 32672264286](https://github.com/n1ck8131/home_gateway/actions/runs/32672264286) cover invalid candidates, post-check rollback, watchdog expiry, crash recovery and reboot reconciliation |
+| Linux network namespace safety matrix | automated-passed | CI artifact `network-ns-evidence` records the Ubuntu 24.04 traffic matrix, real dnsmasq/nft suffix DNS checks and 20 consecutive tunnel fault cycles |
+| OpenWrt x86_64 QEMU dataplane smoke | automated-passed | QEMU artifact `openwrt-qemu-evidence` records pinned OpenWrt 25.12.5 package/config, validation, rollback and reboot/LKG checks |
 
-P2 is complete for its software and emulated OpenWrt scope. P3 owns physical GL-MT6000, exact-kernel AWG2 and router-to-VPS evidence.
+P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13bb81d83c3425146e1604368ea7eda2`. [OpenWrt SDK run 32672264264](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264) also passed the pinned reproducibility and ShellCheck regression. P3 owns physical GL-MT6000, exact-kernel AWG2 and router-to-VPS evidence.
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|

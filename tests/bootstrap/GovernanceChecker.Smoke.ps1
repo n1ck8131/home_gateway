@@ -24,7 +24,8 @@ $adrPaths = @(
     'docs/adr/ADR-0007-mobile-peer-lifecycle.md',
     'docs/adr/ADR-0008-cisco-discovery.md',
     'docs/adr/ADR-0009-supply-chain-signing.md',
-    'docs/adr/ADR-0010-dnsmasq-domain-match-capability.md'
+    'docs/adr/ADR-0010-dnsmasq-domain-match-capability.md',
+    'docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md'
 )
 $encoding = New-Object System.Text.UTF8Encoding($false)
 $sectionSign = [char]0x00A7

@@ -1,8 +1,8 @@
 # Home Gateway
 
-Safety-first home gateway control plane for OpenWrt on GL.iNet Flint 2. The deterministic policy engine owns routing decisions; P0 builds only the reproducible foundation and compatibility evidence.
+Safety-first selective-routing control plane. It runs first on the current Windows PC with an imported RedShield WireGuard/AmneziaWG tunnel, moves to a self-hosted VPN after the PC pilot is stable, and migrates last to OpenWrt on GL.iNet Flint 2.
 
-Current phase: P0 Foundation and Compatibility.
+Current phase: P3 RedShield-backed Windows pilot. P2 software and emulated dataplane evidence is complete; no P3 live network mutation has been performed.
 
 ## Safety invariants
 
@@ -30,6 +30,7 @@ make PWSH=./.tools/pwsh/pwsh verify
 
 - [Specification](SPEC.md)
 - [Development plan](PLAN.md)
+- [Active P3 implementation plan](docs/superpowers/plans/2026-08-24-p03-redshield-windows.md)
 - [Current status](STATUS.md)
 - [Accepted decisions](DECISIONS.md)
 - [Security model](docs/SECURITY.md)

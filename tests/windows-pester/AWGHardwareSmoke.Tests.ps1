@@ -228,16 +228,21 @@ Describe 'rollback-safe AWG2 hardware smoke' {
         Clear-Content -LiteralPath $script:KnownHosts
         $emptyPath = Join-Path $TestDrive 'no-transport'
         New-Item -ItemType Directory $emptyPath | Out-Null
+        $stdout = Join-Path $TestDrive 'empty-known-hosts.stdout'
+        $stderr = Join-Path $TestDrive 'empty-known-hosts.stderr'
         $priorPath = $env:PATH
         try {
             $env:PATH = $emptyPath
-            $output = @(& $script:Pwsh -NoProfile -File $script:TestWrapperPath -RouterHost 'router.test' -PackageDirectory $script:Packages -KnownHostsFile $script:KnownHosts 2>&1)
-            $exitCode = $LASTEXITCODE
+            $process = & $script:InvokeChildPowerShell -Arguments @(
+                '-NoProfile', '-File', $script:TestWrapperPath,
+                '-RouterHost', 'router.test', '-PackageDirectory', $script:Packages,
+                '-KnownHostsFile', $script:KnownHosts
+            ) -Stdout $stdout -Stderr $stderr
         } finally {
             $env:PATH = $priorPath
         }
-        $exitCode | Should -Not -Be 0
-        ($output -join [Environment]::NewLine) | Should -Match 'non-empty regular file'
+        $process.ExitCode | Should -Not -Be 0
+        $process.Output | Should -Match 'non-empty regular file'
     }
 
     It 'rejects a reparse point in the host-key trust path before SSH' {
@@ -255,16 +260,21 @@ Describe 'rollback-safe AWG2 hardware smoke' {
         }
         $emptyPath = Join-Path $TestDrive 'reparse-no-transport'
         New-Item -ItemType Directory $emptyPath | Out-Null
+        $stdout = Join-Path $TestDrive 'reparse-known-hosts.stdout'
+        $stderr = Join-Path $TestDrive 'reparse-known-hosts.stderr'
         $priorPath = $env:PATH
         try {
             $env:PATH = $emptyPath
-            $output = @(& $script:Pwsh -NoProfile -File $script:TestWrapperPath -RouterHost 'router.test' -PackageDirectory $script:Packages -KnownHostsFile (Join-Path $linkedDirectory 'known_hosts') 2>&1)
-            $exitCode = $LASTEXITCODE
+            $process = & $script:InvokeChildPowerShell -Arguments @(
+                '-NoProfile', '-File', $script:TestWrapperPath,
+                '-RouterHost', 'router.test', '-PackageDirectory', $script:Packages,
+                '-KnownHostsFile', (Join-Path $linkedDirectory 'known_hosts')
+            ) -Stdout $stdout -Stderr $stderr
         } finally {
             $env:PATH = $priorPath
         }
-        $exitCode | Should -Not -Be 0
-        ($output -join [Environment]::NewLine) | Should -Match 'symlink or reparse-point path component'
+        $process.ExitCode | Should -Not -Be 0
+        $process.Output | Should -Match 'symlink or reparse-point path component'
     }
 
     It 'runs only a strict read-only preflight without ConfirmInstall' {

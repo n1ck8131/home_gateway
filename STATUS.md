@@ -1,7 +1,7 @@
 # Project Status
 
-Current phase: P2 Production Dataplane complete; P3 next
-Release level: P2-software-verified; P3-hardware-not-run
+Current phase: P3 RedShield-backed Windows pilot in progress
+Release level: P2-software-verified; P3-read-only-baseline
 
 ## P0A Foundation
 
@@ -30,10 +30,24 @@ Release level: P2-software-verified; P3-hardware-not-run
 - Hosted evidence for commit `150ffffb13bb81d83c3425146e1604368ea7eda2`: [CI run 32672264290](https://github.com/n1ck8131/home_gateway/actions/runs/32672264290) passed Windows/Linux verification, Linux race tests and the `network-ns-evidence` gate; [OpenWrt QEMU run 32672264286](https://github.com/n1ck8131/home_gateway/actions/runs/32672264286) passed with `openwrt-qemu-evidence`; [OpenWrt SDK run 32672264264](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264) reproduced the pinned package/userspace outputs and ShellCheck gate
 - Branch: `phase/p2-dataplane`, based on completed `phase/p1-policy-core`
 
+## P3 RedShield-backed Windows pilot
+
+- State: P3.1 and P3.2 complete; P3.3 in progress; no live network mutation performed
+- Plan: [P3 RedShield-backed Windows implementation plan](docs/superpowers/plans/2026-08-24-p03-redshield-windows.md)
+- Architecture: [ADR-0011](docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md) keeps policy/API semantics independent from the Windows/OpenWrt platform and RedShield/self-hosted tunnel backends
+- Real-config qualification on 2026-08-24: the user-supplied external `.conf` passed the strict one-interface/one-peer AmneziaWG importer with IPv4/IPv6 full-tunnel capability; key material was neither printed nor copied into repository evidence
+- Latest read-only Windows preflight on 2026-08-24: one active WireGuard/Amnezia adapter matches both imported interface addresses, a physical endpoint host route was observed, and IPv4/IPv6 fail-closed prerequisites were identified. The command returned the expected blocked exit code `3`
+- The preflight remains blocked because the current collector intentionally marks its route snapshot non-authoritative, does not yet inspect effective DNS/NRPT policy, and cannot authoritatively observe provider tunnel status. Apply is unavailable
+- Cisco was active in an earlier read-only snapshot but inactive in the latest one. Its configuration, profile, service and routes were not changed; Cisco preservation field evidence remains open
+- The external config inherits a broad read permission. It is acceptable for the bounded interactive inspection, but must be tightened before any unattended service can consume the file
+- Local software evidence: full Go tests, 41 Pester tests, format, vet, staticcheck, gosec, govulncheck, repository and working-tree secret scans, governance smoke and reproducible four-target build passed
+- Branch: `phase/p3-redshield-windows`, based on completed `phase/p2-dataplane`
+
 ## External gates
 
-- GL-MT6000 hardware smoke, including exact-kernel module/UAPI verification: not-run
-- Router-to-VPS AWG2 handshake: P3 gate
+- P3 bounded live Windows canary and route/firewall/DNS mutation: not-run; requires offline rollback evidence and separate confirmation
+- Own VPS: not available; first required by P8 and not a P3-P7 blocker
+- GL-MT6000 hardware smoke, exact-kernel module/UAPI and router-to-VPS handshake: not-run; P12 gates and not P3-P11 blockers
 - Second VPS failover: P9 gate
 - Cisco field test: P7 gate
 
@@ -41,4 +55,6 @@ Release level: P2-software-verified; P3-hardware-not-run
 
 - P1 software blockers: none
 - P2 software blockers: none
-- P3 still requires the exact GL-MT6000 kernel module/UAPI smoke, router package lifecycle and a real router-to-VPS AWG2 handshake. P2 does not claim hardware compatibility or throughput.
+- P3.3 still requires authoritative structured `Get-NetRoute`, DNS/NRPT and provider-status inventory, stable adapter identities and trusted System32/module resolution. P3.4 then owns project-marked apply, snapshot, rollback and recovery; none of these mutations is implemented or enabled yet.
+- `pc-core-ready` remains open until real direct/RedShield/Cisco, IPv4/IPv6 fail-closed, restart/recovery and full uninstall restoration evidence passes on the current Windows PC.
+- P2 does not claim Windows field acceptance, Flint 2 hardware compatibility or throughput.

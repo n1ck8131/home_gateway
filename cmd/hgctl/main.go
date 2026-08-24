@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"github.com/vsevo/home-gateway/internal/versioncmd"
+	"github.com/vsevo/home-gateway/internal/hgctlcmd"
 )
 
 func main() {
-	os.Exit(versioncmd.Run("hgctl", os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(hgctlcmd.Run("hgctl", os.Args[1:], os.Stdout, os.Stderr))
 }

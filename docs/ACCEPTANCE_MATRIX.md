@@ -8,8 +8,8 @@ Each requirement has one owning phase and one evidence type.
 |---|---|---|
 | Foundation verification | automated-passed | [CI run 29273568922](https://github.com/n1ck8131/home_gateway/actions/runs/29273568922): Linux `make verify`, `go test -race`, `CAP_NET_ADMIN` network prerequisite, Windows bootstrap, and Windows dev verification passed for commit `cf1773955e3d796e425cb6d6b75053928d77de61` |
 | OpenWrt compatibility build | automated-passed | [SDK run 29273568884](https://github.com/n1ck8131/home_gateway/actions/runs/29273568884): pinned packages and `amneziawg-go` built twice from clean output trees and compared byte-identical for commit `cf1773955e3d796e425cb6d6b75053928d77de61`; durable output hashes are recorded in `docs/COMPATIBILITY.md` |
-| Exact Flint 2 kernel module/UAPI | hardware-not-run | P3 gate; P0 software evidence does not prove load/runtime compatibility |
-| Real router-to-VPS AWG2 handshake | hardware-not-run | P3 gate |
+| Exact Flint 2 kernel module/UAPI | hardware-not-run | P12 gate; P0 software evidence does not prove load/runtime compatibility |
+| Real router-to-VPS AWG2 handshake | hardware-not-run | P12 gate after the P8 self-hosted backend exists |
 
 P0 is complete for its software scope. The hardware gates remain open and no P0 claim is made for hardware success or 300 Mbps throughput.
 
@@ -32,7 +32,19 @@ P1 is complete for its pure software scope. DNS rendering/application, packet-po
 | Linux network namespace safety matrix | automated-passed | CI artifact `network-ns-evidence` records the Ubuntu 24.04 traffic matrix, real dnsmasq/nft suffix DNS checks and 20 consecutive tunnel fault cycles |
 | OpenWrt x86_64 QEMU dataplane smoke | automated-passed | QEMU artifact `openwrt-qemu-evidence` records pinned OpenWrt 25.12.5 package/config, validation, rollback and reboot/LKG checks |
 
-P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13bb81d83c3425146e1604368ea7eda2`. [OpenWrt SDK run 32672264264](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264) also passed the pinned reproducibility and ShellCheck regression. P3 owns physical GL-MT6000, exact-kernel AWG2 and router-to-VPS evidence.
+P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13bb81d83c3425146e1604368ea7eda2`. [OpenWrt SDK run 32672264264](https://github.com/n1ck8131/home_gateway/actions/runs/32672264264) also passed the pinned reproducibility and ShellCheck regression. P3 reuses this safety model on the current Windows PC with RedShield. P12 owns physical GL-MT6000, exact-kernel AWG2 and router-to-VPS evidence.
+
+## P3 Windows/RedShield foundation
+
+| Gate | State | Evidence |
+|---|---|---|
+| Provider-neutral tunnel contract and strict RedShield importer | local-verified | Full Go/Pester tests, format, static analysis, security scans and reproducible build pass. Synthetic WireGuard/AmneziaWG, unsafe-input and redaction tests pass; path validation and post-read stability checks are implemented, and the external config is never copied into repository fixtures |
+| User-supplied RedShield config qualification | read-only-passed | One interface, one peer, IPv4/IPv6 full-tunnel and AWG capability were recognized without printing keys or retaining them in repository/evidence |
+| Native Windows preflight baseline | baseline-observed | The imported addresses match one active WireGuard/Amnezia adapter; a physical endpoint route and both IP-family prerequisites were observed. The preflight returned blocked exit code `3` |
+| Authoritative routes, effective DNS/NRPT and provider tunnel status | in-progress | The current collector deliberately marks these inputs unobserved/non-authoritative, so readiness cannot be reported |
+| Route/firewall/DNS apply or live canary | not-run | P3.4/P3.5 gates; requires offline rollback evidence and separate confirmation before any live mutation |
+
+P3.1 and P3.2 are complete. P3.3 has a fail-closed read-only foundation but remains open; no Windows field-acceptance or `pc-core-ready` claim is made.
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
@@ -52,35 +64,37 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
-| Ordinary Russian site uses WAN IP | P3 | hardware |
-| `vpn` domain uses VPN IP | P3 | hardware |
+| Ordinary direct-class site uses the physical Windows egress | P3 | windows-field |
+| `vpn` domain uses RedShield egress | P3 | windows-field |
 | Manual `direct` overrides an external VPN source | P2 | automated |
 | `auto-cisco` applies only to `work-pc` | P7 | external-service |
 | Cisco gateway always uses WAN | P7 | field-soak |
 | Internal work portal remains available through Cisco | P7 | external-service |
 | Public work portal sees Russian WAN or corporate egress | P7 | external-service |
 | VPS switching does not break Cisco by changing its egress | P9 | field-soak |
-| HTTP/3 and UDP route correctly | P3 | hardware |
+| HTTP/3 and UDP route correctly | P3 | windows-field |
 
 ## §30.2 Failure modes
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
-| AWG stop does not leak VPN domains to WAN | P3 | hardware |
+| RedShield tunnel loss does not leak VPN domains to direct egress | P3 | windows-field |
 | Direct and Cisco traffic continue during AWG failure | P7 | external-service |
 | Auto-failover selects a healthy reserve server | P9 | external-service |
 | Failover does not flap | P9 | field-soak |
 | Corrupted list update is rejected | P6 | automated |
 | Last-known-good source remains active | P6 | automated |
 | Invalid nft or DNS configuration rolls back automatically | P2 | automated |
-| Router reboot restores the last applied revision | P3 | hardware |
+| Windows restart restores the last confirmed revision | P3 | windows-field |
+| Router reboot restores the last applied revision | P12 | hardware |
 
 ## §30.3 IPv6 and DNS
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
-| VPN domains have no IPv6 leak | P3 | hardware |
-| Client DNS passes through the router | P3 | hardware |
+| VPN domains have no IPv6 leak on Windows | P3 | windows-field |
+| Windows DNS follows the selected route or fails closed | P3 | windows-field |
+| Client DNS passes through the router | P12 | hardware |
 | A, AAAA and CNAME answers populate sets | P2 | automated |
 | Browser DoH conflict is diagnosed | P5 | automated |
 | Mobile full tunnel does not use mobile-operator DNS | P8 | hardware |
@@ -112,9 +126,9 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
 | Panel is unavailable from WAN, Guest and VPN peers | P5 | automated |
-| Server admin API does not listen on a public HTTP port | P3 | hardware |
-| SSH password and root login are disabled after bootstrap | P3 | hardware |
-| Support bundle excludes private keys and passwords | P12 | automated |
+| Server admin API does not listen on a public HTTP port | P8 | hardware |
+| SSH password and root login are disabled after bootstrap | P8 | hardware |
+| Support bundle excludes private keys and passwords | P11 | automated |
 | External list input cannot execute commands | P6 | automated |
 | Release artifacts include checksums, signatures and SBOM | P12 | automated |
 
@@ -131,7 +145,7 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|
-| Cisco connection remains stable under router routing | P7 | field-soak |
+| Cisco connection remains stable under Windows selective routing | P7 | field-soak |
 | Cisco endpoint remains direct | P7 | field-soak |
 | Blocked non-work resources use router VPN | P7 | field-soak |
 | Work portals do not see VPN country | P7 | field-soak |

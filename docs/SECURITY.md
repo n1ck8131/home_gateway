@@ -24,6 +24,7 @@ The project treats the following as explicit threats:
 - `routerd` policy and status code is separated from the privileged apply adapter.
 - Router-to-VPS operations cross an authenticated remote boundary and use scoped, allowlisted operations.
 - `cisco-discovery` is a read-only Windows observer with a scoped token and an offline queue.
+- The imported RedShield config is an external provider secret. P3 inspection is local and read-only; provider-side credentials and server management are outside the project trust boundary.
 - External list sources and downloaded artifacts are untrusted until pinned, bounded and verified.
 - Backup destinations are untrusted storage; backup confidentiality comes from `age` encryption.
 
@@ -32,12 +33,14 @@ The project treats the following as explicit threats:
 - Router secret bytes live only under `/etc/routerd/secrets/`; the directory is mode `0700` and files are mode `0600`.
 - Per-server SSH keys are separate credentials and are never embedded in inventory files.
 - Windows enrollment material uses Windows-protected storage rather than repository or configuration files.
+- The source RedShield `.conf` remains outside the repository. Local preflight metadata may contain normalized endpoint/address/DNS properties, but excludes the source path, keys and raw obfuscation values; support evidence redacts endpoint/address values. Later unattended use must copy secret bytes only into Windows-protected storage with a separately tested removal path.
+- The interactive importer rejects UNC/device namespaces, remote or unknown Windows volumes, symlink/reparse traversal and unstable leaf snapshots. Before privileged or unattended consumption it additionally requires restrictive ACLs and handle-based final volume/file identity so snapshot races are outside the service threat boundary.
 - Mobile private keys are one-time delivery material; only public keys and metadata persist.
 - Logs, support bundles, command lines, process lists and Git must not contain secret bytes.
 
 ## Command execution
 
-External commands use `exec.CommandContext` with fixed executable names and fixed argument arrays. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input.
+The P3 read-only collector uses `exec.CommandContext` behind an exact executable/argument allowlist. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input. Before privileged service use, Windows executables must be pinned to trusted System32 paths and the PowerShell module environment must be sanitized.
 
 ## Supply chain controls
 

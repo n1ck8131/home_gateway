@@ -39,7 +39,7 @@
 
 **Interfaces:**
 - Consumes: existing `AddressFamily`, `artifactSet`, `apply.Candidate`, `ManagedRoute` and canary target normalization.
-- Produces: `SinkArtifact`, `SinkRoute`, `SinkState`, `ResolvedRoute`, `sinkTupleKey`, `sinkForVPNRoute`, `apply.Candidate.Sinks`, and a four-file Windows revision manifest.
+- Produces: `SinkArtifact`, `SinkRoute`, `sinkTupleKey`, `sinkForVPNRoute`, `apply.Candidate.Sinks`, and a four-file Windows revision manifest.
 
 - [ ] **Step 1: Write failing schema and planner tests**
 

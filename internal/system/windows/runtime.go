@@ -57,6 +57,7 @@ type NRPTState struct {
 type MutationSnapshot struct {
 	Adapters         []Adapter       `json:"adapters"`
 	Routes           []RouteState    `json:"routes"`
+	Sinks            []SinkState     `json:"sinks"`
 	Firewall         []FirewallState `json:"firewall"`
 	FirewallEnforced bool            `json:"firewall_enforced"`
 	NRPT             []NRPTState     `json:"nrpt"`
@@ -66,6 +67,9 @@ type MutationSnapshot struct {
 // no shell, PowerShell, executable, or live-network implementation.
 type MutationBackend interface {
 	Snapshot(context.Context) (MutationSnapshot, error)
+	PutSink(context.Context, SinkState) error
+	RemoveSink(context.Context, SinkState) error
+	ResolveRoute(context.Context, AddressFamily, string) (ResolvedRoute, error)
 	AddRoute(context.Context, RouteState) error
 	RemoveRoute(context.Context, RouteState) error
 	PutFirewall(context.Context, FirewallState) error
@@ -99,6 +103,7 @@ type Runtime struct {
 type managedSnapshot struct {
 	Version  int             `json:"version"`
 	Routes   []RouteState    `json:"routes"`
+	Sinks    []SinkState     `json:"sinks"`
 	Firewall []FirewallState `json:"firewall"`
 	NRPT     []NRPTState     `json:"nrpt"`
 }
@@ -116,10 +121,13 @@ type manifestEntry struct {
 
 type RecoveryPlan struct {
 	RemoveVPNRoutes int `json:"remove_vpn_routes"`
+	RetainSinks     int `json:"retain_sinks,omitempty"`
+	RemoveSinks     int `json:"remove_sinks,omitempty"`
 	RemoveFirewall  int `json:"remove_firewall"`
 	RemoveDNS       int `json:"remove_dns"`
 	RemoveEndpoints int `json:"remove_endpoint_routes,omitempty"`
 	RestoreRoutes   int `json:"restore_routes,omitempty"`
+	RestoreSinks    int `json:"restore_sinks,omitempty"`
 	RestoreFirewall int `json:"restore_firewall,omitempty"`
 	RestoreDNS      int `json:"restore_dns,omitempty"`
 }
@@ -537,6 +545,11 @@ func (runtime *Runtime) PlanEmergencyDisable(ctx context.Context) (RecoveryPlan,
 			plan.RemoveVPNRoutes++
 		}
 	}
+	for _, sink := range snapshot.Sinks {
+		if sink.Owner == ArtifactOwner {
+			plan.RetainSinks++
+		}
+	}
 	for _, rule := range snapshot.Firewall {
 		if rule.Owner == ArtifactOwner {
 			plan.RemoveFirewall++
@@ -582,7 +595,7 @@ func (runtime *Runtime) PlanFullRestore(ctx context.Context) (RecoveryPlan, erro
 	if err != nil {
 		return RecoveryPlan{}, err
 	}
-	plan := RecoveryPlan{RestoreRoutes: len(before.Routes), RestoreFirewall: len(before.Firewall), RestoreDNS: len(before.NRPT)}
+	plan := RecoveryPlan{RestoreRoutes: len(before.Routes), RestoreSinks: len(before.Sinks), RestoreFirewall: len(before.Firewall), RestoreDNS: len(before.NRPT)}
 	for _, route := range snapshot.Routes {
 		if route.Owner != ArtifactOwner {
 			continue
@@ -593,6 +606,7 @@ func (runtime *Runtime) PlanFullRestore(ctx context.Context) (RecoveryPlan, erro
 			plan.RemoveVPNRoutes++
 		}
 	}
+	plan.RemoveSinks = countOwnedSinks(snapshot.Sinks)
 	plan.RemoveFirewall = countOwnedFirewall(snapshot.Firewall)
 	plan.RemoveDNS = countOwnedNRPT(snapshot.NRPT)
 	return plan, nil
@@ -644,6 +658,21 @@ func (runtime *Runtime) applyArtifacts(ctx context.Context, artifacts artifactSe
 			}
 		}
 	}
+	for _, route := range artifacts.sinks.Routes {
+		if err := runtime.Backend.PutSink(ctx, SinkState{Route: route, Owner: ArtifactOwner, Revision: artifacts.sinks.Revision}); err != nil {
+			return fmt.Errorf("apply structured Windows sink route: %w", err)
+		}
+	}
+	afterSinks, err := runtime.Backend.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect Windows sink state before firewall: %w", err)
+	}
+	if err := runtime.validateCandidateAgainstSnapshot(artifacts, afterSinks); err != nil {
+		return fmt.Errorf("validate Windows sink state before firewall: %w", err)
+	}
+	if err := requireCandidateSinksPresent(afterSinks, artifacts.sinks); err != nil {
+		return err
+	}
 	firewall := make([]FirewallState, 0, len(artifacts.firewall.Rules))
 	for _, rule := range artifacts.firewall.Rules {
 		firewall = append(firewall, FirewallState{Rule: rule, Owner: ArtifactOwner, Revision: artifacts.firewall.Revision})
@@ -661,6 +690,9 @@ func (runtime *Runtime) applyArtifacts(ctx context.Context, artifacts artifactSe
 	if err := runtime.validateCandidateAgainstSnapshot(artifacts, afterFirewall); err != nil {
 		return fmt.Errorf("validate Windows fail-closed state before VPN routes: %w", err)
 	}
+	if err := requireCandidateSinksPresent(afterFirewall, artifacts.sinks); err != nil {
+		return err
+	}
 	if err := requireCandidateFirewallPresent(afterFirewall, artifacts.firewall); err != nil {
 		return err
 	}
@@ -670,6 +702,9 @@ func (runtime *Runtime) applyArtifacts(ctx context.Context, artifacts artifactSe
 				return fmt.Errorf("apply structured VPN-class route: %w", err)
 			}
 		}
+	}
+	if err := runtime.requireRedShieldEffectiveRoutes(ctx, artifacts); err != nil {
+		return err
 	}
 	for _, rule := range artifacts.dns.Rules {
 		if err := runtime.Backend.PutNRPT(ctx, NRPTState{Rule: rule, Owner: ArtifactOwner, Revision: artifacts.dns.Revision}); err != nil {
@@ -685,6 +720,11 @@ func (runtime *Runtime) applyManagedSnapshot(ctx context.Context, snapshot manag
 			if err := runtime.Backend.AddRoute(ctx, route); err != nil {
 				return err
 			}
+		}
+	}
+	for _, sink := range snapshot.Sinks {
+		if err := runtime.Backend.PutSink(ctx, sink); err != nil {
+			return err
 		}
 	}
 	if err := putFirewallStates(ctx, runtime.Backend, snapshot.Firewall); err != nil {
@@ -722,21 +762,28 @@ func (runtime *Runtime) removeAllOwned(ctx context.Context, includeEndpoints boo
 			}
 		}
 	}
+	for _, sink := range snapshot.Sinks {
+		if sink.Owner == ArtifactOwner {
+			if err := runtime.Backend.RemoveSink(ctx, sink); err != nil {
+				return fmt.Errorf("remove owned sink route: %w", err)
+			}
+		}
+	}
 	return nil
 }
 
 func (runtime *Runtime) removeSelectiveOwned(ctx context.Context, snapshot MutationSnapshot) error {
-	for _, rule := range snapshot.NRPT {
-		if rule.Owner == ArtifactOwner {
-			if err := runtime.Backend.RemoveNRPT(ctx, rule); err != nil {
-				return fmt.Errorf("remove owned DNS policy: %w", err)
-			}
-		}
-	}
 	for _, route := range snapshot.Routes {
 		if route.Owner == ArtifactOwner && route.Role == RouteRoleVPNClass {
 			if err := runtime.Backend.RemoveRoute(ctx, route); err != nil {
 				return fmt.Errorf("remove owned VPN-class route: %w", err)
+			}
+		}
+	}
+	for _, rule := range snapshot.NRPT {
+		if rule.Owner == ArtifactOwner {
+			if err := runtime.Backend.RemoveNRPT(ctx, rule); err != nil {
+				return fmt.Errorf("remove owned DNS policy: %w", err)
 			}
 		}
 	}
@@ -768,6 +815,11 @@ func (runtime *Runtime) requireCandidatePresent(ctx context.Context, artifacts a
 			filtered.Firewall = append(filtered.Firewall, state)
 		}
 	}
+	for _, state := range snapshot.Sinks {
+		if state.Owner != ArtifactOwner || state.Revision == artifacts.sinks.Revision {
+			filtered.Sinks = append(filtered.Sinks, state)
+		}
+	}
 	for _, state := range snapshot.NRPT {
 		if state.Owner != ArtifactOwner || state.Revision == artifacts.dns.Revision {
 			filtered.NRPT = append(filtered.NRPT, state)
@@ -788,6 +840,10 @@ func (runtime *Runtime) pruneStaleOwned(ctx context.Context, before MutationSnap
 	desiredDNS := make(map[string]struct{}, len(artifacts.dns.Rules))
 	for _, rule := range artifacts.dns.Rules {
 		desiredDNS[rule.LogicalID] = struct{}{}
+	}
+	desiredSinks := make(map[string]struct{}, len(artifacts.sinks.Routes))
+	for _, route := range artifacts.sinks.Routes {
+		desiredSinks[sinkTupleKey(route)] = struct{}{}
 	}
 	for _, state := range before.NRPT {
 		if state.Owner == ArtifactOwner {
@@ -816,7 +872,19 @@ func (runtime *Runtime) pruneStaleOwned(ctx context.Context, before MutationSnap
 			}
 		}
 	}
-	return removeFirewallStates(ctx, runtime.Backend, staleFirewall)
+	if err := removeFirewallStates(ctx, runtime.Backend, staleFirewall); err != nil {
+		return err
+	}
+	for _, state := range before.Sinks {
+		if state.Owner == ArtifactOwner {
+			if _, retained := desiredSinks[sinkTupleKey(state.Route)]; !retained {
+				if err := runtime.Backend.RemoveSink(ctx, state); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func putFirewallStates(ctx context.Context, backend MutationBackend, states []FirewallState) error {
@@ -1028,16 +1096,32 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 		if route.Role != RouteRoleVPNClass {
 			continue
 		}
-		defaults := fallbackDefaults[route.Family]
-		if len(defaults) == 0 {
-			return errors.New("VPN-class route has no retained fallback default path to fail closed")
-		}
 		for guid := range failClosedAdapters {
 			if !slices.ContainsFunc(artifacts.firewall.Rules, func(rule FirewallRule) bool {
 				return rule.Family == route.Family && rule.RemoteCIDR == route.Destination && rule.InterfaceGUID == guid
 			}) {
 				return errors.New("VPN-class route lacks fail-closed coverage for every stable non-RedShield adapter")
 			}
+		}
+	}
+	for _, sink := range artifacts.sinks.Routes {
+		for _, current := range snapshot.Sinks {
+			if sink.Family == current.Route.Family && sink.Destination == current.Route.Destination && current.Owner != ArtifactOwner {
+				return errors.New("unowned sink route collision detected")
+			}
+		}
+	}
+	for _, current := range snapshot.Sinks {
+		if current.Owner != ArtifactOwner {
+			continue
+		}
+		artifactsForState, exists := runtime.ownedRevisions[current.Revision]
+		if current.Revision == artifacts.sinks.Revision {
+			artifactsForState = artifacts
+			exists = true
+		}
+		if !exists || validateOwnedSinkState(current, artifactsForState) != nil {
+			return errors.New("managed sink ownership collision or drift detected")
 		}
 	}
 	for _, rule := range artifacts.dns.Rules {
@@ -1058,6 +1142,22 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 			if (strings.EqualFold(current.Rule.Namespace, rule.Namespace) || current.Rule.LogicalID == rule.LogicalID) && current.Owner != ArtifactOwner {
 				return errors.New("unowned DNS policy collision detected")
 			}
+		}
+	}
+	return nil
+}
+
+func (runtime *Runtime) requireRedShieldEffectiveRoutes(ctx context.Context, artifacts artifactSet) error {
+	for _, route := range artifacts.routes.Routes {
+		if route.Role != RouteRoleVPNClass {
+			continue
+		}
+		resolved, err := runtime.Backend.ResolveRoute(ctx, route.Family, route.Destination)
+		if err != nil {
+			return fmt.Errorf("resolve effective Windows route for %s: %w", route.Destination, err)
+		}
+		if resolved.NoRoute || resolved.Family != route.Family || resolved.Destination != route.Destination || !strings.EqualFold(resolved.InterfaceGUID, route.InterfaceGUID) || resolved.InterfaceIndex != route.InterfaceIndex {
+			return errors.New("effective Windows route does not select the qualified RedShield interface")
 		}
 	}
 	return nil
@@ -1112,6 +1212,16 @@ func verifyOwnedState(snapshot MutationSnapshot, owned map[string]artifactSet) e
 			return errors.New("reserved route ownership collision or drift detected")
 		}
 	}
+	for _, sink := range snapshot.Sinks {
+		reserved := sink.Route.PolicyStore == SinkPolicyStore && sink.Route.Metric == ReservedSinkMetric || sink.Owner == ArtifactOwner
+		if !reserved {
+			continue
+		}
+		artifacts, ok := owned[sink.Revision]
+		if sink.Owner != ArtifactOwner || !ok || validateOwnedSinkState(sink, artifacts) != nil {
+			return errors.New("sink ownership collision or drift detected")
+		}
+	}
 	for _, state := range snapshot.Firewall {
 		reserved := strings.HasPrefix(state.Rule.Group, ArtifactOwner+"/") || state.Owner == ArtifactOwner
 		if !reserved {
@@ -1140,6 +1250,7 @@ func verifyOwnedStateRecovery(snapshot MutationSnapshot, owned map[string]artifa
 		return verifyOwnedState(snapshot, owned)
 	}
 	pendingRoutes := 0
+	pendingSinks := 0
 	pendingFirewall := 0
 	pendingDNS := 0
 	for _, route := range snapshot.Routes {
@@ -1151,6 +1262,17 @@ func verifyOwnedStateRecovery(snapshot MutationSnapshot, owned map[string]artifa
 		_, guidErr := canonicalGUID(route.InterfaceGUID)
 		if route.Owner != ArtifactOwner || route.Protected || prefixErr != nil || prefix.Bits() == 0 || guidErr != nil || route.InterfaceIndex <= 0 || route.Metric != ReservedRouteMetric || route.PolicyStore != RoutePolicyStore || route.Protocol != RouteProtocol || !route.JournalOwned || route.Role != RouteRoleEndpointDirect && route.Role != RouteRoleVPNClass {
 			return errors.New("incomplete pending revision has an unauthorized route marker")
+		}
+	}
+	for _, state := range snapshot.Sinks {
+		if state.Revision != missingPending {
+			continue
+		}
+		pendingSinks++
+		prefix, prefixErr := parseExplicitPrefix(state.Route.Family, state.Route.Destination)
+		nextHop, nextHopErr := netip.ParseAddr(state.Route.NextHop)
+		if state.Owner != ArtifactOwner || prefixErr != nil || prefix.Bits() != prefix.Addr().BitLen() || nextHopErr != nil || addressFamily(nextHop) != state.Route.Family || !nextHop.IsUnspecified() || state.Route.InterfaceIndex != LoopbackInterfaceIndex || state.Route.Metric != ReservedSinkMetric || state.Route.PolicyStore != SinkPolicyStore || state.Route.Protocol != RouteProtocol || !state.Route.JournalOwned {
+			return errors.New("incomplete pending revision has an unauthorized sink marker")
 		}
 	}
 	for _, state := range snapshot.Firewall {
@@ -1178,14 +1300,31 @@ func verifyOwnedStateRecovery(snapshot MutationSnapshot, owned map[string]artifa
 			return errors.New("incomplete pending revision has an unauthorized DNS marker")
 		}
 	}
-	if pendingRoutes > maxManagedRoutes || pendingFirewall > maxFirewallRules || pendingDNS > maxDNSRules {
+	if pendingRoutes > maxManagedRoutes || pendingSinks > maxManagedRoutes || pendingFirewall > maxFirewallRules || pendingDNS > maxDNSRules {
 		return errors.New("pending recovery ownership inventory exceeds resource limits")
 	}
 	filtered := snapshot
 	filtered.Routes = slices.DeleteFunc(append([]RouteState(nil), snapshot.Routes...), func(value RouteState) bool { return value.Revision == missingPending })
+	filtered.Sinks = slices.DeleteFunc(append([]SinkState(nil), snapshot.Sinks...), func(value SinkState) bool { return value.Revision == missingPending })
 	filtered.Firewall = slices.DeleteFunc(append([]FirewallState(nil), snapshot.Firewall...), func(value FirewallState) bool { return value.Revision == missingPending })
 	filtered.NRPT = slices.DeleteFunc(append([]NRPTState(nil), snapshot.NRPT...), func(value NRPTState) bool { return value.Revision == missingPending })
 	return verifyOwnedState(filtered, owned)
+}
+
+func validateOwnedSinkState(state SinkState, artifacts artifactSet) error {
+	if state.Owner != ArtifactOwner || state.Revision != artifacts.sinks.Revision || !state.PersistentPresent || !state.ActivePresent {
+		return errors.New("managed sink state lacks exact ownership or store presence")
+	}
+	if _, err := parseExplicitPrefix(state.Route.Family, state.Route.Destination); err != nil {
+		return err
+	}
+	if state.Route.InterfaceIndex != LoopbackInterfaceIndex || state.Route.Metric != ReservedSinkMetric || state.Route.PolicyStore != SinkPolicyStore || state.Route.Protocol != RouteProtocol || !state.Route.JournalOwned {
+		return errors.New("managed sink state has an unsafe tuple")
+	}
+	if !slices.Contains(artifacts.sinks.Routes, state.Route) {
+		return errors.New("managed sink state is outside the owned artifact")
+	}
+	return nil
 }
 
 func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) error {
@@ -1195,6 +1334,10 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 	wantRoutes := make(map[string]ManagedRoute, len(artifacts.routes.Routes))
 	for _, route := range artifacts.routes.Routes {
 		wantRoutes[routeTupleKey(route)] = route
+	}
+	wantSinks := make(map[string]SinkRoute, len(artifacts.sinks.Routes))
+	for _, route := range artifacts.sinks.Routes {
+		wantSinks[sinkTupleKey(route)] = route
 	}
 	wantFirewall := make(map[string]FirewallRule, len(artifacts.firewall.Rules))
 	for _, rule := range artifacts.firewall.Rules {
@@ -1214,6 +1357,18 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 				return errors.New("managed route post-check drift")
 			}
 			delete(wantRoutes, routeTupleKey(route.ManagedRoute))
+		}
+	}
+	for _, state := range snapshot.Sinks {
+		if state.Owner == ArtifactOwner {
+			if state.Revision != artifacts.sinks.Revision {
+				return errors.New("stale managed sink remains after activation")
+			}
+			want, exists := wantSinks[sinkTupleKey(state.Route)]
+			if !exists || want != state.Route || !state.PersistentPresent || !state.ActivePresent {
+				return errors.New("managed sink post-check drift")
+			}
+			delete(wantSinks, sinkTupleKey(state.Route))
 		}
 	}
 	for _, state := range snapshot.Firewall {
@@ -1244,8 +1399,29 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 			delete(wantDNS, state.Rule.LogicalID)
 		}
 	}
-	if len(wantRoutes) != 0 || len(wantFirewall) != 0 || len(wantDNS) != 0 {
+	if len(wantRoutes) != 0 || len(wantSinks) != 0 || len(wantFirewall) != 0 || len(wantDNS) != 0 {
 		return errors.New("managed Windows post-check state is incomplete")
+	}
+	return nil
+}
+
+func requireCandidateSinksPresent(snapshot MutationSnapshot, artifact SinkArtifact) error {
+	want := make(map[string]SinkRoute, len(artifact.Routes))
+	for _, route := range artifact.Routes {
+		want[sinkTupleKey(route)] = route
+	}
+	for _, state := range snapshot.Sinks {
+		if state.Owner != ArtifactOwner || state.Revision != artifact.Revision {
+			continue
+		}
+		route, exists := want[sinkTupleKey(state.Route)]
+		if !exists || route != state.Route || !state.PersistentPresent || !state.ActivePresent {
+			return errors.New("candidate sink pre-route check drift")
+		}
+		delete(want, sinkTupleKey(state.Route))
+	}
+	if len(want) != 0 {
+		return errors.New("candidate sink set is incomplete before firewall")
 	}
 	return nil
 }
@@ -1285,6 +1461,11 @@ func filterManagedSnapshot(snapshot MutationSnapshot) (managedSnapshot, error) {
 			managed.Routes = append(managed.Routes, route)
 		}
 	}
+	for _, sink := range snapshot.Sinks {
+		if sink.Owner == ArtifactOwner {
+			managed.Sinks = append(managed.Sinks, sink)
+		}
+	}
 	for _, rule := range snapshot.Firewall {
 		if rule.Owner == ArtifactOwner {
 			rule.Effective = false
@@ -1303,7 +1484,7 @@ func (runtime *Runtime) validateManagedSnapshot(snapshot managedSnapshot) error 
 	if snapshot.Version != ArtifactVersion {
 		return errors.New("unsupported Windows snapshot version")
 	}
-	if len(snapshot.Routes) > maxManagedRoutes || len(snapshot.Firewall) > maxFirewallRules || len(snapshot.NRPT) > maxDNSRules {
+	if len(snapshot.Routes) > maxManagedRoutes || len(snapshot.Sinks) > maxManagedRoutes || len(snapshot.Firewall) > maxFirewallRules || len(snapshot.NRPT) > maxDNSRules {
 		return errors.New("managed snapshot resource limit exceeded")
 	}
 	seenRoutes := make(map[string]struct{}, len(snapshot.Routes))
@@ -1318,6 +1499,18 @@ func (runtime *Runtime) validateManagedSnapshot(snapshot managedSnapshot) error 
 			return errors.New("managed snapshot contains a duplicate route")
 		}
 		seenRoutes[key] = struct{}{}
+	}
+	seenSinks := make(map[string]struct{}, len(snapshot.Sinks))
+	for _, state := range snapshot.Sinks {
+		artifacts, exists := runtime.ownedRevisions[state.Revision]
+		key := state.Revision + "\x00" + sinkTupleKey(state.Route)
+		if !exists || validateOwnedSinkState(state, artifacts) != nil {
+			return errors.New("managed snapshot contains an invalid or unowned sink")
+		}
+		if _, duplicate := seenSinks[key]; duplicate {
+			return errors.New("managed snapshot contains a duplicate sink")
+		}
+		seenSinks[key] = struct{}{}
 	}
 	seenFirewall := make(map[string]struct{}, len(snapshot.Firewall))
 	for _, state := range snapshot.Firewall {
@@ -1665,6 +1858,10 @@ func countOwnedNRPT(values []NRPTState) int {
 	return len(slices.DeleteFunc(append([]NRPTState(nil), values...), func(value NRPTState) bool { return value.Owner != ArtifactOwner }))
 }
 
+func countOwnedSinks(values []SinkState) int {
+	return len(slices.DeleteFunc(append([]SinkState(nil), values...), func(value SinkState) bool { return value.Owner != ArtifactOwner }))
+}
+
 func countOwnedRoutes(values []RouteState, role string) int {
 	count := 0
 	for _, value := range values {
@@ -1696,14 +1893,19 @@ func managedSnapshotEqual(want managedSnapshot, current MutationSnapshot) bool {
 }
 
 func managedSnapshotsEqual(left, right managedSnapshot) bool {
-	return slices.Equal(snapshotKeys(left.Routes), snapshotKeys(right.Routes)) && slices.Equal(snapshotKeys(left.Firewall), snapshotKeys(right.Firewall)) && slices.Equal(snapshotKeys(left.NRPT), snapshotKeys(right.NRPT))
+	return slices.Equal(snapshotKeys(left.Routes), snapshotKeys(right.Routes)) && slices.Equal(snapshotKeys(left.Sinks), snapshotKeys(right.Sinks)) && slices.Equal(snapshotKeys(left.Firewall), snapshotKeys(right.Firewall)) && slices.Equal(snapshotKeys(left.NRPT), snapshotKeys(right.NRPT))
 }
 
 func foreignKeys(snapshot MutationSnapshot) []string {
-	keys := make([]string, 0, len(snapshot.Routes)+len(snapshot.Firewall)+len(snapshot.NRPT))
+	keys := make([]string, 0, len(snapshot.Routes)+len(snapshot.Sinks)+len(snapshot.Firewall)+len(snapshot.NRPT))
 	for _, value := range snapshot.Routes {
 		if value.Owner != ArtifactOwner {
 			keys = append(keys, "route\x00"+jsonKey(value))
+		}
+	}
+	for _, value := range snapshot.Sinks {
+		if value.Owner != ArtifactOwner {
+			keys = append(keys, "sink\x00"+jsonKey(value))
 		}
 	}
 	for _, value := range snapshot.Firewall {

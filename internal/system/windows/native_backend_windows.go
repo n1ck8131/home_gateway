@@ -656,6 +656,18 @@ func nativeEffectiveNRPTNamespaceAbsent(records []rawNativeEffectiveNRPT, namesp
 	return true
 }
 
+func (backend *nativeMutationBackend) PutSink(context.Context, SinkState) error {
+	return errors.New("native Windows sink mutation is not implemented")
+}
+
+func (backend *nativeMutationBackend) RemoveSink(context.Context, SinkState) error {
+	return errors.New("native Windows sink mutation is not implemented")
+}
+
+func (backend *nativeMutationBackend) ResolveRoute(context.Context, AddressFamily, string) (ResolvedRoute, error) {
+	return ResolvedRoute{}, errors.New("native Windows route resolution is not implemented")
+}
+
 func (backend *nativeMutationBackend) AddRoute(ctx context.Context, state RouteState) error {
 	if err := validateNativeRouteState(state); err != nil {
 		return err

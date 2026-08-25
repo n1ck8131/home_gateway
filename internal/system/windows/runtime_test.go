@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,9 @@ type fakeMutationBackend struct {
 	failCall                string
 	persistentFailCall      string
 	failSnapshotAfterReload bool
+	leaveNextSinkIncomplete bool
+	resolveLoopback         bool
+	resolveAmbiguous        bool
 	snapshotCount           int
 	snapshotHook            func(*fakeMutationBackend, int)
 }
@@ -42,6 +46,66 @@ func (backend *fakeMutationBackend) Snapshot(context.Context) (MutationSnapshot,
 		return MutationSnapshot{}, errors.New("post-check snapshot fault")
 	}
 	return cloneMutationSnapshot(backend.state), nil
+}
+
+func (backend *fakeMutationBackend) PutSink(_ context.Context, state SinkState) error {
+	if err := backend.call("put-sink:" + state.Route.Destination); err != nil {
+		return err
+	}
+	state.PersistentPresent = true
+	state.ActivePresent = true
+	if backend.leaveNextSinkIncomplete {
+		backend.leaveNextSinkIncomplete = false
+		state.ActivePresent = false
+	}
+	for index, current := range backend.state.Sinks {
+		if sinkTupleKey(current.Route) == sinkTupleKey(state.Route) && current.Owner == ArtifactOwner {
+			backend.state.Sinks[index] = state
+			return nil
+		}
+	}
+	backend.state.Sinks = append(backend.state.Sinks, state)
+	return nil
+}
+
+func (backend *fakeMutationBackend) RemoveSink(_ context.Context, state SinkState) error {
+	if err := backend.call("remove-sink:" + state.Route.Destination); err != nil {
+		return err
+	}
+	backend.state.Sinks = slices.DeleteFunc(backend.state.Sinks, func(current SinkState) bool {
+		return current.Owner == state.Owner && current.Revision == state.Revision && sinkTupleKey(current.Route) == sinkTupleKey(state.Route)
+	})
+	return nil
+}
+
+func (backend *fakeMutationBackend) ResolveRoute(_ context.Context, family AddressFamily, destination string) (ResolvedRoute, error) {
+	if err := backend.call("resolve:" + destination); err != nil {
+		return ResolvedRoute{}, err
+	}
+	if backend.resolveAmbiguous {
+		return ResolvedRoute{}, errors.New("ambiguous effective route")
+	}
+	if backend.resolveLoopback {
+		for _, sink := range backend.state.Sinks {
+			if sink.Owner == ArtifactOwner && sink.Route.Family == family && sink.Route.Destination == destination && sink.ActivePresent {
+				backend.calls = append(backend.calls, "resolve-loopback:"+destination)
+				return ResolvedRoute{Family: family, Destination: destination, InterfaceIndex: sink.Route.InterfaceIndex, NextHop: sink.Route.NextHop, RouteMetric: sink.Route.Metric}, nil
+			}
+		}
+	}
+	for _, route := range backend.state.Routes {
+		if route.Owner == ArtifactOwner && route.Role == RouteRoleVPNClass && route.Family == family && route.Destination == destination {
+			backend.calls = append(backend.calls, "resolve-redshield:"+destination)
+			return ResolvedRoute{Family: family, Destination: destination, InterfaceGUID: route.InterfaceGUID, InterfaceIndex: route.InterfaceIndex, NextHop: route.NextHop, RouteMetric: route.Metric}, nil
+		}
+	}
+	for _, sink := range backend.state.Sinks {
+		if sink.Owner == ArtifactOwner && sink.Route.Family == family && sink.Route.Destination == destination && sink.ActivePresent {
+			backend.calls = append(backend.calls, "resolve-loopback:"+destination)
+			return ResolvedRoute{Family: family, Destination: destination, InterfaceIndex: sink.Route.InterfaceIndex, NextHop: sink.Route.NextHop, RouteMetric: sink.Route.Metric}, nil
+		}
+	}
+	return ResolvedRoute{Family: family, Destination: destination, NoRoute: true}, nil
 }
 
 func TestWindowsRuntimeCoversRetainedDownCiscoDefaultPath(t *testing.T) {
@@ -510,24 +574,17 @@ func TestWindowsTransactionOrdersDualStackAndPreservesForeignState(t *testing.T)
 	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err != nil {
 		t.Fatal(err)
 	}
-	assertOrdered(t, backend.calls,
-		"add-route:endpoint-direct:203.0.113.5/32",
-		"add-route:endpoint-direct:2001:db8:ffff::5/128",
-		"put-firewall:"+FirewallRuleName("r1", FamilyIPv4, "198.51.100.53/32", testPhysicalGUID),
-		"put-firewall:"+FirewallRuleName("r1", FamilyIPv6, "2001:db8:100::53/128", testPhysicalGUID),
-		"add-route:vpn-class:198.51.100.53/32",
-		"add-route:vpn-class:2001:db8:100::53/128",
-		"put-nrpt:dns-v4",
-		"put-nrpt:dns-v6",
-	)
+	assertOrderedClasses(t, backend.calls, "put-sink", "put-firewall", "add-vpn-route", "resolve-redshield", "put-nrpt")
 	assertForeignUnchanged(t, before, backend.state)
 }
 
 func TestWindowsTransactionFaultsRestoreBeforeSnapshot(t *testing.T) {
 	faults := []string{
 		"add-route:endpoint-direct:2001:db8:ffff::5/128",
+		"put-sink:2001:db8:100::53/128",
 		"put-firewall:" + FirewallRuleName("r1", FamilyIPv6, "2001:db8:100::53/128", testPhysicalGUID),
 		"add-route:vpn-class:2001:db8:100::53/128",
+		"resolve:2001:db8:100::53/128",
 		"put-nrpt:dns-v6",
 		"reload",
 	}
@@ -556,6 +613,38 @@ func TestWindowsTransactionFaultsRestoreBeforeSnapshot(t *testing.T) {
 		assertManagedEmpty(t, backend.state)
 		assertForeignUnchanged(t, before, backend.state)
 	})
+}
+
+func TestWindowsSinkPostCheckBlocksRoutes(t *testing.T) {
+	backend := newSafeBackend()
+	backend.leaveNextSinkIncomplete = true
+	tx := newWindowsTransaction(t, backend)
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil || !strings.Contains(err.Error(), "sink") {
+		t.Fatalf("incomplete sink post-check error = %v", err)
+	}
+	if slices.ContainsFunc(backend.calls, func(call string) bool { return strings.HasPrefix(call, "add-route:vpn-class:") }) {
+		t.Fatalf("VPN route was installed after incomplete sink: %v", backend.calls)
+	}
+}
+
+func TestWindowsRouteResolutionMustSelectRedShieldBeforeDNS(t *testing.T) {
+	tests := map[string]func(*fakeMutationBackend){
+		"loopback wins": func(backend *fakeMutationBackend) { backend.resolveLoopback = true },
+		"ambiguous":     func(backend *fakeMutationBackend) { backend.resolveAmbiguous = true },
+	}
+	for name, configure := range tests {
+		t.Run(name, func(t *testing.T) {
+			backend := newSafeBackend()
+			configure(backend)
+			tx := newWindowsTransaction(t, backend)
+			if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil || !strings.Contains(err.Error(), "effective") {
+				t.Fatalf("unsafe resolver result = %v", err)
+			}
+			if slices.ContainsFunc(backend.calls, func(call string) bool { return strings.HasPrefix(call, "put-nrpt:") }) {
+				t.Fatalf("DNS was installed before effective-route validation: %v", backend.calls)
+			}
+		})
+	}
 }
 
 func TestWindowsFailedRollbackRemainsDurablyRetryable(t *testing.T) {
@@ -790,6 +879,9 @@ func TestWindowsStalePruneFaultRestoresLKG(t *testing.T) {
 
 func TestWindowsReconcileFaultsRemainRetryable(t *testing.T) {
 	tests := map[string]func(*fakeMutationBackend){
+		"partial sink": func(backend *fakeMutationBackend) {
+			backend.failCall = "put-sink:2001:db8:100::53/128"
+		},
 		"partial route": func(backend *fakeMutationBackend) {
 			backend.failCall = "add-route:vpn-class:2001:db8:100::53/128"
 		},
@@ -837,6 +929,32 @@ func TestWindowsReconcileFaultsRemainRetryable(t *testing.T) {
 			assertForeignUnchanged(t, before, backend.state)
 		})
 	}
+}
+
+func TestWindowsReconcileRestoresTransientRouteBehindPersistentSink(t *testing.T) {
+	backend := newSafeBackend()
+	before := cloneMutationSnapshot(backend.state)
+	root := filepath.Join(t.TempDir(), "runtime")
+	tx := transactionForRoot(root, backend, &mutableClock{now: time.Unix(100, 0).UTC()})
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	backend.state.Routes = slices.DeleteFunc(backend.state.Routes, func(route RouteState) bool {
+		return route.Owner == ArtifactOwner && route.Role == RouteRoleVPNClass
+	})
+	backend.calls = nil
+	restarted := transactionForRoot(root, backend, &mutableClock{now: time.Unix(101, 0).UTC()})
+	if err := restarted.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertOrderedClasses(t, backend.calls, "put-sink", "put-firewall", "add-vpn-route", "resolve-redshield", "put-nrpt")
+	if countOwnedRole(backend.state.Routes, RouteRoleVPNClass) != 2 {
+		t.Fatalf("VPN routes were not restored: %#v", backend.state.Routes)
+	}
+	assertForeignUnchanged(t, before, backend.state)
 }
 
 func TestWindowsPreexistingEndpointAssertionsRemainForeign(t *testing.T) {
@@ -1020,9 +1138,10 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 		t.Fatal(err)
 	}
 	runtime := tx.Runtime.(*Runtime)
-	if plan, err := runtime.PlanEmergencyDisable(context.Background()); err != nil || plan.RemoveVPNRoutes != 2 || plan.RemoveFirewall != 4 || plan.RemoveDNS != 2 || plan.RemoveEndpoints != 0 {
+	if plan, err := runtime.PlanEmergencyDisable(context.Background()); err != nil || plan.RemoveVPNRoutes != 2 || plan.RemoveFirewall != 4 || plan.RemoveDNS != 2 || plan.RemoveEndpoints != 0 || plan.RetainSinks != 2 {
 		t.Fatalf("emergency plan = %#v, %v", plan, err)
 	}
+	sinkKeys := ownedSinkKeys(backend.state.Sinks)
 	if err := tx.EmergencyDisable(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1032,6 +1151,9 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 	}
 	if countOwnedRole(backend.state.Routes, RouteRoleEndpointDirect) != 2 || countOwnedRole(backend.state.Routes, RouteRoleVPNClass) != 0 {
 		t.Fatalf("emergency route state = %#v", backend.state.Routes)
+	}
+	if !slices.Equal(sinkKeys, ownedSinkKeys(backend.state.Sinks)) {
+		t.Fatalf("emergency disable changed sinks: before=%v after=%v", sinkKeys, ownedSinkKeys(backend.state.Sinks))
 	}
 	assertForeignUnchanged(t, before, backend.state)
 	backend.calls = nil
@@ -1048,6 +1170,7 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 	if err := restarted.FullRestore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	assertOrderedClasses(t, backend.calls, "remove-endpoint-route", "remove-sink")
 	journal, err = restarted.Journal.Load()
 	if err != nil || journal.State != apply.StateRestored {
 		t.Fatalf("restored journal = %#v, %v", journal, err)
@@ -1060,6 +1183,24 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 	if err := restarted.Rollback(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	assertManagedEmpty(t, backend.state)
+}
+
+func TestWindowsFullRestoreRemovesSinksAfterAllPolicyState(t *testing.T) {
+	backend := newSafeBackend()
+	root := filepath.Join(t.TempDir(), "runtime")
+	tx := transactionForRoot(root, backend, &mutableClock{now: time.Unix(100, 0).UTC()})
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	backend.calls = nil
+	if err := tx.FullRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertOrderedClasses(t, backend.calls, "remove-vpn-route", "remove-nrpt", "remove-firewall", "remove-endpoint-route", "remove-sink")
 	assertManagedEmpty(t, backend.state)
 }
 
@@ -1114,11 +1255,43 @@ func TestWindowsRecoveryOperationsResumeDurableIntentAfterFault(t *testing.T) {
 	assertForeignUnchanged(t, before, backend.state)
 }
 
+func TestWindowsFullRestoreSinkFaultRemainsRetryable(t *testing.T) {
+	backend := newSafeBackend()
+	root := filepath.Join(t.TempDir(), "runtime")
+	tx := transactionForRoot(root, backend, &mutableClock{now: time.Unix(100, 0).UTC()})
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	backend.failCall = "remove-sink:198.51.100.53/32"
+	if err := tx.FullRestore(context.Background()); err == nil {
+		t.Fatal("sink removal fault did not fail")
+	}
+	journal, err := tx.Journal.Load()
+	if err != nil || journal.State != apply.StateRestoring {
+		t.Fatalf("restore intent = %#v, %v", journal, err)
+	}
+	if countOwnedTestSinks(backend.state.Sinks) == 0 {
+		t.Fatal("failed sink removal discarded durable sink state")
+	}
+	if err := tx.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if countOwnedTestSinks(backend.state.Sinks) != 0 {
+		t.Fatalf("retried full restore left sinks: %#v", backend.state.Sinks)
+	}
+}
+
 func TestWindowsRuntimeRequiresEffectiveManagedNRPTPolicy(t *testing.T) {
 	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
 	snapshot := MutationSnapshot{FirewallEnforced: true}
 	for _, route := range artifacts.routes.Routes {
 		snapshot.Routes = append(snapshot.Routes, RouteState{ManagedRoute: route, Owner: ArtifactOwner, Revision: "r1"})
+	}
+	for _, route := range artifacts.sinks.Routes {
+		snapshot.Sinks = append(snapshot.Sinks, SinkState{Route: route, Owner: ArtifactOwner, Revision: "r1", PersistentPresent: true, ActivePresent: true})
 	}
 	for _, rule := range artifacts.firewall.Rules {
 		snapshot.Firewall = append(snapshot.Firewall, FirewallState{Rule: rule, Owner: ArtifactOwner, Revision: "r1", Effective: true})
@@ -1264,9 +1437,57 @@ func assertOrdered(t *testing.T, calls []string, want ...string) {
 	}
 }
 
+func assertOrderedClasses(t *testing.T, calls []string, want ...string) {
+	t.Helper()
+	classes := make([]string, 0, len(calls))
+	for _, call := range calls {
+		classes = append(classes, callClass(call))
+	}
+	position := -1
+	for _, class := range want {
+		next := slices.Index(classes[position+1:], class)
+		if next < 0 {
+			t.Fatalf("missing ordered class %q in %v", class, calls)
+		}
+		position += next + 1
+	}
+}
+
+func callClass(call string) string {
+	switch {
+	case strings.HasPrefix(call, "put-sink:"):
+		return "put-sink"
+	case strings.HasPrefix(call, "remove-sink:"):
+		return "remove-sink"
+	case strings.HasPrefix(call, "put-firewall:"), strings.HasPrefix(call, "put-firewall-batch:"):
+		return "put-firewall"
+	case strings.HasPrefix(call, "remove-firewall:"), strings.HasPrefix(call, "remove-firewall-batch:"):
+		return "remove-firewall"
+	case strings.HasPrefix(call, "add-route:vpn-class:"):
+		return "add-vpn-route"
+	case strings.HasPrefix(call, "remove-route:vpn-class:"):
+		return "remove-vpn-route"
+	case strings.HasPrefix(call, "add-route:endpoint-direct:"):
+		return "add-endpoint-route"
+	case strings.HasPrefix(call, "remove-route:endpoint-direct:"):
+		return "remove-endpoint-route"
+	case strings.HasPrefix(call, "resolve-redshield:"):
+		return "resolve-redshield"
+	case strings.HasPrefix(call, "resolve:"):
+		return "resolve"
+	case strings.HasPrefix(call, "put-nrpt:"):
+		return "put-nrpt"
+	case strings.HasPrefix(call, "remove-nrpt:"):
+		return "remove-nrpt"
+	default:
+		return call
+	}
+}
+
 func assertManagedEmpty(t *testing.T, snapshot MutationSnapshot) {
 	t.Helper()
 	if slices.ContainsFunc(snapshot.Routes, func(value RouteState) bool { return value.Owner == ArtifactOwner }) ||
+		slices.ContainsFunc(snapshot.Sinks, func(value SinkState) bool { return value.Owner == ArtifactOwner }) ||
 		slices.ContainsFunc(snapshot.Firewall, func(value FirewallState) bool { return value.Owner == ArtifactOwner }) ||
 		slices.ContainsFunc(snapshot.NRPT, func(value NRPTState) bool { return value.Owner == ArtifactOwner }) {
 		t.Fatalf("managed state remains: %#v", snapshot)
@@ -1278,12 +1499,29 @@ func assertForeignUnchanged(t *testing.T, before, after MutationSnapshot) {
 	filter := func(snapshot MutationSnapshot) MutationSnapshot {
 		snapshot = cloneMutationSnapshot(snapshot)
 		snapshot.Routes = slices.DeleteFunc(snapshot.Routes, func(value RouteState) bool { return value.Owner == ArtifactOwner })
+		snapshot.Sinks = slices.DeleteFunc(snapshot.Sinks, func(value SinkState) bool { return value.Owner == ArtifactOwner })
 		snapshot.Firewall = slices.DeleteFunc(snapshot.Firewall, func(value FirewallState) bool { return value.Owner == ArtifactOwner })
 		snapshot.NRPT = slices.DeleteFunc(snapshot.NRPT, func(value NRPTState) bool { return value.Owner == ArtifactOwner })
+		normalizeEmptySnapshotSlices(&snapshot)
 		return snapshot
 	}
 	if !reflect.DeepEqual(filter(before), filter(after)) {
 		t.Fatalf("foreign state changed\nbefore=%#v\nafter=%#v", filter(before), filter(after))
+	}
+}
+
+func normalizeEmptySnapshotSlices(snapshot *MutationSnapshot) {
+	if len(snapshot.Routes) == 0 {
+		snapshot.Routes = nil
+	}
+	if len(snapshot.Sinks) == 0 {
+		snapshot.Sinks = nil
+	}
+	if len(snapshot.Firewall) == 0 {
+		snapshot.Firewall = nil
+	}
+	if len(snapshot.NRPT) == 0 {
+		snapshot.NRPT = nil
 	}
 }
 
@@ -1295,4 +1533,25 @@ func countOwnedRole(routes []RouteState, role string) int {
 		}
 	}
 	return count
+}
+
+func countOwnedTestSinks(sinks []SinkState) int {
+	count := 0
+	for _, sink := range sinks {
+		if sink.Owner == ArtifactOwner {
+			count++
+		}
+	}
+	return count
+}
+
+func ownedSinkKeys(sinks []SinkState) []string {
+	keys := make([]string, 0, len(sinks))
+	for _, sink := range sinks {
+		if sink.Owner == ArtifactOwner {
+			keys = append(keys, sinkTupleKey(sink.Route))
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }

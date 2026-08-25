@@ -3,7 +3,10 @@ package redshield
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,9 +85,34 @@ func (config Config) Metadata() tunnel.Metadata {
 // ImportFile reads a bounded, regular local file. It never accepts config
 // bytes, URLs, commands, or provider key material through process arguments.
 func ImportFile(path string) (Config, error) {
+	return importFile(path, "")
+}
+
+// ImportFilePinned binds validation and parsing to the bytes read from one
+// stable file identity. The digest is deliberately caller-supplied so a
+// protected bootstrap pin can survive path replacement or metadata reuse.
+func ImportFilePinned(path, expectedSHA256 string) (Config, error) {
+	if len(expectedSHA256) != sha256.Size*2 {
+		return Config{}, errors.New("config SHA-256 pin is invalid")
+	}
+	decoded, err := hex.DecodeString(expectedSHA256)
+	if err != nil || hex.EncodeToString(decoded) != expectedSHA256 {
+		return Config{}, errors.New("config SHA-256 pin is invalid")
+	}
+	return importFile(path, expectedSHA256)
+}
+
+func importFile(path, expectedSHA256 string) (Config, error) {
 	data, err := readBoundedRegularFile(path)
 	if err != nil {
 		return Config{}, err
+	}
+	if expectedSHA256 != "" {
+		actual := sha256.Sum256(data)
+		actualText := hex.EncodeToString(actual[:])
+		if subtle.ConstantTimeCompare([]byte(actualText), []byte(expectedSHA256)) != 1 {
+			return Config{}, errors.New("config SHA-256 differs from the protected pin")
+		}
 	}
 	return parse(data)
 }

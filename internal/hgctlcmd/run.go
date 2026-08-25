@@ -8,22 +8,34 @@ import (
 	"time"
 
 	"github.com/vsevo/home-gateway/internal/providers/redshield"
+	"github.com/vsevo/home-gateway/internal/revisions/apply"
 	windowssystem "github.com/vsevo/home-gateway/internal/system/windows"
 	"github.com/vsevo/home-gateway/internal/tunnel"
 	"github.com/vsevo/home-gateway/internal/versioncmd"
 )
 
 type dependencies struct {
-	backend tunnel.Backend
-	collect windowssystem.Collector
-	resolve func(context.Context, string) ([]string, error)
+	backend               tunnel.Backend
+	collect               windowssystem.Collector
+	resolve               func(context.Context, string) ([]string, error)
+	newMutation           func(string) (windowssystem.MutationBackend, error)
+	watchdog              apply.Watchdog
+	validateStateRoot     func(string) error
+	validatePlanStateRoot func(string) error
+	validateConfigSource  func(string) error
+	validateLiveConfig    func(string, string) error
 }
 
 func defaultDependencies() dependencies {
 	return dependencies{
-		backend: redshield.Backend{},
-		collect: windowssystem.NativeCollector{},
-		resolve: windowssystem.ResolveEndpoint,
+		backend:               redshield.Backend{},
+		collect:               windowssystem.NativeCollector{},
+		resolve:               windowssystem.ResolveEndpoint,
+		newMutation:           defaultMutationBackend,
+		validateStateRoot:     windowssystem.ValidateProductionCanaryStateAccessRoot,
+		validatePlanStateRoot: windowssystem.ValidateProductionCanaryPlanRoot,
+		validateConfigSource:  windowssystem.ValidateProductionCanaryConfigSource,
+		validateLiveConfig:    windowssystem.ValidateProductionCanaryInstalledConfigSource,
 	}
 }
 
@@ -34,6 +46,12 @@ func Run(program string, args []string, stdout, stderr io.Writer) int {
 func runWithDependencies(program string, args []string, stdout, stderr io.Writer, dependencies dependencies) int {
 	if len(args) == 2 && args[0] == "version" && args[1] == "--json" {
 		return versioncmd.Run(program, args, stdout, stderr)
+	}
+	if command, ok := parseCanaryLiveCommand(args); ok {
+		return runCanaryLive(command, stdout, stderr, dependencies)
+	}
+	if command, ok := parseCanaryPlanCommand(args); ok {
+		return runCanaryPlan(command, stdout, stderr, dependencies)
 	}
 	configPath, command, ok := parseReadOnlyCommand(args)
 	if !ok {
@@ -106,5 +124,9 @@ func writeUsage(program string, writer io.Writer) {
 	fmt.Fprintf(writer, "usage: %s version --json\n", program)
 	fmt.Fprintf(writer, "       %s redshield inspect --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows preflight --config <path> --json\n", program)
-	fmt.Fprintln(writer, "exit codes: 0=success/read-only-qualified, 1=runtime error, 2=usage error, 3=read-only preflight blocked")
+	fmt.Fprintf(writer, "       %s windows canary plan --config <path> --config-sha256 <lowercase-sha256> --state-root <absolute-path> --revision <id> --target <ip> [--target <ip>] --dns-namespace <suffix> --json\n", program)
+	fmt.Fprintf(writer, "       %s windows canary <apply|confirm> <plan-options> --confirm-live <challenge> --json\n", program)
+	fmt.Fprintf(writer, "       %s windows canary <rollback|recover|emergency-disable|full-restore> --state-root <absolute-path> --confirm-recovery <action-token> --json\n", program)
+	fmt.Fprintf(writer, "       %s windows canary status --state-root <absolute-path> --json\n", program)
+	fmt.Fprintln(writer, "exit codes: 0=success/read-only-qualified, 1=runtime error, 2=usage error, 3=read-only preflight blocked, 4=watchdog rollback")
 }

@@ -56,12 +56,18 @@ type Transaction struct {
 	RecoveryTimeout time.Duration
 	Locker          Locker
 	Watchdog        Watchdog
-	mu              sync.Mutex
-	watchdogMu      sync.Mutex
-	watchdogCancel  func()
+	// RecoveryOnly prevents a transaction constructed from partial crash state
+	// from being reused for forward apply or confirmation.
+	RecoveryOnly   bool
+	mu             sync.Mutex
+	watchdogMu     sync.Mutex
+	watchdogCancel func()
 }
 
 func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultErr error) {
+	if tx.RecoveryOnly {
+		return errors.New("recovery-only transaction cannot apply a candidate")
+	}
 	release, err := tx.acquire(ctx)
 	if err != nil {
 		return err
@@ -108,15 +114,12 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultEr
 	pending.PendingRevision = candidate.RevisionID
 	pending.PendingDeadline = clock.Now().Add(timeout)
 	pending.RollbackResult = ""
-	if err := tx.Journal.Save(pending); err != nil {
-		return err
-	}
 	if err := tx.armWatchdog(pending.PendingDeadline); err != nil {
-		restoreJournalErr := tx.Journal.Save(current)
-		if restoreJournalErr != nil {
-			return errors.Join(fmt.Errorf("arm watchdog: %w", err), fmt.Errorf("restore journal: %w", restoreJournalErr))
-		}
 		return fmt.Errorf("arm watchdog: %w", err)
+	}
+	if err := tx.Journal.Save(pending); err != nil {
+		settleErr := tx.settleWatchdog(current)
+		return errors.Join(err, settleErr)
 	}
 	if err := tx.Runtime.Activate(ctx, candidate); err != nil {
 		return tx.rollbackAfterFailure(pending, "activate", err)
@@ -131,15 +134,34 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultEr
 }
 
 func (tx *Transaction) Confirm() (resultErr error) {
-	release, err := tx.acquire(context.Background())
+	return tx.confirm(context.Background(), nil)
+}
+
+// ConfirmCandidate commits only the exact immutable candidate that the caller
+// has just re-qualified. The revision check and runtime artifact validation are
+// performed while the operation lock is held, so a challenge for one candidate
+// cannot confirm a different pending revision or different bytes published
+// under the same revision ID.
+func (tx *Transaction) ConfirmCandidate(ctx context.Context, candidate Candidate) (resultErr error) {
+	if !validRevisionID(candidate.RevisionID) {
+		return errors.New("invalid revision ID")
+	}
+	return tx.confirm(ctx, &candidate)
+}
+
+func (tx *Transaction) confirm(ctx context.Context, candidate *Candidate) (resultErr error) {
+	if tx.RecoveryOnly {
+		return errors.New("recovery-only transaction cannot confirm a candidate")
+	}
+	release, err := tx.acquire(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		resultErr = errors.Join(resultErr, release())
 	}()
-	if tx.Journal == nil {
-		return errors.New("journal is required")
+	if tx.Journal == nil || candidate != nil && tx.Runtime == nil {
+		return errors.New("journal and candidate validation runtime are required")
 	}
 	journal, err := tx.Journal.Load()
 	if err != nil {
@@ -155,10 +177,30 @@ func (tx *Transaction) Confirm() (resultErr error) {
 	if !clock.Now().Before(journal.PendingDeadline) {
 		return errors.New("confirmation deadline has expired")
 	}
+	if candidate != nil {
+		if journal.PendingRevision != candidate.RevisionID {
+			return errors.New("pending revision does not match the confirmed candidate")
+		}
+		if err := tx.Runtime.Validate(ctx, *candidate); err != nil {
+			return fmt.Errorf("validate confirmed candidate: %w", err)
+		}
+		if !clock.Now().Before(journal.PendingDeadline) {
+			return errors.New("confirmation deadline expired during candidate validation")
+		}
+	}
 	if runtime, ok := tx.Runtime.(CommitRuntime); ok {
-		if err := runtime.Commit(context.Background(), journal.PendingRevision); err != nil {
+		if err := runtime.Commit(ctx, journal.PendingRevision); err != nil {
 			return fmt.Errorf("commit runtime revision pointer: %w", err)
 		}
+	}
+	if !clock.Now().Before(journal.PendingDeadline) {
+		recoveryCtx, cancel := tx.recoveryContext()
+		defer cancel()
+		restoreErr := tx.restore(recoveryCtx, journal, "confirmation deadline")
+		if restoreErr == nil {
+			restoreErr = tx.settleRollbackWatchdog(journal)
+		}
+		return errors.Join(errors.New("confirmation deadline expired during commit"), restoreErr)
 	}
 	journal.State = StateCommitted
 	journal.ActiveRevision = journal.PendingRevision
@@ -168,8 +210,7 @@ func (tx *Transaction) Confirm() (resultErr error) {
 	if err := tx.Journal.Save(journal); err != nil {
 		return err
 	}
-	tx.cancelWatchdog()
-	return nil
+	return tx.settleWatchdog(journal)
 }
 
 func (tx *Transaction) Rollback(_ context.Context) (resultErr error) {
@@ -189,6 +230,14 @@ func (tx *Transaction) Rollback(_ context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
+	// The network restore and journal publication happen before the durable
+	// watchdog is settled. A process can therefore observe an already rolled
+	// back journal while the recovery task still needs to be converted into (or
+	// replaced by) committed reconciliation coverage. Retrying rollback must
+	// repair that boundary without attempting the destructive restore twice.
+	if journal.State == StateRolledBack {
+		return tx.settleWatchdog(journal)
+	}
 	if journal.State != StatePending {
 		return errors.New("no revision is pending confirmation")
 	}
@@ -197,7 +246,7 @@ func (tx *Transaction) Rollback(_ context.Context) (resultErr error) {
 	}
 	err = tx.restore(recoveryCtx, journal, "explicit rollback")
 	if err == nil {
-		tx.cancelWatchdog()
+		err = tx.settleRollbackWatchdog(journal)
 	}
 	return err
 }
@@ -227,7 +276,7 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 		}
 		err = tx.restore(recoveryCtx, journal, "boot/crash recovery")
 		if err == nil {
-			tx.cancelWatchdog()
+			err = tx.settleRollbackWatchdog(journal)
 		}
 		return err
 	}
@@ -237,7 +286,11 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 		if err := tx.preflightRecovery(recoveryCtx, journal); err != nil {
 			return fmt.Errorf("preflight: %w", err)
 		}
-		return tx.restore(recoveryCtx, journal, "degraded rollback retry")
+		err = tx.restore(recoveryCtx, journal, "degraded rollback retry")
+		if err == nil {
+			err = tx.settleRollbackWatchdog(journal)
+		}
+		return err
 	}
 	if journal.State == StateDisabling || journal.State == StateRestoring {
 		recoveryCtx, cancel := tx.recoveryContext()
@@ -245,18 +298,18 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 		return tx.resumeRecoveryOperation(recoveryCtx, journal)
 	}
 	if journal.State == StateDisabled || journal.State == StateRestored {
-		return nil
+		return tx.cancelWatchdog()
 	}
 	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
 	if journal.ActiveRevision == "" {
-		return nil
+		return tx.cancelWatchdog()
 	}
 	if err := tx.Runtime.Reconcile(ctx, journal.ActiveRevision); err != nil {
 		return fmt.Errorf("reconcile active revision %q: %w", journal.ActiveRevision, err)
 	}
-	return nil
+	return tx.settleWatchdog(journal)
 }
 
 func (tx *Transaction) Expire(_ context.Context) (resultErr error) {
@@ -277,7 +330,7 @@ func (tx *Transaction) Expire(_ context.Context) (resultErr error) {
 		return err
 	}
 	if journal.State != StatePending {
-		return nil
+		return tx.settleWatchdog(journal)
 	}
 	clock := tx.Clock
 	if clock == nil {
@@ -291,7 +344,7 @@ func (tx *Transaction) Expire(_ context.Context) (resultErr error) {
 	}
 	err = tx.restore(recoveryCtx, journal, "watchdog expiry")
 	if err == nil {
-		tx.cancelWatchdog()
+		err = tx.settleRollbackWatchdog(journal)
 	}
 	return err
 }
@@ -324,7 +377,7 @@ func (tx *Transaction) runRecoveryOperation(ctx context.Context, intent, complet
 	}
 	if intent == StateDisabling {
 		if journal.State == StateDisabled {
-			return nil
+			return tx.cancelWatchdog()
 		}
 		if journal.State != StateCommitted && journal.State != StateRolledBack {
 			return fmt.Errorf("emergency disable is not allowed from journal state %q", journal.State)
@@ -334,7 +387,7 @@ func (tx *Transaction) runRecoveryOperation(ctx context.Context, intent, complet
 		}
 	} else {
 		if journal.State == StateRestored {
-			return nil
+			return tx.cancelWatchdog()
 		}
 		if journal.State != StateCommitted && journal.State != StateRolledBack && journal.State != StateDisabled {
 			return fmt.Errorf("full restore is not allowed from journal state %q", journal.State)
@@ -360,7 +413,10 @@ func (tx *Transaction) runRecoveryOperation(ctx context.Context, intent, complet
 		journal.ActiveRevision = ""
 		journal.LastKnownGoodRevision = ""
 	}
-	return tx.Journal.Save(journal)
+	if err := tx.Journal.Save(journal); err != nil {
+		return err
+	}
+	return tx.cancelWatchdog()
 }
 
 func (tx *Transaction) resumeRecoveryOperation(ctx context.Context, journal Journal) error {
@@ -392,7 +448,10 @@ func (tx *Transaction) resumeRecoveryOperation(ctx context.Context, journal Jour
 		journal.ActiveRevision = ""
 		journal.LastKnownGoodRevision = ""
 	}
-	return tx.Journal.Save(journal)
+	if err := tx.Journal.Save(journal); err != nil {
+		return err
+	}
+	return tx.cancelWatchdog()
 }
 
 func (tx *Transaction) preflightRecovery(ctx context.Context, journal Journal) error {
@@ -463,7 +522,48 @@ func (tx *Transaction) armWatchdog(deadline time.Time) error {
 	return nil
 }
 
-func (tx *Transaction) cancelWatchdog() {
+func (tx *Transaction) cancelWatchdog() error {
+	tx.cancelWatchdogTimer()
+	if watchdog, ok := tx.Watchdog.(PersistentWatchdog); ok {
+		if err := watchdog.Disarm(); err != nil {
+			return fmt.Errorf("disarm persistent watchdog: %w", err)
+		}
+	}
+	return nil
+}
+
+func (tx *Transaction) commitWatchdog() error {
+	tx.cancelWatchdogTimer()
+	if watchdog, ok := tx.Watchdog.(PersistentWatchdog); ok {
+		if err := watchdog.Commit(); err != nil {
+			return fmt.Errorf("commit persistent watchdog: %w", err)
+		}
+	}
+	return nil
+}
+
+func (tx *Transaction) settleWatchdog(journal Journal) error {
+	switch journal.State {
+	case StateCommitted, StateRolledBack:
+		if journal.ActiveRevision != "" {
+			return tx.commitWatchdog()
+		}
+		return tx.cancelWatchdog()
+	case StateIdle, StateDisabled, StateRestored:
+		return tx.cancelWatchdog()
+	default:
+		// Pending, degraded and in-progress recovery states must retain their
+		// durable recovery task. Only the in-process timer can be stopped here.
+		tx.cancelWatchdogTimer()
+		return nil
+	}
+}
+
+func (tx *Transaction) settleRollbackWatchdog(journal Journal) error {
+	return tx.settleWatchdog(Journal{State: StateRolledBack, ActiveRevision: journal.LastKnownGoodRevision})
+}
+
+func (tx *Transaction) cancelWatchdogTimer() {
 	tx.watchdogMu.Lock()
 	cancel := tx.watchdogCancel
 	tx.watchdogCancel = nil
@@ -480,8 +580,8 @@ func (tx *Transaction) rollbackAfterFailure(journal Journal, boundary string, ca
 	if err != nil {
 		return errors.Join(fmt.Errorf("%s: %w", boundary, cause), err)
 	}
-	tx.cancelWatchdog()
-	return fmt.Errorf("%s: %w", boundary, cause)
+	settleErr := tx.settleRollbackWatchdog(journal)
+	return errors.Join(fmt.Errorf("%s: %w", boundary, cause), settleErr)
 }
 
 func (tx *Transaction) recoveryContext() (context.Context, context.CancelFunc) {

@@ -97,6 +97,8 @@ func TestStructuredSnapshotParserFailsClosed(t *testing.T) {
 		"invalid address state":   []byte(strings.Replace(valid, `"addressState":4`, `"addressState":5`, 1)),
 		"address family mismatch": []byte(strings.Replace(valid, `"addressFamily":2,"ipAddress":"192.168.1.10"`, `"addressFamily":23,"ipAddress":"192.168.1.10"`, 1)),
 		"route family mismatch":   []byte(strings.Replace(valid, `"addressFamily":2,"destinationPrefix":"0.0.0.0/0"`, `"addressFamily":23,"destinationPrefix":"0.0.0.0/0"`, 1)),
+		"hidden compartment":      []byte(strings.Replace(valid, `"compartments":[{"compartmentId":1}]`, `"compartments":[{"compartmentId":1},{"compartmentId":2}]`, 1)),
+		"route compartment":       []byte(strings.Replace(valid, `"compartmentId":1,"addressFamily":2,"destinationPrefix":"0.0.0.0/0"`, `"compartmentId":2,"addressFamily":2,"destinationPrefix":"0.0.0.0/0"`, 1)),
 		"invalid route state":     []byte(strings.Replace(valid, `"state":0`, `"state":3`, 1)),
 		"metric overflow":         []byte(strings.Replace(valid, `"routeMetric":5`, `"routeMetric":4294967296`, 1)),
 		"DNS family mismatch":     []byte(strings.Replace(valid, `"serverAddresses":["8.8.8.8","1.1.1.1"]`, `"serverAddresses":["2001:4860:4860::8888"]`, 1)),
@@ -179,7 +181,7 @@ func TestStructuredSnapshotRejectsUnresolvedDefaultIdentityButAllowsSystemRoute(
 }
 
 func TestStructuredSnapshotCountCaps(t *testing.T) {
-	route := `{"interfaceIndex":12,"addressFamily":2,"destinationPrefix":"10.0.0.0/8","nextHop":"192.168.1.1","routeMetric":5,"interfaceMetric":25,"state":0}`
+	route := `{"interfaceIndex":12,"compartmentId":1,"addressFamily":2,"destinationPrefix":"10.0.0.0/8","nextHop":"192.168.1.1","routeMetric":5,"interfaceMetric":25,"state":0}`
 	routes := strings.Repeat(route+",", maxRoutes) + route
 	data := strings.Replace(string(validSnapshotJSON()), validRoutesJSON(), routes, 1)
 	if _, err := parseInventorySnapshot([]byte(data)); err == nil {
@@ -205,7 +207,7 @@ func TestTrustedInventoryCommandUsesAbsoluteSystem32SurfaceAndSanitizedEnvironme
 		t.Fatalf("fixed inventory script missing from args: %#v", spec.Arguments)
 	}
 	joined := strings.ToLower(strings.Join(spec.Arguments, " "))
-	for _, required := range []string{"get-netadapter", "get-netipaddress", "get-netroute", "activestore", "get-dnsclientserveraddress", "get-dnsclientnrptpolicy", "convertto-json"} {
+	for _, required := range []string{"get-netadapter", "get-netipaddress", "get-netcompartment", "get-netroute", "includeallcompartments", "activestore", "get-dnsclientserveraddress", "get-dnsclientnrptpolicy", "convertto-json"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("trusted script lacks %q", required)
 		}
@@ -301,6 +303,7 @@ func validSnapshotJSON() []byte {
   {"name":"redlink","description":"AmneziaWG Tunnel","interfaceIndex":21,"interfaceGuid":"` + testRedShieldGUID + `","hardwareInterface":false,"adminStatus":1,"operationalStatus":1},
   {"name":"Cisco Secure Client","description":"Cisco AnyConnect Virtual Adapter","interfaceIndex":31,"interfaceGuid":"` + testCiscoGUID + `","hardwareInterface":false,"adminStatus":1,"operationalStatus":1}
 ],
+"compartments":[{"compartmentId":1}],
 "addresses":[
   {"interfaceIndex":12,"addressFamily":2,"ipAddress":"192.168.1.10","prefixLength":24,"addressState":4,"skipAsSource":false},
   {"interfaceIndex":12,"addressFamily":23,"ipAddress":"2001:db8:1::10","prefixLength":64,"addressState":1,"skipAsSource":false},
@@ -319,10 +322,10 @@ func validSnapshotJSON() []byte {
 
 func validRoutesJSON() string {
 	return `
-  {"interfaceIndex":12,"addressFamily":2,"destinationPrefix":"0.0.0.0/0","nextHop":"192.168.1.1","routeMetric":5,"interfaceMetric":25,"state":0},
-  {"interfaceIndex":12,"addressFamily":2,"destinationPrefix":"203.0.113.5/32","nextHop":"192.168.1.1","routeMetric":2,"interfaceMetric":25,"state":0},
-  {"interfaceIndex":21,"addressFamily":2,"destinationPrefix":"0.0.0.0/1","nextHop":"0.0.0.0","routeMetric":0,"interfaceMetric":5,"state":0},
-  {"interfaceIndex":31,"addressFamily":2,"destinationPrefix":"10.50.0.0/16","nextHop":"0.0.0.0","routeMetric":1,"interfaceMetric":1,"state":0},
-  {"interfaceIndex":1,"addressFamily":2,"destinationPrefix":"127.0.0.0/8","nextHop":"0.0.0.0","routeMetric":0,"interfaceMetric":75,"state":0}
+  {"interfaceIndex":12,"compartmentId":1,"addressFamily":2,"destinationPrefix":"0.0.0.0/0","nextHop":"192.168.1.1","routeMetric":5,"interfaceMetric":25,"state":0},
+  {"interfaceIndex":12,"compartmentId":1,"addressFamily":2,"destinationPrefix":"203.0.113.5/32","nextHop":"192.168.1.1","routeMetric":2,"interfaceMetric":25,"state":0},
+  {"interfaceIndex":21,"compartmentId":1,"addressFamily":2,"destinationPrefix":"0.0.0.0/1","nextHop":"0.0.0.0","routeMetric":0,"interfaceMetric":5,"state":0},
+  {"interfaceIndex":31,"compartmentId":1,"addressFamily":2,"destinationPrefix":"10.50.0.0/16","nextHop":"0.0.0.0","routeMetric":1,"interfaceMetric":1,"state":0},
+  {"interfaceIndex":1,"compartmentId":1,"addressFamily":2,"destinationPrefix":"127.0.0.0/8","nextHop":"0.0.0.0","routeMetric":0,"interfaceMetric":75,"state":0}
 `
 }

@@ -25,7 +25,13 @@ func (backend Backend) Inspect(ctx context.Context, source tunnel.ConfigSource) 
 	if err := ctx.Err(); err != nil {
 		return tunnel.Inspection{}, err
 	}
-	config, err := ImportFile(source.Path)
+	var config Config
+	var err error
+	if source.SHA256 == "" {
+		config, err = ImportFile(source.Path)
+	} else {
+		config, err = ImportFilePinned(source.Path, source.SHA256)
+	}
 	if err != nil {
 		return tunnel.Inspection{}, err
 	}

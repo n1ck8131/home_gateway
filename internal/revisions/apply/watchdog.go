@@ -10,6 +10,16 @@ type Watchdog interface {
 	Arm(time.Time, func()) (func(), error)
 }
 
+// PersistentWatchdog is implemented by watchdogs whose rollback and committed
+// startup-reconcile triggers survive the current process. Commit and Disarm
+// must be idempotent because confirmation and recovery can happen in a
+// different process than Apply.
+type PersistentWatchdog interface {
+	Watchdog
+	Commit() error
+	Disarm() error
+}
+
 type TimerWatchdog struct{}
 
 func (TimerWatchdog) Arm(deadline time.Time, action func()) (func(), error) {

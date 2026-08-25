@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -224,6 +225,221 @@ func TestRunRejectsAnyMutatingCommand(t *testing.T) {
 		if stdout.Len() != 0 {
 			t.Fatalf("args %v wrote stdout %q", args, stdout.String())
 		}
+	}
+}
+
+func TestRunWindowsCanaryPlanIsReadOnlyRedactedAndChallengeBound(t *testing.T) {
+	configSHA256 := strings.Repeat("a", 64)
+	inspection := tunnel.Inspection{
+		Metadata: tunnel.Metadata{
+			Provider:           "redshield",
+			Transport:          tunnel.TransportAmneziaWG,
+			Endpoint:           tunnel.Endpoint{Host: "vpn.example.test", Port: 51820},
+			InterfaceAddresses: []string{"10.20.30.2/32"},
+			DNS:                []string{"10.20.30.1"},
+			IPv4FullTunnel:     true,
+		},
+		Status: tunnel.Status{State: tunnel.StateUnknown, Observed: false},
+	}
+	inventory := windowssystem.Inventory{
+		Adapters: []windowssystem.Adapter{
+			{Name: "Ethernet", Index: 1, InterfaceGUID: commandPhysicalGUID, Kind: windowssystem.AdapterPhysical, Up: true, Addresses: []string{"192.168.1.10/24"}},
+			{Name: "redlink", Index: 2, InterfaceGUID: commandRedShieldGUID, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32"}},
+		},
+		Routes: []windowssystem.Route{
+			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 25},
+			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 1},
+		},
+		RouteSnapshotAuthoritative: true,
+		DNSPolicyObserved:          true,
+	}
+	deps := dependencies{
+		backend: staticInspectionBackend{inspection: inspection},
+		collect: staticCollector{inventory: inventory},
+		resolve: func(context.Context, string) ([]string, error) { return []string{"203.0.113.5"}, nil },
+	}
+	configPath := `C:\private-provider-source.conf`
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	args := []string{"windows", "canary", "plan", "--config", configPath, "--config-sha256", configSHA256, "--state-root", stateRoot, "--revision", "p35-canary-001", "--target", "198.51.100.10", "--dns-namespace", windowssystem.CanaryDNSNamespace, "--json"}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := runWithDependencies("hgctl", args, &stdout, &stderr, deps); code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	for _, forbidden := range []string{configPath, stateRoot, "10.20.30.1", "203.0.113.5", "198.51.100.10"} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("canary plan leaked %q: %s", forbidden, stdout.String())
+		}
+	}
+	var output canaryPlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !output.ReadyForLiveGate || output.LiveMutationPerformed || output.RouteCount != 2 || output.FirewallRuleCount != 2 || output.DNSRuleCount != 1 || !strings.HasPrefix(output.ConfirmationChallenge, "P35-APPLY-") {
+		t.Fatalf("unexpected canary plan output: %#v", output)
+	}
+
+	args[8] = filepath.Join(t.TempDir(), "other-state")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDependencies("hgctl", args, &stdout, &stderr, deps); code != 0 {
+		t.Fatalf("second plan code = %d, stderr = %q", code, stderr.String())
+	}
+	var rebound canaryPlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &rebound); err != nil {
+		t.Fatal(err)
+	}
+	if rebound.ConfirmationChallenge == output.ConfirmationChallenge {
+		t.Fatal("confirmation challenge was not rebound to the state root")
+	}
+	args[8] = stateRoot
+	args[6] = strings.Repeat("b", 64)
+	stdout.Reset()
+	stderr.Reset()
+	if code := runWithDependencies("hgctl", args, &stdout, &stderr, deps); code != 0 {
+		t.Fatalf("digest rebound plan code = %d, stderr = %q", code, stderr.String())
+	}
+	var digestRebound canaryPlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &digestRebound); err != nil {
+		t.Fatal(err)
+	}
+	if digestRebound.ConfirmationChallenge == output.ConfirmationChallenge {
+		t.Fatal("confirmation challenge was not rebound to the config SHA-256")
+	}
+}
+
+func TestParseCanaryPlanCommandRejectsAmbiguousArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"windows", "canary", "plan"},
+		{"windows", "canary", "plan", "--config", "a", "--config", "b", "--state-root", "c", "--revision", "r", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--json"},
+		{"windows", "canary", "plan", "--config", "a", "--state-root", "c", "--revision", "r", "--target", "1.1.1.1", "--dns-namespace", ".probe.example"},
+		{"windows", "canary", "plan", "--config", "a", "--state-root", "c", "--revision", "r", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--json", "extra"},
+	} {
+		if _, ok := parseCanaryPlanCommand(args); ok {
+			t.Fatalf("ambiguous args unexpectedly parsed: %v", args)
+		}
+	}
+}
+
+func TestParseCanaryLiveCommandRequiresActionSpecificConfirmation(t *testing.T) {
+	planArgs := []string{"windows", "canary", "apply", "--config", "config", "--config-sha256", strings.Repeat("a", 64), "--state-root", "state", "--revision", "p35", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--confirm-live", "P35-APPLY-0011223344556677", "--json"}
+	command, ok := parseCanaryLiveCommand(planArgs)
+	if !ok || command.action != "apply" || command.liveConfirm == "" || len(command.plan.targets) != 1 {
+		t.Fatalf("valid live command did not parse: %#v, %v", command, ok)
+	}
+	for _, args := range [][]string{
+		{"windows", "canary", "apply", "--config", "config", "--state-root", "state", "--revision", "p35", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--json"},
+		{"windows", "canary", "rollback", "--state-root", "state", "--json"},
+		{"windows", "canary", "recover", "--state-root", "state", "--confirm-recovery", recoveryRecoverToken, "--target", "1.1.1.1", "--json"},
+		{"windows", "canary", "status", "--state-root", "state", "--confirm-recovery", recoveryRecoverToken, "--json"},
+	} {
+		if _, ok := parseCanaryLiveCommand(args); ok {
+			t.Fatalf("unsafe live args unexpectedly parsed: %v", args)
+		}
+	}
+}
+
+func TestRunCanaryStatusDoesNotCreateState(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "absent")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runCanaryLive(canaryLiveCommand{action: "status", plan: canaryPlanCommand{stateRoot: root}}, &stdout, &stderr, dependencies{
+		validateStateRoot: func(string) error { return nil },
+	})
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("read-only status created state: %v", err)
+	}
+	var output canaryStatusOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.State != "idle" || output.HasActive || output.HasPending {
+		t.Fatalf("status = %#v", output)
+	}
+}
+
+func TestRunCanaryRecoveryDoesNotCreateAbsentStateRoot(t *testing.T) {
+	for action, confirmation := range map[string]string{
+		"rollback":          recoveryRollbackToken,
+		"recover":           recoveryRecoverToken,
+		"emergency-disable": recoveryDisableToken,
+		"full-restore":      recoveryRestoreToken,
+		"expire":            recoveryExpireToken,
+	} {
+		t.Run(action, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "absent")
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := runCanaryLive(canaryLiveCommand{action: action, plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: confirmation}, &stdout, &stderr, dependencies{
+				validateStateRoot: func(string) error { return nil },
+			})
+			if code != 0 || stderr.Len() != 0 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("absent recovery created state: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunCanaryApplyRejectsMismatchedCandidateChallengeBeforeMutation(t *testing.T) {
+	inspection := tunnel.Inspection{
+		Metadata: tunnel.Metadata{
+			Provider:           "redshield",
+			Transport:          tunnel.TransportAmneziaWG,
+			Endpoint:           tunnel.Endpoint{Host: "vpn.example.test", Port: 51820},
+			InterfaceAddresses: []string{"10.20.30.2/32"},
+			DNS:                []string{"10.20.30.1"},
+			IPv4FullTunnel:     true,
+		},
+		Status: tunnel.Status{State: tunnel.StateUnknown, Observed: false},
+	}
+	inventory := windowssystem.Inventory{
+		Adapters: []windowssystem.Adapter{
+			{Name: "Ethernet", Index: 1, InterfaceGUID: commandPhysicalGUID, Kind: windowssystem.AdapterPhysical, Up: true},
+			{Name: "redlink", Index: 2, InterfaceGUID: commandRedShieldGUID, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32"}},
+		},
+		Routes: []windowssystem.Route{
+			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 25},
+			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 1},
+		},
+		RouteSnapshotAuthoritative: true,
+		DNSPolicyObserved:          true,
+	}
+	mutationCalls := 0
+	deps := dependencies{
+		backend:              staticInspectionBackend{inspection: inspection},
+		collect:              staticCollector{inventory: inventory},
+		resolve:              func(context.Context, string) ([]string, error) { return []string{"203.0.113.5"}, nil },
+		validateStateRoot:    func(string) error { return nil },
+		validateConfigSource: func(string) error { return nil },
+		newMutation: func(string) (windowssystem.MutationBackend, error) {
+			mutationCalls++
+			return nil, fmt.Errorf("must not be called")
+		},
+	}
+	command := canaryLiveCommand{
+		action: "apply",
+		plan: canaryPlanCommand{
+			configPath:   `C:\private-provider-source.conf`,
+			stateRoot:    filepath.Join(t.TempDir(), "state"),
+			revision:     "p35-canary-001",
+			targets:      []string{"198.51.100.10"},
+			dnsNamespace: windowssystem.CanaryDNSNamespace,
+		},
+		liveConfirm: "P35-APPLY-WRONG",
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := runCanaryLive(command, &stdout, &stderr, deps); code != 2 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if mutationCalls != 0 || stdout.Len() != 0 {
+		t.Fatalf("mutation backend calls = %d, stdout = %q", mutationCalls, stdout.String())
 	}
 }
 

@@ -22,14 +22,179 @@ type fakeMutationBackend struct {
 	failCall                string
 	persistentFailCall      string
 	failSnapshotAfterReload bool
+	snapshotCount           int
+	snapshotHook            func(*fakeMutationBackend, int)
+}
+
+type fakeFirewallBatchMutationBackend struct {
+	*fakeMutationBackend
+	putBatches    [][]FirewallState
+	removeBatches [][]FirewallState
 }
 
 func (backend *fakeMutationBackend) Snapshot(context.Context) (MutationSnapshot, error) {
+	backend.snapshotCount++
+	if backend.snapshotHook != nil {
+		backend.snapshotHook(backend, backend.snapshotCount)
+	}
 	if backend.failSnapshotAfterReload && slices.Contains(backend.calls, "reload") {
 		backend.failSnapshotAfterReload = false
 		return MutationSnapshot{}, errors.New("post-check snapshot fault")
 	}
 	return cloneMutationSnapshot(backend.state), nil
+}
+
+func TestWindowsRuntimeCoversRetainedDownCiscoDefaultPath(t *testing.T) {
+	backend := newSafeBackend()
+	backend.state.Adapters[2].Up = false
+	backend.state.Routes = append(backend.state.Routes, RouteState{
+		ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "0.0.0.0", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31},
+		Protected:    true,
+		State:        2,
+	})
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	covered := append([]FirewallRule(nil), artifacts.firewall.Rules...)
+	artifacts.firewall.Rules = slices.DeleteFunc(artifacts.firewall.Rules, func(rule FirewallRule) bool { return rule.InterfaceGUID == testCiscoGUID })
+	runtime := &Runtime{QualifiedEndpoints: testQualifiedEndpoints()}
+	if err := runtime.validateCandidateAgainstSnapshot(artifacts, backend.state); err == nil || !strings.Contains(err.Error(), "every stable non-RedShield adapter") {
+		t.Fatalf("uncovered Cisco default result = %v", err)
+	}
+	artifacts.firewall.Rules = covered
+	if err := runtime.validateCandidateAgainstSnapshot(artifacts, backend.state); err != nil {
+		t.Fatalf("covered retained Cisco default result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeRejectsVPNRouteOverlappingUnownedPhysicalOnLink(t *testing.T) {
+	backend := newSafeBackend()
+	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{
+		Family: FamilyIPv4, Destination: "198.51.100.0/25", NextHop: "0.0.0.0", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12,
+	}})
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	err := (&Runtime{QualifiedEndpoints: testQualifiedEndpoints()}).validateCandidateAgainstSnapshot(artifacts, backend.state)
+	if err == nil || !strings.Contains(err.Error(), "system") {
+		t.Fatalf("physical overlap result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeRejectsPublicHostInsideUnownedPhysicalPrefix(t *testing.T) {
+	backend := newSafeBackend()
+	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{
+		Family: FamilyIPv4, Destination: "198.51.100.0/24", NextHop: "0.0.0.0", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12,
+	}})
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	setCandidateIPv4VPN(&artifacts, "198.51.100.53/32", "198.51.100.53")
+	err := (&Runtime{QualifiedEndpoints: testQualifiedEndpoints()}).validateCandidateAgainstSnapshot(artifacts, backend.state)
+	if err == nil || !strings.Contains(err.Error(), "system") {
+		t.Fatalf("public host overlap result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeRejectsDNSOverlappingUnownedPhysicalOnLink(t *testing.T) {
+	backend := newSafeBackend()
+	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{
+		Family: FamilyIPv4, Destination: "192.168.1.0/25", NextHop: "0.0.0.0", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12,
+	}})
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	setCandidateIPv4VPN(&artifacts, "192.168.1.0/24", "192.168.1.53")
+	err := (&Runtime{QualifiedEndpoints: testQualifiedEndpoints()}).validateCandidateAgainstSnapshot(artifacts, backend.state)
+	if err == nil || !strings.Contains(err.Error(), "system") {
+		t.Fatalf("private DNS overlap result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeAllowsProviderPrivateDNSWithoutDirectOverlap(t *testing.T) {
+	backend := newSafeBackend()
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	setCandidateIPv4VPN(&artifacts, "10.20.30.0/24", "10.20.30.53")
+	if err := (&Runtime{QualifiedEndpoints: testQualifiedEndpoints()}).validateCandidateAgainstSnapshot(artifacts, backend.state); err != nil {
+		t.Fatalf("provider-private DNS result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeRejectsUnownedRouteWithMissingAdapter(t *testing.T) {
+	backend := newSafeBackend()
+	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{
+		Family: FamilyIPv4, Destination: "10.99.0.0/16", NextHop: "0.0.0.0", InterfaceGUID: "99999999-9999-4999-8999-999999999999", InterfaceIndex: 99,
+	}})
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	err := (&Runtime{QualifiedEndpoints: testQualifiedEndpoints()}).validateCandidateAgainstSnapshot(artifacts, backend.state)
+	if err == nil || !strings.Contains(err.Error(), "stable adapter") {
+		t.Fatalf("missing system adapter result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeRejectsOverlappingUnownedRouteOnAdapterOther(t *testing.T) {
+	backend := newSafeBackend()
+	const otherGUID = "99999999-9999-4999-8999-999999999999"
+	backend.state.Adapters = append(backend.state.Adapters, Adapter{Index: 99, InterfaceGUID: otherGUID, Kind: AdapterOther, Up: true})
+	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{
+		Family: FamilyIPv4, Destination: "198.51.100.0/25", NextHop: "0.0.0.0", InterfaceGUID: otherGUID, InterfaceIndex: 99,
+	}})
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	err := (&Runtime{QualifiedEndpoints: testQualifiedEndpoints()}).validateCandidateAgainstSnapshot(artifacts, backend.state)
+	if err == nil || !strings.Contains(err.Error(), "system") {
+		t.Fatalf("unknown virtual overlap result = %v", err)
+	}
+}
+
+func TestWindowsRuntimeResnapshotsFallbackCoverageBeforeVPNRoutes(t *testing.T) {
+	backend := newSafeBackend()
+	backend.snapshotHook = func(backend *fakeMutationBackend, count int) {
+		if count != 1 {
+			return
+		}
+		otherGUID := "44444444-4444-4444-8444-444444444444"
+		backend.state.Adapters = append(backend.state.Adapters, Adapter{Index: 44, InterfaceGUID: otherGUID, Kind: AdapterOther, Up: true})
+		backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "203.0.114.0/24", NextHop: "0.0.0.0", InterfaceGUID: otherGUID, InterfaceIndex: 44}})
+	}
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	runtime := &Runtime{Backend: backend, QualifiedEndpoints: testQualifiedEndpoints()}
+	if err := runtime.applyArtifacts(context.Background(), artifacts, true); err == nil || !strings.Contains(err.Error(), "every stable non-RedShield adapter") {
+		t.Fatalf("pre-route fallback race result = %v", err)
+	}
+	if slices.ContainsFunc(backend.calls, func(call string) bool { return strings.HasPrefix(call, "add-route:vpn_class:") }) {
+		t.Fatalf("VPN route was installed before fallback revalidation: %v", backend.calls)
+	}
+}
+
+func TestWindowsRuntimeUsesOptionalFirewallBatchForApplyRestoreAndRemoval(t *testing.T) {
+	base := newSafeBackend()
+	backend := &fakeFirewallBatchMutationBackend{fakeMutationBackend: base}
+	runtime := &Runtime{Backend: backend, QualifiedEndpoints: testQualifiedEndpoints()}
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+
+	if err := runtime.applyArtifacts(context.Background(), artifacts, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.putBatches) != 1 || len(backend.putBatches[0]) != len(artifacts.firewall.Rules) {
+		t.Fatalf("candidate firewall batches = %#v", backend.putBatches)
+	}
+	if err := runtime.removeSelectiveOwned(context.Background(), cloneMutationSnapshot(backend.state)); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.removeBatches) != 1 || len(backend.removeBatches[0]) != len(artifacts.firewall.Rules) {
+		t.Fatalf("selective firewall removal batches = %#v", backend.removeBatches)
+	}
+
+	restore := managedSnapshot{Version: ArtifactVersion, Firewall: append([]FirewallState(nil), backend.putBatches[0]...)}
+	if err := runtime.applyManagedSnapshot(context.Background(), restore); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.putBatches) != 2 || len(backend.putBatches[1]) != len(restore.Firewall) {
+		t.Fatalf("restore firewall batches = %#v", backend.putBatches)
+	}
+	if err := runtime.pruneStaleOwned(context.Background(), cloneMutationSnapshot(backend.state), decodeCandidate(t, safeCandidate(t, "r2"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.removeBatches) != 2 || len(backend.removeBatches[1]) != len(restore.Firewall) {
+		t.Fatalf("stale firewall removal batches = %#v", backend.removeBatches)
+	}
+	for _, call := range backend.calls {
+		if strings.HasPrefix(call, "put-firewall:") || strings.HasPrefix(call, "remove-firewall:") {
+			t.Fatalf("optional batch backend fell back to per-rule mutation: %v", backend.calls)
+		}
+	}
 }
 
 func (backend *fakeMutationBackend) AddRoute(_ context.Context, state RouteState) error {
@@ -60,6 +225,7 @@ func (backend *fakeMutationBackend) PutFirewall(_ context.Context, state Firewal
 	if err := backend.call("put-firewall:" + state.Rule.Name); err != nil {
 		return err
 	}
+	state.Effective = true
 	for index, current := range backend.state.Firewall {
 		if current.Rule.Name == state.Rule.Name && current.Owner == ArtifactOwner {
 			backend.state.Firewall[index] = state
@@ -80,10 +246,46 @@ func (backend *fakeMutationBackend) RemoveFirewall(_ context.Context, state Fire
 	return nil
 }
 
+func (backend *fakeFirewallBatchMutationBackend) PutFirewallBatch(_ context.Context, states []FirewallState) error {
+	backend.putBatches = append(backend.putBatches, append([]FirewallState(nil), states...))
+	if err := backend.call(fmt.Sprintf("put-firewall-batch:%d", len(states))); err != nil {
+		return err
+	}
+	for _, state := range states {
+		state.Effective = true
+		updated := false
+		for index, current := range backend.state.Firewall {
+			if current.Rule.Name == state.Rule.Name && current.Owner == ArtifactOwner {
+				backend.state.Firewall[index] = state
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			backend.state.Firewall = append(backend.state.Firewall, state)
+		}
+	}
+	return nil
+}
+
+func (backend *fakeFirewallBatchMutationBackend) RemoveFirewallBatch(_ context.Context, states []FirewallState) error {
+	backend.removeBatches = append(backend.removeBatches, append([]FirewallState(nil), states...))
+	if err := backend.call(fmt.Sprintf("remove-firewall-batch:%d", len(states))); err != nil {
+		return err
+	}
+	for _, state := range states {
+		backend.state.Firewall = slices.DeleteFunc(backend.state.Firewall, func(current FirewallState) bool {
+			return current.Owner == state.Owner && current.Revision == state.Revision && current.Rule.Name == state.Rule.Name
+		})
+	}
+	return nil
+}
+
 func (backend *fakeMutationBackend) PutNRPT(_ context.Context, state NRPTState) error {
 	if err := backend.call("put-nrpt:" + state.Rule.LogicalID); err != nil {
 		return err
 	}
+	state.Effective = true
 	for index, current := range backend.state.NRPT {
 		if current.Rule.LogicalID == state.Rule.LogicalID && current.Owner == ArtifactOwner {
 			state.Rule.Name = current.Rule.Name
@@ -236,8 +438,10 @@ func TestWindowsRuntimeRejectsVirtualDefaultAddedAfterValidate(t *testing.T) {
 	if err := runtime.Validate(context.Background(), candidate); err != nil {
 		t.Fatal(err)
 	}
-	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "10.20.30.1", InterfaceGUID: testRedShieldGUID, InterfaceIndex: 21}})
-	if err := runtime.Activate(context.Background(), candidate); err == nil || !strings.Contains(err.Error(), "default route") {
+	otherRedShieldGUID := "33333333-3333-4333-8333-333333333333"
+	backend.state.Adapters = append(backend.state.Adapters, Adapter{Index: 22, InterfaceGUID: otherRedShieldGUID, Kind: AdapterRedShield, Up: true})
+	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "10.30.40.1", InterfaceGUID: otherRedShieldGUID, InterfaceIndex: 22}})
+	if err := runtime.Activate(context.Background(), candidate); err == nil || !strings.Contains(err.Error(), "unqualified RedShield adapter") {
 		t.Fatalf("TOCTOU virtual default error = %v", err)
 	}
 	if len(backend.calls) != 0 {
@@ -276,7 +480,7 @@ func TestWindowsRuntimeBindsArtifactsToTrustedQualifiedEndpoints(t *testing.T) {
 		if err := runtime.Stage(context.Background(), candidate); err != nil {
 			t.Fatal(err)
 		}
-		if err := runtime.Validate(context.Background(), candidate); err == nil || !strings.Contains(err.Error(), "exactly one") {
+		if err := runtime.Validate(context.Background(), candidate); err == nil || !strings.Contains(err.Error(), "unowned route collision") {
 			t.Fatalf("duplicate endpoint coverage error = %v", err)
 		}
 	})
@@ -467,7 +671,7 @@ func TestWindowsMidActivationRestartRestoresWithCompleteOrMissingPendingManifest
 }
 
 func TestWindowsMissingManifestRecoveryIgnoresLargeForeignInventory(t *testing.T) {
-	snapshot := MutationSnapshot{}
+	snapshot := MutationSnapshot{FirewallEnforced: true}
 	for index := 0; index < maxManagedRoutes+1; index++ {
 		snapshot.Routes = append(snapshot.Routes, RouteState{ManagedRoute: ManagedRoute{Destination: fmt.Sprintf("foreign-%d", index)}})
 	}
@@ -670,7 +874,7 @@ func TestWindowsPreexistingEndpointAssertionsRemainForeign(t *testing.T) {
 	assertForeignUnchanged(t, before, backend.state)
 }
 
-func TestWindowsRuntimeRequiresFirewallCoverageForEveryPhysicalDefault(t *testing.T) {
+func TestWindowsRuntimeRequiresFirewallCoverageForEveryFallbackDefault(t *testing.T) {
 	backend := newSafeBackend()
 	secondGUID := "22222222-2222-4222-8222-222222222222"
 	backend.state.Adapters = append(backend.state.Adapters, Adapter{Index: 13, InterfaceGUID: secondGUID, Kind: AdapterPhysical, Up: true})
@@ -679,7 +883,7 @@ func TestWindowsRuntimeRequiresFirewallCoverageForEveryPhysicalDefault(t *testin
 		RouteState{ManagedRoute: ManagedRoute{Family: FamilyIPv6, Destination: "::/0", NextHop: "2001:db8:2::1", InterfaceGUID: secondGUID, InterfaceIndex: 13}},
 	)
 	tx := newWindowsTransaction(t, backend)
-	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil || !strings.Contains(err.Error(), "every physical default path") {
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil || !strings.Contains(err.Error(), "every stable non-RedShield adapter") {
 		t.Fatalf("undercovered multi-default state error = %v", err)
 	}
 	if len(backend.calls) != 0 {
@@ -817,7 +1021,7 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 		t.Fatal(err)
 	}
 	runtime := tx.Runtime.(*Runtime)
-	if plan, err := runtime.PlanEmergencyDisable(context.Background()); err != nil || plan.RemoveVPNRoutes != 2 || plan.RemoveFirewall != 2 || plan.RemoveDNS != 2 || plan.RemoveEndpoints != 0 {
+	if plan, err := runtime.PlanEmergencyDisable(context.Background()); err != nil || plan.RemoveVPNRoutes != 2 || plan.RemoveFirewall != 4 || plan.RemoveDNS != 2 || plan.RemoveEndpoints != 0 {
 		t.Fatalf("emergency plan = %#v, %v", plan, err)
 	}
 	if err := tx.EmergencyDisable(context.Background()); err != nil {
@@ -911,6 +1115,28 @@ func TestWindowsRecoveryOperationsResumeDurableIntentAfterFault(t *testing.T) {
 	assertForeignUnchanged(t, before, backend.state)
 }
 
+func TestWindowsRuntimeRequiresEffectiveManagedNRPTPolicy(t *testing.T) {
+	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
+	snapshot := MutationSnapshot{FirewallEnforced: true}
+	for _, route := range artifacts.routes.Routes {
+		snapshot.Routes = append(snapshot.Routes, RouteState{ManagedRoute: route, Owner: ArtifactOwner, Revision: "r1"})
+	}
+	for _, rule := range artifacts.firewall.Rules {
+		snapshot.Firewall = append(snapshot.Firewall, FirewallState{Rule: rule, Owner: ArtifactOwner, Revision: "r1", Effective: true})
+	}
+	for index, rule := range artifacts.dns.Rules {
+		rule.Name = fmt.Sprintf("{11111111-2222-3333-4444-%012d}", index+1)
+		snapshot.NRPT = append(snapshot.NRPT, NRPTState{Rule: rule, Owner: ArtifactOwner, Revision: "r1", Effective: index != 0})
+	}
+	if err := requireExactManagedState(snapshot, artifacts); err == nil || !strings.Contains(err.Error(), "not effective") {
+		t.Fatalf("overridden managed NRPT result = %v", err)
+	}
+	snapshot.NRPT[0].Effective = true
+	if err := requireExactManagedState(snapshot, artifacts); err != nil {
+		t.Fatalf("effective managed NRPT result = %v", err)
+	}
+}
+
 func safeCandidate(t *testing.T, revision string) apply.Candidate {
 	t.Helper()
 	artifacts := artifactSet{
@@ -923,6 +1149,8 @@ func safeCandidate(t *testing.T, revision string) apply.Candidate {
 		firewall: FirewallArtifact{Version: ArtifactVersion, Owner: ArtifactOwner, Revision: revision, Rules: []FirewallRule{
 			{Name: FirewallRuleName(revision, FamilyIPv4, "198.51.100.0/24", testPhysicalGUID), Family: FamilyIPv4, RemoteCIDR: "198.51.100.0/24", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
 			{Name: FirewallRuleName(revision, FamilyIPv6, "2001:db8:100::/64", testPhysicalGUID), Family: FamilyIPv6, RemoteCIDR: "2001:db8:100::/64", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
+			{Name: FirewallRuleName(revision, FamilyIPv4, "198.51.100.0/24", testCiscoGUID), Family: FamilyIPv4, RemoteCIDR: "198.51.100.0/24", Action: "block", Direction: "outbound", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
+			{Name: FirewallRuleName(revision, FamilyIPv6, "2001:db8:100::/64", testCiscoGUID), Family: FamilyIPv6, RemoteCIDR: "2001:db8:100::/64", Action: "block", Direction: "outbound", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
 		}},
 		dns: DNSArtifact{Version: ArtifactVersion, Owner: ArtifactOwner, Revision: revision, Rules: []NRPTRule{
 			{LogicalID: "dns-v4", DisplayName: "hg-" + revision + "-dns-v4", Namespace: ".vpn.example", NameServers: []string{"198.51.100.53"}, Comment: ownershipDescription(revision)},
@@ -930,6 +1158,25 @@ func safeCandidate(t *testing.T, revision string) apply.Candidate {
 		}},
 	}
 	return encodeCandidate(t, artifacts)
+}
+
+func setCandidateIPv4VPN(artifacts *artifactSet, destination, nameServer string) {
+	for index := range artifacts.routes.Routes {
+		if artifacts.routes.Routes[index].Role == RouteRoleVPNClass && artifacts.routes.Routes[index].Family == FamilyIPv4 {
+			artifacts.routes.Routes[index].Destination = destination
+		}
+	}
+	for index := range artifacts.firewall.Rules {
+		if artifacts.firewall.Rules[index].Family == FamilyIPv4 {
+			artifacts.firewall.Rules[index].RemoteCIDR = destination
+			artifacts.firewall.Rules[index].Name = FirewallRuleName(artifacts.firewall.Revision, FamilyIPv4, destination, artifacts.firewall.Rules[index].InterfaceGUID)
+		}
+	}
+	for index := range artifacts.dns.Rules {
+		if artifacts.dns.Rules[index].LogicalID == "dns-v4" {
+			artifacts.dns.Rules[index].NameServers = []string{nameServer}
+		}
+	}
 }
 
 func encodeCandidate(t *testing.T, artifacts artifactSet) apply.Candidate {
@@ -962,8 +1209,9 @@ func newSafeBackend() *fakeMutationBackend {
 			{ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "10.50.0.0/16", NextHop: "0.0.0.0", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31}, Protected: true},
 			{ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "192.0.2.0/24", NextHop: "192.168.1.1", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12}},
 		},
-		Firewall: []FirewallState{{Rule: FirewallRule{Name: "foreign-firewall", Group: "foreign"}}},
-		NRPT:     []NRPTState{{Rule: NRPTRule{Name: "foreign-generated", LogicalID: "foreign", Namespace: ".foreign.example"}}},
+		Firewall:         []FirewallState{{Rule: FirewallRule{Name: "foreign-firewall", Group: "foreign"}}},
+		FirewallEnforced: true,
+		NRPT:             []NRPTState{{Rule: NRPTRule{Name: "foreign-generated", LogicalID: "foreign", Namespace: ".foreign.example"}}},
 	}}
 }
 

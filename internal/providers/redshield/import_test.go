@@ -2,7 +2,9 @@ package redshield
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +14,40 @@ import (
 
 	"github.com/vsevo/home-gateway/internal/tunnel"
 )
+
+func TestImportFilePinnedBindsParsedBytesToLowercaseSHA256(t *testing.T) {
+	path := writeConfig(t, validConfig(t, "", "0.0.0.0/0, ::/0"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(data)
+	pin := hex.EncodeToString(digest[:])
+	if _, err := ImportFilePinned(path, pin); err != nil {
+		t.Fatalf("matching pin: %v", err)
+	}
+	replaced := strings.Replace(string(data), syntheticKey(1), syntheticKey(3), 1)
+	if err := os.WriteFile(path, []byte(replaced), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportFilePinned(path, pin); err == nil || !strings.Contains(err.Error(), "differs") {
+		t.Fatalf("same-metadata config with replaced key result = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"different": strings.Repeat("0", 64),
+		"uppercase": strings.ToUpper(pin),
+		"short":     pin[:63],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ImportFilePinned(path, value); err == nil {
+				t.Fatal("invalid or mismatched config pin was accepted")
+			}
+		})
+	}
+}
 
 func TestImportFileWireGuardMetadata(t *testing.T) {
 	configText := validConfig(t, "", "0.0.0.0/0, ::/0")

@@ -33,25 +33,32 @@ type RouteState struct {
 	Owner     string `json:"owner,omitempty"`
 	Revision  string `json:"revision,omitempty"`
 	Protected bool   `json:"protected,omitempty"`
+	State     int    `json:"state,omitempty"`
 }
 
 type FirewallState struct {
 	Rule     FirewallRule `json:"rule"`
 	Owner    string       `json:"owner,omitempty"`
 	Revision string       `json:"revision,omitempty"`
+	// Effective is observed from ActiveStore. Ownership and removal still use
+	// the exact PersistentStore identity, but VPN routes must never rely on a
+	// local rule that Group Policy removed or narrowed in the resultant policy.
+	Effective bool `json:"effective,omitempty"`
 }
 
 type NRPTState struct {
-	Rule     NRPTRule `json:"rule"`
-	Owner    string   `json:"owner,omitempty"`
-	Revision string   `json:"revision,omitempty"`
+	Rule      NRPTRule `json:"rule"`
+	Owner     string   `json:"owner,omitempty"`
+	Revision  string   `json:"revision,omitempty"`
+	Effective bool     `json:"effective,omitempty"`
 }
 
 type MutationSnapshot struct {
-	Adapters []Adapter       `json:"adapters"`
-	Routes   []RouteState    `json:"routes"`
-	Firewall []FirewallState `json:"firewall"`
-	NRPT     []NRPTState     `json:"nrpt"`
+	Adapters         []Adapter       `json:"adapters"`
+	Routes           []RouteState    `json:"routes"`
+	Firewall         []FirewallState `json:"firewall"`
+	FirewallEnforced bool            `json:"firewall_enforced"`
+	NRPT             []NRPTState     `json:"nrpt"`
 }
 
 // MutationBackend is deliberately structured and injected. This package has
@@ -67,10 +74,20 @@ type MutationBackend interface {
 	Reload(context.Context) error
 }
 
+// FirewallBatchMutationBackend is an optional extension for native backends
+// that can resolve and mutate a bounded firewall set in a constant number of
+// trusted host-process invocations. Runtime retains the single-rule fallback
+// for deterministic test adapters and non-native implementations.
+type FirewallBatchMutationBackend interface {
+	PutFirewallBatch(context.Context, []FirewallState) error
+	RemoveFirewallBatch(context.Context, []FirewallState) error
+}
+
 type Runtime struct {
 	Root               string
 	Backend            MutationBackend
 	QualifiedEndpoints []string
+	recoveryOnly       bool
 
 	ownedRevisions          map[string]artifactSet
 	recoveryPendingRevision string
@@ -326,10 +343,10 @@ func (runtime *Runtime) Activate(ctx context.Context, candidate apply.Candidate)
 	if err := runtime.applyArtifacts(ctx, artifacts, true); err != nil {
 		return err
 	}
-	if err := runtime.requireCandidatePresent(ctx, artifacts); err != nil {
+	if err := runtime.pruneStaleOwned(ctx, snapshot, artifacts); err != nil {
 		return err
 	}
-	if err := runtime.pruneStaleOwned(ctx, snapshot, artifacts); err != nil {
+	if err := runtime.requireCandidatePresent(ctx, artifacts); err != nil {
 		return err
 	}
 	if err := runtime.writeMarker("active.json", candidate.RevisionID); err != nil {
@@ -478,10 +495,10 @@ func (runtime *Runtime) Restore(ctx context.Context, revision string) error {
 	if err := runtime.applyArtifacts(ctx, artifacts, true); err != nil {
 		return err
 	}
-	if err := runtime.requireCandidatePresent(ctx, artifacts); err != nil {
+	if err := runtime.pruneStaleOwned(ctx, original, artifacts); err != nil {
 		return err
 	}
-	if err := runtime.pruneStaleOwned(ctx, original, artifacts); err != nil {
+	if err := runtime.requireCandidatePresent(ctx, artifacts); err != nil {
 		return err
 	}
 	if err := runtime.Reload(ctx); err != nil {
@@ -626,10 +643,25 @@ func (runtime *Runtime) applyArtifacts(ctx context.Context, artifacts artifactSe
 			}
 		}
 	}
+	firewall := make([]FirewallState, 0, len(artifacts.firewall.Rules))
 	for _, rule := range artifacts.firewall.Rules {
-		if err := runtime.Backend.PutFirewall(ctx, FirewallState{Rule: rule, Owner: ArtifactOwner, Revision: artifacts.firewall.Revision}); err != nil {
-			return fmt.Errorf("apply structured Windows firewall rule: %w", err)
-		}
+		firewall = append(firewall, FirewallState{Rule: rule, Owner: ArtifactOwner, Revision: artifacts.firewall.Revision})
+	}
+	if err := putFirewallStates(ctx, runtime.Backend, firewall); err != nil {
+		return fmt.Errorf("apply structured Windows firewall rule: %w", err)
+	}
+	// Close the plan/apply race before installing any VPN-class route. A new
+	// fallback /0 or a failed firewall write must be observable here, while no
+	// canary target route exists yet and rollback remains network-neutral.
+	afterFirewall, err := runtime.Backend.Snapshot(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect Windows fail-closed state before VPN routes: %w", err)
+	}
+	if err := runtime.validateCandidateAgainstSnapshot(artifacts, afterFirewall); err != nil {
+		return fmt.Errorf("validate Windows fail-closed state before VPN routes: %w", err)
+	}
+	if err := requireCandidateFirewallPresent(afterFirewall, artifacts.firewall); err != nil {
+		return err
 	}
 	for _, route := range artifacts.routes.Routes {
 		if route.Role == RouteRoleVPNClass {
@@ -654,10 +686,8 @@ func (runtime *Runtime) applyManagedSnapshot(ctx context.Context, snapshot manag
 			}
 		}
 	}
-	for _, rule := range snapshot.Firewall {
-		if err := runtime.Backend.PutFirewall(ctx, rule); err != nil {
-			return err
-		}
+	if err := putFirewallStates(ctx, runtime.Backend, snapshot.Firewall); err != nil {
+		return err
 	}
 	for _, route := range snapshot.Routes {
 		if route.Role != RouteRoleEndpointDirect {
@@ -709,12 +739,14 @@ func (runtime *Runtime) removeSelectiveOwned(ctx context.Context, snapshot Mutat
 			}
 		}
 	}
+	firewall := make([]FirewallState, 0, len(snapshot.Firewall))
 	for _, rule := range snapshot.Firewall {
 		if rule.Owner == ArtifactOwner {
-			if err := runtime.Backend.RemoveFirewall(ctx, rule); err != nil {
-				return fmt.Errorf("remove owned firewall rule: %w", err)
-			}
+			firewall = append(firewall, rule)
 		}
+	}
+	if err := removeFirewallStates(ctx, runtime.Backend, firewall); err != nil {
+		return fmt.Errorf("remove owned firewall rule: %w", err)
 	}
 	return nil
 }
@@ -724,7 +756,7 @@ func (runtime *Runtime) requireCandidatePresent(ctx context.Context, artifacts a
 	if err != nil {
 		return err
 	}
-	filtered := MutationSnapshot{Adapters: snapshot.Adapters}
+	filtered := MutationSnapshot{Adapters: snapshot.Adapters, FirewallEnforced: snapshot.FirewallEnforced}
 	for _, route := range snapshot.Routes {
 		if route.Owner != ArtifactOwner || route.Revision == artifacts.routes.Revision {
 			filtered.Routes = append(filtered.Routes, route)
@@ -758,7 +790,8 @@ func (runtime *Runtime) pruneStaleOwned(ctx context.Context, before MutationSnap
 	}
 	for _, state := range before.NRPT {
 		if state.Owner == ArtifactOwner {
-			if _, retained := desiredDNS[state.Rule.LogicalID]; !retained {
+			_, retained := desiredDNS[state.Rule.LogicalID]
+			if state.Revision != artifacts.dns.Revision || !retained {
 				if err := runtime.Backend.RemoveNRPT(ctx, state); err != nil {
 					return err
 				}
@@ -774,13 +807,42 @@ func (runtime *Runtime) pruneStaleOwned(ctx context.Context, before MutationSnap
 			}
 		}
 	}
+	staleFirewall := make([]FirewallState, 0, len(before.Firewall))
 	for _, state := range before.Firewall {
 		if state.Owner == ArtifactOwner {
 			if _, retained := desiredFirewall[state.Rule.Name]; !retained {
-				if err := runtime.Backend.RemoveFirewall(ctx, state); err != nil {
-					return err
-				}
+				staleFirewall = append(staleFirewall, state)
 			}
+		}
+	}
+	return removeFirewallStates(ctx, runtime.Backend, staleFirewall)
+}
+
+func putFirewallStates(ctx context.Context, backend MutationBackend, states []FirewallState) error {
+	if len(states) == 0 {
+		return nil
+	}
+	if batch, ok := backend.(FirewallBatchMutationBackend); ok {
+		return batch.PutFirewallBatch(ctx, append([]FirewallState(nil), states...))
+	}
+	for _, state := range states {
+		if err := backend.PutFirewall(ctx, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeFirewallStates(ctx context.Context, backend MutationBackend, states []FirewallState) error {
+	if len(states) == 0 {
+		return nil
+	}
+	if batch, ok := backend.(FirewallBatchMutationBackend); ok {
+		return batch.RemoveFirewallBatch(ctx, append([]FirewallState(nil), states...))
+	}
+	for _, state := range states {
+		if err := backend.RemoveFirewall(ctx, state); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -811,39 +873,87 @@ func (runtime *Runtime) registerOwned(revision string, artifacts artifactSet) {
 }
 
 func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, snapshot MutationSnapshot) error {
+	if hasVPNRoutes(artifacts.routes.Routes) && !snapshot.FirewallEnforced {
+		return errors.New("effective Windows firewall profiles do not enforce local fail-closed rules")
+	}
 	adapters := make(map[string]Adapter, len(snapshot.Adapters))
-	adapterKind := make(map[string]AdapterKind, len(snapshot.Adapters))
 	for _, adapter := range snapshot.Adapters {
 		adapters[strings.ToLower(adapter.InterfaceGUID)] = adapter
-		adapterKind[strings.ToLower(adapter.InterfaceGUID)] = adapter.Kind
 	}
 	qualified := make(map[string]int, len(runtime.QualifiedEndpoints))
 	for _, value := range runtime.QualifiedEndpoints {
 		qualified[value] = 0
 	}
-	protected := protectedPrefixes(snapshot, adapterKind)
-	physicalDefaults := make(map[AddressFamily]map[string]struct{})
+	redShieldGUID := ""
+	for _, route := range artifacts.routes.Routes {
+		if route.Role != RouteRoleVPNClass {
+			continue
+		}
+		guid := strings.ToLower(route.InterfaceGUID)
+		adapter, exists := adapters[guid]
+		if !exists || !adapter.Up || adapter.Kind != AdapterRedShield {
+			return errors.New("VPN-class route does not use one active stable RedShield adapter")
+		}
+		if redShieldGUID != "" && redShieldGUID != guid {
+			return errors.New("VPN-class routes span multiple RedShield adapters")
+		}
+		redShieldGUID = guid
+	}
+	failClosedAdapters := make(map[string]Adapter)
+	for guid, adapter := range adapters {
+		if _, err := canonicalGUID(guid); err != nil || adapter.Index <= 0 {
+			return errors.New("Windows adapter snapshot contains an unstable identity")
+		}
+		switch adapter.Kind {
+		case AdapterRedShield:
+			if redShieldGUID == "" || guid != redShieldGUID {
+				return errors.New("unqualified RedShield adapter could bypass canary fail-closed coverage")
+			}
+		case AdapterLoopback:
+			continue
+		default:
+			failClosedAdapters[guid] = adapter
+		}
+	}
+	if len(failClosedAdapters) == 0 || len(failClosedAdapters) > maxCanaryFallbackAdapters {
+		return errors.New("Windows fail-closed adapter set is empty or exceeds the bounded limit")
+	}
+	protected, err := protectedPrefixes(snapshot, adapters)
+	if err != nil {
+		return err
+	}
+	fallbackDefaults := make(map[AddressFamily]map[string]struct{})
 	for _, current := range snapshot.Routes {
 		prefix, err := netip.ParsePrefix(current.Destination)
-		adapter, exists := adapters[current.InterfaceGUID]
+		guid := strings.ToLower(current.InterfaceGUID)
+		adapter, exists := adapters[guid]
 		if err == nil && prefix.Bits() == 0 {
-			if _, guidErr := canonicalGUID(current.InterfaceGUID); guidErr != nil || !exists || !adapter.Up || adapter.Kind != AdapterPhysical || adapter.Index != current.InterfaceIndex {
-				return errors.New("live default route is not bound to an up stable physical adapter")
+			if _, guidErr := canonicalGUID(guid); guidErr != nil || !exists || adapter.Index != current.InterfaceIndex || current.Family != addressFamily(prefix.Addr()) || current.State < routeStateAlive || current.State > 2 {
+				return errors.New("live default route is not bound to one stable adapter")
 			}
-			if physicalDefaults[current.Family] == nil {
-				physicalDefaults[current.Family] = make(map[string]struct{})
+			if adapter.Kind == AdapterRedShield {
+				if redShieldGUID == "" || guid != redShieldGUID {
+					return errors.New("unqualified RedShield default path could bypass canary fail-closed coverage")
+				}
+				continue
 			}
-			physicalDefaults[current.Family][current.InterfaceGUID] = struct{}{}
+			if adapter.Kind == AdapterLoopback {
+				return errors.New("loopback default path cannot be covered safely")
+			}
+			if fallbackDefaults[current.Family] == nil {
+				fallbackDefaults[current.Family] = make(map[string]struct{})
+			}
+			fallbackDefaults[current.Family][guid] = struct{}{}
 		}
 	}
 	endpointPrefixes := make([]netip.Prefix, 0)
 	for _, assertion := range artifacts.routes.DirectAssertions {
 		adapter, exists := adapters[assertion.InterfaceGUID]
-		if !exists || !adapter.Up || adapter.Kind != AdapterPhysical || adapter.Index != assertion.InterfaceIndex {
+		if !exists || !adapter.Up || adapter.Kind != AdapterPhysical {
 			return errors.New("endpoint-direct assertion refers to a stale or non-physical interface")
 		}
 		matched := slices.ContainsFunc(snapshot.Routes, func(current RouteState) bool {
-			return current.Owner != ArtifactOwner && current.Family == assertion.Family && current.Destination == assertion.Destination && current.NextHop == assertion.NextHop && current.InterfaceGUID == assertion.InterfaceGUID && current.InterfaceIndex == assertion.InterfaceIndex
+			return current.Owner != ArtifactOwner && current.Family == assertion.Family && current.Destination == assertion.Destination && current.NextHop == assertion.NextHop && current.InterfaceGUID == assertion.InterfaceGUID
 		})
 		if !matched {
 			return errors.New("pre-existing endpoint-direct route assertion is not satisfied")
@@ -857,7 +967,7 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 	}
 	for _, route := range artifacts.routes.Routes {
 		adapter, exists := adapters[strings.ToLower(route.InterfaceGUID)]
-		if !exists || !adapter.Up || adapter.Index != route.InterfaceIndex {
+		if !exists || !adapter.Up {
 			return errors.New("candidate refers to a stale or mismatched interface GUID snapshot")
 		}
 		prefix, _ := netip.ParsePrefix(route.Destination)
@@ -895,9 +1005,10 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 		}
 	}
 	for _, rule := range artifacts.firewall.Rules {
-		adapter, exists := adapters[rule.InterfaceGUID]
-		if !exists || !adapter.Up || adapter.Index != rule.InterfaceIndex || adapter.Kind != AdapterPhysical {
-			return errors.New("firewall rule refers to a stale, mismatched, or non-physical interface GUID")
+		guid := strings.ToLower(rule.InterfaceGUID)
+		adapter, exists := adapters[guid]
+		if !exists || adapter.Kind == AdapterRedShield || adapter.Kind == AdapterLoopback {
+			return errors.New("firewall rule refers to a stale, mismatched, or unsupported fallback interface GUID")
 		}
 		for _, current := range snapshot.Firewall {
 			if (current.Rule.Name == rule.Name || current.Rule.Group == rule.Group) && current.Owner != ArtifactOwner {
@@ -908,23 +1019,23 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 		if overlapsAny(prefix, protected) {
 			return errors.New("firewall rule overlaps an endpoint, system, or Cisco protected prefix")
 		}
-		if _, ownsDefault := physicalDefaults[rule.Family][rule.InterfaceGUID]; !ownsDefault {
-			return errors.New("firewall rule is not bound to a current physical default path")
+		if _, covered := failClosedAdapters[guid]; !covered {
+			return errors.New("firewall rule is not bound to a stable fail-closed adapter")
 		}
 	}
 	for _, route := range artifacts.routes.Routes {
 		if route.Role != RouteRoleVPNClass {
 			continue
 		}
-		defaults := physicalDefaults[route.Family]
+		defaults := fallbackDefaults[route.Family]
 		if len(defaults) == 0 {
-			return errors.New("VPN-class route has no current physical default path to fail closed")
+			return errors.New("VPN-class route has no retained fallback default path to fail closed")
 		}
-		for guid := range defaults {
+		for guid := range failClosedAdapters {
 			if !slices.ContainsFunc(artifacts.firewall.Rules, func(rule FirewallRule) bool {
 				return rule.Family == route.Family && rule.RemoteCIDR == route.Destination && rule.InterfaceGUID == guid
 			}) {
-				return errors.New("VPN-class route lacks fail-closed coverage for every physical default path")
+				return errors.New("VPN-class route lacks fail-closed coverage for every stable non-RedShield adapter")
 			}
 		}
 	}
@@ -951,19 +1062,29 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 	return nil
 }
 
-func protectedPrefixes(snapshot MutationSnapshot, adapterKinds map[string]AdapterKind) []netip.Prefix {
+func protectedPrefixes(snapshot MutationSnapshot, adapters map[string]Adapter) ([]netip.Prefix, error) {
 	result := make([]netip.Prefix, 0)
 	for _, route := range snapshot.Routes {
-		prefix, err := netip.ParsePrefix(route.Destination)
-		if err != nil || prefix.Bits() == 0 {
+		if route.Owner == ArtifactOwner {
 			continue
 		}
-		kind := adapterKinds[strings.ToLower(route.InterfaceGUID)]
-		if route.Protected || kind == AdapterCisco {
+		prefix, err := netip.ParsePrefix(route.Destination)
+		if err != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() || addressFamily(prefix.Addr()) != route.Family {
+			return nil, errors.New("unowned system route has an invalid destination")
+		}
+		if prefix.Bits() == 0 {
+			continue
+		}
+		guid := strings.ToLower(route.InterfaceGUID)
+		adapter, exists := adapters[guid]
+		if _, guidErr := canonicalGUID(guid); guidErr != nil || !exists || adapter.Index <= 0 || route.InterfaceIndex != adapter.Index || route.State < routeStateAlive || route.State > 2 {
+			return nil, errors.New("unowned system route is not bound to one stable adapter")
+		}
+		if route.Protected || adapter.Kind != AdapterRedShield && adapter.Kind != AdapterLoopback {
 			result = append(result, prefix)
 		}
 	}
-	return result
+	return result, nil
 }
 
 func overlapsAny(prefix netip.Prefix, others []netip.Prefix) bool {
@@ -976,7 +1097,7 @@ func overlapsAny(prefix netip.Prefix, others []netip.Prefix) bool {
 }
 
 func routeCollision(left, right ManagedRoute) bool {
-	return left.Family == right.Family && left.Destination == right.Destination && left.PolicyStore == right.PolicyStore && (left.Metric == right.Metric || routeTupleKey(left) == routeTupleKey(right))
+	return left.Family == right.Family && left.Destination == right.Destination
 }
 
 func verifyOwnedState(snapshot MutationSnapshot, owned map[string]artifactSet) error {
@@ -1067,6 +1188,9 @@ func verifyOwnedStateRecovery(snapshot MutationSnapshot, owned map[string]artifa
 }
 
 func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) error {
+	if hasVPNRoutes(artifacts.routes.Routes) && !snapshot.FirewallEnforced {
+		return errors.New("managed firewall is not enforced by every effective Windows profile")
+	}
 	wantRoutes := make(map[string]ManagedRoute, len(artifacts.routes.Routes))
 	for _, route := range artifacts.routes.Routes {
 		wantRoutes[routeTupleKey(route)] = route
@@ -1085,7 +1209,7 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 				return errors.New("stale managed route remains after activation")
 			}
 			want, exists := wantRoutes[routeTupleKey(route.ManagedRoute)]
-			if !exists || want != route.ManagedRoute {
+			if !exists || want != route.ManagedRoute || route.State != routeStateAlive {
 				return errors.New("managed route post-check drift")
 			}
 			delete(wantRoutes, routeTupleKey(route.ManagedRoute))
@@ -1096,7 +1220,7 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 			if state.Revision != artifacts.firewall.Revision {
 				return errors.New("stale managed firewall rule remains after activation")
 			}
-			if want, exists := wantFirewall[state.Rule.Name]; !exists || want != state.Rule {
+			if want, exists := wantFirewall[state.Rule.Name]; !exists || want != state.Rule || !state.Effective {
 				return errors.New("managed firewall post-check drift")
 			}
 			delete(wantFirewall, state.Rule.Name)
@@ -1106,6 +1230,9 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 		if state.Owner == ArtifactOwner {
 			if state.Revision != artifacts.dns.Revision {
 				return errors.New("stale managed DNS rule remains after activation")
+			}
+			if !state.Effective {
+				return errors.New("managed DNS policy is configured but not effective")
 			}
 			if state.Rule.Name == "" {
 				return errors.New("managed DNS state lacks an exact OS-generated rule identity")
@@ -1118,6 +1245,30 @@ func requireExactManagedState(snapshot MutationSnapshot, artifacts artifactSet) 
 	}
 	if len(wantRoutes) != 0 || len(wantFirewall) != 0 || len(wantDNS) != 0 {
 		return errors.New("managed Windows post-check state is incomplete")
+	}
+	return nil
+}
+
+func requireCandidateFirewallPresent(snapshot MutationSnapshot, artifact FirewallArtifact) error {
+	if !snapshot.FirewallEnforced {
+		return errors.New("effective Windows firewall profiles do not enforce candidate rules")
+	}
+	want := make(map[string]FirewallRule, len(artifact.Rules))
+	for _, rule := range artifact.Rules {
+		want[rule.Name] = rule
+	}
+	for _, state := range snapshot.Firewall {
+		if state.Owner != ArtifactOwner || state.Revision != artifact.Revision {
+			continue
+		}
+		rule, exists := want[state.Rule.Name]
+		if !exists || rule != state.Rule || !state.Effective {
+			return errors.New("candidate firewall pre-route check drift")
+		}
+		delete(want, state.Rule.Name)
+	}
+	if len(want) != 0 {
+		return errors.New("candidate firewall is incomplete before VPN routes")
 	}
 	return nil
 }
@@ -1135,6 +1286,7 @@ func filterManagedSnapshot(snapshot MutationSnapshot) (managedSnapshot, error) {
 	}
 	for _, rule := range snapshot.Firewall {
 		if rule.Owner == ArtifactOwner {
+			rule.Effective = false
 			managed.Firewall = append(managed.Firewall, rule)
 		}
 	}
@@ -1215,7 +1367,7 @@ func (runtime *Runtime) validateConfiguration() error {
 	if runtime.Root == "" || !filepath.IsAbs(runtime.Root) || filepath.Clean(runtime.Root) != runtime.Root {
 		return errors.New("absolute clean Windows runtime root is required")
 	}
-	if len(runtime.QualifiedEndpoints) == 0 || len(runtime.QualifiedEndpoints) > maxManagedRoutes {
+	if (len(runtime.QualifiedEndpoints) == 0 && !runtime.recoveryOnly) || len(runtime.QualifiedEndpoints) > maxManagedRoutes {
 		return errors.New("bounded trusted qualified endpoint set is required")
 	}
 	seen := make(map[string]struct{}, len(runtime.QualifiedEndpoints))

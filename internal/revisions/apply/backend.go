@@ -1865,7 +1865,7 @@ func readRegularFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("%s must be a regular non-symlink file", path)
 	}
 	// #nosec G304 -- callers provide validated managed paths; the pre-open Lstat and post-open SameFile check pin the read to that regular file.
-	file, err := os.Open(path)
+	file, err := openRegularFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1915,6 +1915,13 @@ func writeExclusive(path string, data []byte, mode os.FileMode) error {
 }
 
 func replaceRegularFile(path string, data []byte, mode os.FileMode) error {
+	return replaceRegularFileUsing(path, data, mode, atomicReplaceFile)
+}
+
+func replaceRegularFileUsing(path string, data []byte, mode os.FileMode, replace func(string, string) error) error {
+	if replace == nil {
+		return errors.New("atomic file replacement is unavailable")
+	}
 	directory := filepath.Dir(path)
 	if err := requireDirectory(directory); err != nil {
 		return err
@@ -1940,19 +1947,9 @@ func replaceRegularFile(path string, data []byte, mode os.FileMode) error {
 	if err := writeExclusive(temporary, data, mode); err != nil {
 		return err
 	}
-	if err := os.Rename(temporary, path); err != nil {
-		if runtime.GOOS != "windows" {
-			_ = os.Remove(temporary)
-			return err
-		}
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			_ = os.Remove(temporary)
-			return removeErr
-		}
-		if retryErr := os.Rename(temporary, path); retryErr != nil {
-			_ = os.Remove(temporary)
-			return retryErr
-		}
+	if err := replace(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
 	}
 	return syncDirectory(directory)
 }

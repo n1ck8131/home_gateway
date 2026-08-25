@@ -54,6 +54,81 @@ type fakeWatchdog struct {
 	canceled bool
 }
 
+type fakePersistentWatchdog struct {
+	state *fakePersistentWatchdogState
+}
+
+type fakePersistentWatchdogState struct {
+	recovery   bool
+	reconcile  bool
+	arms       int
+	commits    int
+	disarms    int
+	failCommit bool
+}
+
+func (watchdog *fakePersistentWatchdog) Arm(_ time.Time, action func()) (func(), error) {
+	if action == nil || watchdog.state == nil {
+		return nil, errors.New("watchdog action is required")
+	}
+	watchdog.state.arms++
+	watchdog.state.recovery = true
+	return func() {}, nil
+}
+
+func (watchdog *fakePersistentWatchdog) Commit() error {
+	if watchdog.state == nil {
+		return errors.New("watchdog state is required")
+	}
+	watchdog.state.commits++
+	if watchdog.state.failCommit {
+		return errors.New("injected persistent commit failure")
+	}
+	watchdog.state.reconcile = true
+	watchdog.state.recovery = false
+	return nil
+}
+
+func (watchdog *fakePersistentWatchdog) Disarm() error {
+	if watchdog.state == nil {
+		return errors.New("watchdog state is required")
+	}
+	watchdog.state.recovery = false
+	watchdog.state.reconcile = false
+	watchdog.state.disarms++
+	return nil
+}
+
+type armAwareJournal struct {
+	value      Journal
+	watchdog   *fakeWatchdog
+	sawArmedAt bool
+}
+
+func (store *armAwareJournal) Load() (Journal, error) { return store.value, nil }
+func (store *armAwareJournal) Save(value Journal) error {
+	if value.State == StatePending {
+		store.sawArmedAt = store.watchdog.action != nil
+	}
+	store.value = value
+	return nil
+}
+
+type mutableFakeClock struct{ now time.Time }
+
+func (clock *mutableFakeClock) Now() time.Time { return clock.now }
+
+type advancingCommitRuntime struct {
+	*fakeRuntime
+	clock *mutableFakeClock
+}
+
+func (runtime *advancingCommitRuntime) Commit(context.Context, string) error {
+	runtime.calls = append(runtime.calls, "commit")
+	runtime.clock.now = runtime.clock.now.Add(2 * time.Minute)
+	return nil
+}
+
 func (watchdog *fakeWatchdog) Arm(_ time.Time, action func()) (func(), error) {
 	if watchdog.fail {
 		return nil, errors.New("watchdog failed")
@@ -69,6 +144,7 @@ func (watchdog *fakeWatchdog) Arm(_ time.Time, action func()) (func(), error) {
 
 type fakeRuntime struct {
 	fail               string
+	validateCandidate  func(Candidate) error
 	calls              []string
 	preflightRevisions []string
 	reconcileRevision  string
@@ -90,8 +166,14 @@ func (runtime *fakeRuntime) Preflight(_ context.Context, revisions []string) err
 	runtime.preflightRevisions = append([]string(nil), revisions...)
 	return runtime.call("preflight")
 }
-func (runtime *fakeRuntime) Validate(context.Context, Candidate) error {
-	return runtime.call("validate")
+func (runtime *fakeRuntime) Validate(_ context.Context, candidate Candidate) error {
+	if err := runtime.call("validate"); err != nil {
+		return err
+	}
+	if runtime.validateCandidate != nil {
+		return runtime.validateCandidate(candidate)
+	}
+	return nil
 }
 func (runtime *fakeRuntime) Snapshot(context.Context, string) error { return runtime.call("snapshot") }
 func (runtime *fakeRuntime) Activate(context.Context, Candidate) error {
@@ -233,6 +315,18 @@ func newTransaction(runtime *fakeRuntime, store *memoryJournal, now time.Time) *
 	}
 }
 
+func newPersistentTransaction(runtime *fakeRuntime, store JournalStore, now time.Time, state *fakePersistentWatchdogState) *Transaction {
+	return &Transaction{
+		Runtime:         runtime,
+		Journal:         store,
+		Clock:           fakeClock{now},
+		ConfirmTimeout:  time.Minute,
+		RecoveryTimeout: time.Second,
+		Locker:          &fakeLocker{},
+		Watchdog:        &fakePersistentWatchdog{state: state},
+	}
+}
+
 func TestApplyCompensatesEveryMutationBoundary(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	for _, boundary := range []string{"preflight", "stage", "validate", "snapshot", "activate", "reload", "post-check"} {
@@ -268,6 +362,36 @@ func TestCommitRollbackExpiryCrashAndDegradedRecovery(t *testing.T) {
 		}
 		if !tx.Watchdog.(*fakeWatchdog).canceled {
 			t.Fatal("confirmed transaction did not cancel watchdog")
+		}
+	})
+	t.Run("candidate-bound confirm", func(t *testing.T) {
+		candidate := Candidate{RevisionID: "next", Routes: []byte("candidate-a")}
+		runtime := &fakeRuntime{}
+		runtime.validateCandidate = func(got Candidate) error {
+			if string(got.Routes) != string(candidate.Routes) {
+				return errors.New("candidate bytes differ")
+			}
+			return nil
+		}
+		store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg"}}
+		tx := newTransaction(runtime, store, now)
+		if err := tx.Apply(context.Background(), candidate); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.ConfirmCandidate(context.Background(), Candidate{RevisionID: "other", Routes: candidate.Routes}); err == nil {
+			t.Fatal("different revision unexpectedly confirmed")
+		}
+		if err := tx.ConfirmCandidate(context.Background(), Candidate{RevisionID: candidate.RevisionID, Routes: []byte("candidate-b")}); err == nil {
+			t.Fatal("different candidate bytes unexpectedly confirmed")
+		}
+		if store.value.State != StatePending || store.value.PendingRevision != candidate.RevisionID {
+			t.Fatalf("mismatched confirmation changed journal: %+v", store.value)
+		}
+		if err := tx.ConfirmCandidate(context.Background(), candidate); err != nil {
+			t.Fatal(err)
+		}
+		if store.value.State != StateCommitted || store.value.ActiveRevision != candidate.RevisionID {
+			t.Fatalf("journal=%+v", store.value)
 		}
 	})
 	t.Run("explicit rollback", func(t *testing.T) {
@@ -328,6 +452,217 @@ func TestApplyArmsWatchdogBeforeActivationAndCancelsItAfterSuccessfulRecovery(t 
 	}
 	if !tx.Watchdog.(*fakeWatchdog).canceled {
 		t.Fatal("failed transaction did not cancel watchdog")
+	}
+}
+
+func TestApplyPublishesPendingJournalOnlyAfterWatchdogIsArmed(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	watchdog := &fakeWatchdog{}
+	store := &armAwareJournal{
+		value:    Journal{State: StateCommitted, ActiveRevision: "lkg", LastKnownGoodRevision: "lkg"},
+		watchdog: watchdog,
+	}
+	tx := &Transaction{
+		Runtime:         runtime,
+		Journal:         store,
+		Clock:           fakeClock{now},
+		ConfirmTimeout:  time.Minute,
+		RecoveryTimeout: time.Second,
+		Locker:          &fakeLocker{},
+		Watchdog:        watchdog,
+	}
+	if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err != nil {
+		t.Fatal(err)
+	}
+	if !store.sawArmedAt || store.value.State != StatePending {
+		t.Fatalf("pending journal was published without durable watchdog boundary: %+v", store.value)
+	}
+}
+
+func TestPersistentWatchdogCanBeCommittedByFreshConfirmProcess(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "lkg", LastKnownGoodRevision: "lkg"}}
+	watchdogState := &fakePersistentWatchdogState{reconcile: true}
+	candidate := Candidate{RevisionID: "next", Routes: []byte("candidate")}
+	applyTx := newTransaction(runtime, store, now)
+	applyTx.Watchdog = &fakePersistentWatchdog{state: watchdogState}
+	if err := applyTx.Apply(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if !watchdogState.recovery {
+		t.Fatal("persistent watchdog was not registered")
+	}
+	confirmTx := newTransaction(runtime, store, now)
+	confirmTx.Watchdog = &fakePersistentWatchdog{state: watchdogState}
+	if err := confirmTx.ConfirmCandidate(context.Background(), candidate); err != nil {
+		t.Fatal(err)
+	}
+	if watchdogState.recovery || !watchdogState.reconcile || watchdogState.commits != 1 || watchdogState.disarms != 0 || store.value.State != StateCommitted {
+		t.Fatalf("fresh-process commit failed: watchdog=%+v journal=%+v", watchdogState, store.value)
+	}
+}
+
+func TestPersistentWatchdogCommitFailureIsRecoveredByFreshProcess(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{
+		State:                 StatePending,
+		ActiveRevision:        "lkg",
+		LastKnownGoodRevision: "lkg",
+		PendingRevision:       "next",
+		PendingDeadline:       now.Add(time.Minute),
+	}}
+	watchdogState := &fakePersistentWatchdogState{recovery: true, failCommit: true}
+	err := newPersistentTransaction(runtime, store, now, watchdogState).Confirm()
+	if err == nil || !strings.Contains(err.Error(), "commit persistent watchdog") {
+		t.Fatalf("commit failure = %v", err)
+	}
+	if store.value.State != StateCommitted || store.value.ActiveRevision != "next" || !watchdogState.recovery || watchdogState.reconcile {
+		t.Fatalf("crash boundary lost recovery coverage: journal=%+v watchdog=%+v", store.value, watchdogState)
+	}
+	watchdogState.failCommit = false
+	if err := newPersistentTransaction(runtime, store, now, watchdogState).Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if watchdogState.recovery || !watchdogState.reconcile || watchdogState.commits != 2 || runtime.reconcileRevision != "next" {
+		t.Fatalf("fresh-process repair failed: watchdog=%+v reconcile=%q", watchdogState, runtime.reconcileRevision)
+	}
+}
+
+func TestPersistentWatchdogPendingJournalFailureRestoresCommittedCoverage(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "active", LastKnownGoodRevision: "active"}, failSave: true}
+	watchdogState := &fakePersistentWatchdogState{reconcile: true}
+	err := newPersistentTransaction(runtime, store, now, watchdogState).Apply(context.Background(), Candidate{RevisionID: "next"})
+	if err == nil || !strings.Contains(err.Error(), "save failed") {
+		t.Fatalf("pending journal failure = %v", err)
+	}
+	if store.value.State != StateCommitted || store.value.ActiveRevision != "active" || watchdogState.recovery || !watchdogState.reconcile || watchdogState.arms != 1 || watchdogState.commits != 1 || watchdogState.disarms != 0 {
+		t.Fatalf("committed coverage after journal failure: journal=%+v watchdog=%+v", store.value, watchdogState)
+	}
+}
+
+func TestPersistentWatchdogRollbackKeepsReconcileOnlyWithLKG(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name          string
+		lkg           string
+		wantReconcile bool
+		wantCommits   int
+		wantDisarms   int
+	}{
+		{name: "with LKG", lkg: "lkg", wantReconcile: true, wantCommits: 1},
+		{name: "without LKG", wantDisarms: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := &fakeRuntime{}
+			store := &memoryJournal{value: Journal{State: StatePending, ActiveRevision: test.lkg, LastKnownGoodRevision: test.lkg, PendingRevision: "next"}}
+			watchdogState := &fakePersistentWatchdogState{recovery: true, reconcile: test.lkg != ""}
+			if err := newPersistentTransaction(runtime, store, now, watchdogState).Recover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if store.value.State != StateRolledBack || store.value.ActiveRevision != test.lkg || watchdogState.recovery || watchdogState.reconcile != test.wantReconcile || watchdogState.commits != test.wantCommits || watchdogState.disarms != test.wantDisarms {
+				t.Fatalf("rollback state: journal=%+v watchdog=%+v", store.value, watchdogState)
+			}
+		})
+	}
+}
+
+func TestPersistentWatchdogRollbackRetryRepairsSettledJournal(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{
+		State:                 StatePending,
+		ActiveRevision:        "lkg",
+		LastKnownGoodRevision: "lkg",
+		PendingRevision:       "next",
+		PendingDeadline:       now.Add(time.Minute),
+	}}
+	watchdogState := &fakePersistentWatchdogState{recovery: true, failCommit: true}
+
+	err := newPersistentTransaction(runtime, store, now, watchdogState).Rollback(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "commit persistent watchdog") {
+		t.Fatalf("first rollback error = %v", err)
+	}
+	if store.value.State != StateRolledBack || strings.Join(runtime.calls, ",") != "preflight,restore" || !watchdogState.recovery {
+		t.Fatalf("first rollback boundary: journal=%+v calls=%v watchdog=%+v", store.value, runtime.calls, watchdogState)
+	}
+
+	watchdogState.failCommit = false
+	if err := newPersistentTransaction(runtime, store, now, watchdogState).Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(runtime.calls, ",") != "preflight,restore" {
+		t.Fatalf("retry repeated network restore: calls=%v", runtime.calls)
+	}
+	if watchdogState.recovery || !watchdogState.reconcile || watchdogState.commits != 2 {
+		t.Fatalf("watchdog repair failed: %+v", watchdogState)
+	}
+}
+
+func TestPersistentWatchdogRepeatedBootReconcileIsIdempotent(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "active", LastKnownGoodRevision: "active"}}
+	watchdogState := &fakePersistentWatchdogState{reconcile: true}
+	for boot := 0; boot < 2; boot++ {
+		if err := newPersistentTransaction(runtime, store, now, watchdogState).Recover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if watchdogState.recovery || !watchdogState.reconcile || watchdogState.commits != 2 || watchdogState.disarms != 0 {
+		t.Fatalf("repeated boot watchdog state = %+v", watchdogState)
+	}
+	if strings.Join(runtime.calls, ",") != "preflight,reconcile,preflight,reconcile" {
+		t.Fatalf("repeated boot runtime calls = %v", runtime.calls)
+	}
+}
+
+func TestPersistentWatchdogFullRestoreDisarmsBothTasks(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	runtime := &fakeRuntime{}
+	store := &memoryJournal{value: Journal{State: StateCommitted, ActiveRevision: "active", LastKnownGoodRevision: "active"}}
+	watchdogState := &fakePersistentWatchdogState{reconcile: true}
+	if err := newPersistentTransaction(runtime, store, now, watchdogState).FullRestore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.value.State != StateRestored || store.value.ActiveRevision != "" || watchdogState.recovery || watchdogState.reconcile || watchdogState.disarms != 1 {
+		t.Fatalf("full restore state: journal=%+v watchdog=%+v", store.value, watchdogState)
+	}
+}
+
+func TestConfirmCandidateRollsBackWhenDeadlineExpiresDuringCommit(t *testing.T) {
+	clock := &mutableFakeClock{now: time.Unix(100, 0).UTC()}
+	baseRuntime := &fakeRuntime{}
+	runtime := &advancingCommitRuntime{fakeRuntime: baseRuntime, clock: clock}
+	store := &memoryJournal{value: Journal{
+		State:                 StatePending,
+		ActiveRevision:        "lkg",
+		LastKnownGoodRevision: "lkg",
+		PendingRevision:       "next",
+		PendingDeadline:       clock.now.Add(time.Minute),
+	}}
+	watchdogState := &fakePersistentWatchdogState{recovery: true, reconcile: true}
+	tx := &Transaction{
+		Runtime:         runtime,
+		Journal:         store,
+		Clock:           clock,
+		RecoveryTimeout: time.Second,
+		Locker:          &fakeLocker{},
+		Watchdog:        &fakePersistentWatchdog{state: watchdogState},
+	}
+	err := tx.ConfirmCandidate(context.Background(), Candidate{RevisionID: "next"})
+	if err == nil || !strings.Contains(err.Error(), "expired during commit") {
+		t.Fatalf("confirmation result = %v", err)
+	}
+	if store.value.State != StateRolledBack || store.value.ActiveRevision != "lkg" || watchdogState.recovery || !watchdogState.reconcile || watchdogState.commits != 1 || watchdogState.disarms != 0 {
+		t.Fatalf("deadline-race recovery failed: journal=%+v watchdog=%+v", store.value, watchdogState)
+	}
+	if strings.Join(baseRuntime.calls, ",") != "validate,commit,restore" {
+		t.Fatalf("runtime calls = %v", baseRuntime.calls)
 	}
 }
 

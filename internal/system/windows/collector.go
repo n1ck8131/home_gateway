@@ -22,6 +22,7 @@ const (
 	maxAdapters         = 256
 	maxAddresses        = 4096
 	maxRoutes           = 20000
+	maxCompartments     = 256
 	maxDNSServerSets    = 1024
 	maxServersPerSet    = 64
 	maxNRPTRules        = 10000
@@ -97,11 +98,18 @@ foreach ($address in @(NetTCPIP\Get-NetIPAddress -PolicyStore ActiveStore -Error
     })
 }
 
+$compartments = [System.Collections.Generic.List[object]]::new()
+foreach ($compartment in @(NetTCPIP\Get-NetCompartment -ErrorAction Stop)) {
+    if ($compartments.Count -ge 256) { throw 'network compartment inventory limit exceeded' }
+    $null = $compartments.Add([pscustomobject][ordered]@{ compartmentId = [int]$compartment.CompartmentId })
+}
+
 $routes = [System.Collections.Generic.List[object]]::new()
-foreach ($route in @(NetTCPIP\Get-NetRoute -PolicyStore ActiveStore -ErrorAction Stop)) {
+foreach ($route in @(NetTCPIP\Get-NetRoute -PolicyStore ActiveStore -IncludeAllCompartments -ErrorAction Stop)) {
     if ($routes.Count -ge 20000) { throw 'route inventory limit exceeded' }
     $null = $routes.Add([pscustomobject][ordered]@{
         interfaceIndex = [int]$route.InterfaceIndex
+        compartmentId = [int]$route.CompartmentId
         addressFamily = [int]$route.AddressFamily
         destinationPrefix = [string]$route.DestinationPrefix
         nextHop = [string]$route.NextHop
@@ -128,6 +136,7 @@ if ($nrptRuleCount -gt 10000) { throw 'NRPT inventory limit exceeded' }
 
 $snapshot = [pscustomobject][ordered]@{
     adapters = @($adapters.ToArray())
+    compartments = @($compartments.ToArray())
     addresses = @($addresses.ToArray())
     routes = @($routes.ToArray())
     dnsServers = @($dnsServers.ToArray())
@@ -233,11 +242,16 @@ func (buffer *boundedBuffer) Write(data []byte) (int, error) {
 }
 
 type rawInventorySnapshot struct {
-	Adapters      *[]rawAdapterRecord `json:"adapters"`
-	Addresses     *[]rawAddressRecord `json:"addresses"`
-	Routes        *[]rawRouteRecord   `json:"routes"`
-	DNSServers    *[]rawDNSRecord     `json:"dnsServers"`
-	NRPTRuleCount *int                `json:"nrptRuleCount"`
+	Adapters      *[]rawAdapterRecord     `json:"adapters"`
+	Compartments  *[]rawCompartmentRecord `json:"compartments"`
+	Addresses     *[]rawAddressRecord     `json:"addresses"`
+	Routes        *[]rawRouteRecord       `json:"routes"`
+	DNSServers    *[]rawDNSRecord         `json:"dnsServers"`
+	NRPTRuleCount *int                    `json:"nrptRuleCount"`
+}
+
+type rawCompartmentRecord struct {
+	CompartmentID *int `json:"compartmentId"`
 }
 
 type rawAdapterRecord struct {
@@ -261,6 +275,7 @@ type rawAddressRecord struct {
 
 type rawRouteRecord struct {
 	InterfaceIndex  *int    `json:"interfaceIndex"`
+	CompartmentID   *int    `json:"compartmentId"`
 	AddressFamily   *int    `json:"addressFamily"`
 	Destination     *string `json:"destinationPrefix"`
 	NextHop         *string `json:"nextHop"`
@@ -301,11 +316,14 @@ func parseInventorySnapshot(data []byte) (Inventory, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return Inventory{}, errors.New("windows network inventory has trailing data")
 	}
-	if raw.Adapters == nil || raw.Addresses == nil || raw.Routes == nil || raw.DNSServers == nil || raw.NRPTRuleCount == nil {
+	if raw.Adapters == nil || raw.Compartments == nil || raw.Addresses == nil || raw.Routes == nil || raw.DNSServers == nil || raw.NRPTRuleCount == nil {
 		return Inventory{}, errors.New("windows network inventory is incomplete")
 	}
-	if len(*raw.Adapters) == 0 || len(*raw.Adapters) > maxAdapters || len(*raw.Addresses) > maxAddresses || len(*raw.Routes) > maxRoutes || len(*raw.DNSServers) > maxDNSServerSets || *raw.NRPTRuleCount < 0 || *raw.NRPTRuleCount > maxNRPTRules {
+	if len(*raw.Adapters) == 0 || len(*raw.Adapters) > maxAdapters || len(*raw.Compartments) == 0 || len(*raw.Compartments) > maxCompartments || len(*raw.Addresses) > maxAddresses || len(*raw.Routes) > maxRoutes || len(*raw.DNSServers) > maxDNSServerSets || *raw.NRPTRuleCount < 0 || *raw.NRPTRuleCount > maxNRPTRules {
 		return Inventory{}, errors.New("windows network inventory count is invalid")
+	}
+	if err := validateDefaultNetworkCompartment(*raw.Compartments); err != nil {
+		return Inventory{}, err
 	}
 
 	adapters, adaptersByIndex, err := parseAdapters(*raw.Adapters)
@@ -422,11 +440,11 @@ func joinAddresses(records []rawAddressRecord, adapters map[int]*Adapter) error 
 func parseRoutes(records []rawRouteRecord, adapters map[int]*Adapter) ([]Route, error) {
 	routes := make([]Route, 0, len(records))
 	for _, record := range records {
-		if record.InterfaceIndex == nil || record.AddressFamily == nil || record.Destination == nil || record.NextHop == nil || record.RouteMetric == nil || record.InterfaceMetric == nil || record.State == nil {
+		if record.InterfaceIndex == nil || record.CompartmentID == nil || record.AddressFamily == nil || record.Destination == nil || record.NextHop == nil || record.RouteMetric == nil || record.InterfaceMetric == nil || record.State == nil {
 			return nil, errors.New("windows route inventory is incomplete")
 		}
 		family, _, err := parseNumericFamily(*record.AddressFamily)
-		if err != nil || *record.InterfaceIndex <= 0 || *record.RouteMetric > maxWindowsMetric || *record.InterfaceMetric > maxWindowsMetric || *record.State < routeStateAlive || *record.State > 2 {
+		if err != nil || *record.InterfaceIndex <= 0 || *record.CompartmentID != 1 || *record.RouteMetric > maxWindowsMetric || *record.InterfaceMetric > maxWindowsMetric || *record.State < routeStateAlive || *record.State > 2 {
 			return nil, errors.New("windows route inventory value is invalid")
 		}
 		destination, err := netip.ParsePrefix(strings.TrimSpace(*record.Destination))
@@ -469,6 +487,13 @@ func parseRoutes(records []rawRouteRecord, adapters map[int]*Adapter) ([]Route, 
 		return routes[left].InterfaceIndex < routes[right].InterfaceIndex
 	})
 	return routes, nil
+}
+
+func validateDefaultNetworkCompartment(records []rawCompartmentRecord) error {
+	if len(records) != 1 || records[0].CompartmentID == nil || *records[0].CompartmentID != 1 {
+		return errors.New("P3.5 requires the single default Windows network compartment")
+	}
+	return nil
 }
 
 func parseDNSPolicy(records []rawDNSRecord, nrptRuleCount int, adapters map[int]*Adapter) (DNSPolicy, error) {

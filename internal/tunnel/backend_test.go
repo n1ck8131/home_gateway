@@ -9,17 +9,18 @@ import (
 
 func TestConfigSourceIsRedacted(t *testing.T) {
 	const secretPath = `C:\secret\provider.conf`
-	source := ConfigSource{Path: secretPath}
+	const secretDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	source := ConfigSource{Path: secretPath, SHA256: secretDigest}
 
 	formatted := fmt.Sprintf("%v %#v", source, source)
-	if strings.Contains(formatted, secretPath) {
+	if strings.Contains(formatted, secretPath) || strings.Contains(formatted, secretDigest) {
 		t.Fatalf("formatted source leaked its path: %q", formatted)
 	}
 	data, err := json.Marshal(source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), secretPath) {
+	if strings.Contains(string(data), secretPath) || strings.Contains(string(data), secretDigest) {
 		t.Fatalf("JSON source leaked its path: %s", data)
 	}
 }

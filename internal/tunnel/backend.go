@@ -69,7 +69,8 @@ type Inspection struct {
 
 // ConfigSource is intentionally excluded from JSON and redacted when formatted.
 type ConfigSource struct {
-	Path string `json:"-"`
+	Path   string `json:"-"`
+	SHA256 string `json:"-"`
 }
 
 func (ConfigSource) String() string   { return "local-config-source(redacted)" }

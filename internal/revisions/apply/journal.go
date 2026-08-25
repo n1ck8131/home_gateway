@@ -47,6 +47,9 @@ func (store FileJournal) Load() (Journal, error) {
 	if err := store.validatePath(); err != nil {
 		return Journal{}, err
 	}
+	if err := recoverRegularFileForRead(store.Path); err != nil {
+		return Journal{}, fmt.Errorf("recover journal replacement: %w", err)
+	}
 	data, err := readRegularFile(store.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Journal{State: StateIdle}, nil

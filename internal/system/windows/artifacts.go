@@ -91,8 +91,11 @@ type DNSArtifact struct {
 }
 
 type NRPTRule struct {
-	LogicalID   string   `json:"logical_id"`
-	Name        string   `json:"name,omitempty"`
+	LogicalID string `json:"logical_id"`
+	// Name is explicitly serialized even before Windows assigns the native
+	// NRPT identity. The fixed StrictMode PowerShell program must receive a
+	// present empty property on first creation rather than a missing member.
+	Name        string   `json:"name"`
 	DisplayName string   `json:"display_name"`
 	Namespace   string   `json:"namespace"`
 	NameServers []string `json:"name_servers"`
@@ -238,7 +241,7 @@ func (artifacts artifactSet) validate(revision string) error {
 		firewallCoverage[string(rule.Family)+"\x00"+rule.RemoteCIDR]++
 		binding := string(rule.Family) + "\x00" + rule.RemoteCIDR + "\x00" + rule.InterfaceGUID
 		if _, exists := seenFirewallBinding[binding]; exists {
-			return fmt.Errorf("firewall rule %d duplicates a physical-interface binding", index)
+			return fmt.Errorf("firewall rule %d duplicates a fallback-interface binding", index)
 		}
 		seenFirewallBinding[binding] = struct{}{}
 	}

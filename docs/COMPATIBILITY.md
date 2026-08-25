@@ -12,7 +12,7 @@
 | AWG2 hardware UAPI | Exact Flint 2 kernel | prepared-for-hardware | P12 gate |
 | Router-to-VPS handshake | Exact router and self-hosted VPS | blocked | P12 owns this field gate after the P8 backend exists |
 
-The official OpenWrt 25.12 x86_64 feed served different bytes for `libelf1-0.192-r1.apk` under the same versioned filename on 2026-08-23. The P2 lock now records SHA-256 `708a8992361a5bd18e7158f92961569cb904dc74c0525d67c906ccedb8404334`. The QEMU harness downloads only the approved HTTPS URL, verifies the lock before installation and fails closed if that mutable upstream object changes again.
+The official OpenWrt 25.12 x86_64 feed replaced `libelf1-0.192-r1.apk` under the same versioned filename on 2026-08-23 and again on 2026-08-25. The QEMU gate rejected the second replacement before installation. Two fresh downloads were byte-identical, and the P2 lock now records SHA-256 `c009da8821b4fecb4ed6dae67836a7718257ba54c8724409f12097321d7e87d9`. The harness accepts only the approved HTTPS URL and fails closed if the object changes again.
 
 The run uploaded artifact `verified-openwrt-outputs` (artifact ID `8289217558`, archive SHA-256 `f9d922c057d0fa6d6b82d535a6eab6239c4f087ca85e6ca8bf2143348266c42a`). GitHub retention expires on 2026-07-20; the recorded output hashes remain the durable verification evidence.
 

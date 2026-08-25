@@ -126,7 +126,7 @@
     },
     "openwrt_qemu_libelf1": {
       "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libelf1-0.192-r1.apk",
-      "sha256": "708a8992361a5bd18e7158f92961569cb904dc74c0525d67c906ccedb8404334"
+      "sha256": "c009da8821b4fecb4ed6dae67836a7718257ba54c8724409f12097321d7e87d9"
     },
     "openwrt_qemu_libgmp10": {
       "url": "https://downloads.openwrt.org/releases/packages-25.12/x86_64/base/libgmp10-6.3.0-r2.apk",

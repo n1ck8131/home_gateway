@@ -13,3 +13,4 @@
 | [ADR-0009](docs/adr/ADR-0009-supply-chain-signing.md) | Accepted | Supply chain and signing |
 | [ADR-0010](docs/adr/ADR-0010-dnsmasq-domain-match-capability.md) | Accepted | dnsmasq domain match capability |
 | [ADR-0011](docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md) | Accepted | PC-first platform and tunnel boundary |
+| [ADR-0012](docs/adr/ADR-0012-windows-offline-mutation-ownership.md) | Accepted | Windows offline mutation ownership and recovery |

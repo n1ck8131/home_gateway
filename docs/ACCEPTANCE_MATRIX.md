@@ -43,9 +43,10 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 | Native Windows preflight baseline | baseline-observed | The imported addresses match one active WireGuard/Amnezia adapter; a physical endpoint route and both IP-family prerequisites were observed. The preflight returned blocked exit code `3` |
 | Authoritative routes, effective DNS/NRPT and local tunnel status | read-only-passed | On 2026-08-25 the production collector passed an opt-in live Windows smoke using structured ActiveStore routes and metrics, stable interface GUIDs and hardware markers, effective DNS servers and effective NRPT count. Local RedShield status is derived separately from provider health |
 | Provider handshake and egress health | field-not-run | P3.5 live-canary gate; an interface being present is not treated as provider or handshake proof |
-| Route/firewall/DNS apply or live canary | not-run | P3.4/P3.5 gates; requires offline rollback evidence and separate confirmation before any live mutation |
+| Offline Windows route/firewall/DNS mutation, commit-confirm and recovery | automated-passed | P3.4 strict artifacts and exact ownership passed activation/reload/post-check/prune fault injection, timeout/crash rollback, missing-manifest recovery, durable disable/restore retry and full `verify` on 2026-08-25 |
+| Native Windows apply and bounded live canary | field-not-run | P3.5/P3.6 gates; production `MutationBackend` and operator integration are absent, and any live mutation requires separate confirmation |
 
-P3.1 through P3.3 are complete for their read-only software scope. The fresh combined preflight with the prior external config is not run because that file is currently absent; no Windows field acceptance, apply readiness or `pc-core-ready` claim is made.
+P3.1 through P3.4 are complete for their software scope. The fresh combined preflight with the prior external config is not run because that file is currently absent; no native Windows apply, field acceptance or `pc-core-ready` claim is made.
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|

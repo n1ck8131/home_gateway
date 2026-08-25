@@ -81,6 +81,8 @@ State: software-complete 2026-08-25. Fresh combined preflight с внешним 
 
 ## Phase 2: завершить P3.4 offline apply, rollback и recovery
 
+Status: complete for the offline software scope on 2026-08-25; native/live apply remains blocked by the Phase 3 approval gate.
+
 Эта фаза создаёт mutation engine, но не запускает его на текущей сети.
 
 ### Scope
@@ -98,6 +100,8 @@ State: software-complete 2026-08-25. Fresh combined preflight с внешним 
 - process crash, timeout и failed post-check восстанавливают snapshot
 - unowned state никогда не удаляется
 - live canary остаётся заблокированным отдельным approval gate
+
+Evidence: [P3.4 offline mutation phase report](../../reports/2026-08-25-p34-offline-mutation.md).
 
 ## Phase 3: закрыть P3.5 и P3.6 на текущем PC
 

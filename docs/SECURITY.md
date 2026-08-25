@@ -40,7 +40,9 @@ The project treats the following as explicit threats:
 
 ## Command execution
 
-The P3 read-only collector uses `exec.CommandContext` with a fixed script and no caller-supplied executable or arguments. Windows APIs resolve the trusted Windows and System32 directories; Windows PowerShell and inbox module manifests use absolute paths, and the process receives a minimal sanitized environment with bounded output. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input. Physical adapters require the authoritative Windows hardware marker, while routes and future operations bind to stable interface GUIDs. P3.3 exposes no network mutation path.
+The P3 read-only collector uses `exec.CommandContext` with a fixed script and no caller-supplied executable or arguments. Windows APIs resolve the trusted Windows and System32 directories; Windows PowerShell and inbox module manifests use absolute paths, and the process receives a minimal sanitized environment with bounded output. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input. Physical adapters require the authoritative Windows hardware marker, while routes and future operations bind to stable interface GUIDs.
+
+P3.4 adds an offline mutation runtime, not a live executor. It accepts only strict bounded JSON artifacts, binds every provider endpoint to an independently qualified host-prefix set, rejects virtual or unstable default paths, and calls an injected structured `MutationBackend`. Project routes use reserved ownership metadata, firewall identities are revision-qualified and content-addressed, and generated NRPT identities are journaled exactly. Immutable revisions have SHA-256 manifests; recovery snapshots are hashed and semantically checked against those revisions before any replay. Foreign, Cisco and OS-owned state is neither persisted in recovery snapshots nor eligible for removal. The runtime package contains no shell, PowerShell, executable or native Windows mutation implementation; live integration remains separately gated.
 
 ## Supply chain controls
 

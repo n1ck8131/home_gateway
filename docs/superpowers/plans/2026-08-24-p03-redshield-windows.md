@@ -1,6 +1,6 @@
 # P3 RedShield-backed Windows pilot implementation plan
 
-Status: Active — P3.1 through P3.3 complete for their software scope; P3.4 next
+Status: Active — P3.1 through P3.4 complete for their software scope; P3.5 next
 
 ## Goal
 
@@ -53,7 +53,7 @@ Provider handshake and egress health are deliberately separate from local Window
 
 ### P3.4 Fail-closed apply and rollback
 
-Status: next
+Status: complete for the offline software scope on 2026-08-25. Strict route/firewall/NRPT artifacts, qualified endpoint binding, exact ownership, additive-first ordering, commit-confirm, LKG rollback, durable disable/restore intent and crash recovery passed fault injection and the full repository verification gate. The runtime has only an injected structured backend; native/live apply remains unavailable.
 
 - Implement project-owned Windows route/firewall/DNS operations with explicit ownership.
 - Preserve the RedShield endpoint and protected Cisco/system routes on direct paths.
@@ -62,6 +62,8 @@ Status: next
 Exit: offline mutation tests and rollback fault injection pass. A live canary still requires separate confirmation.
 
 ### P3.5 Current-PC safety matrix
+
+Status: next; every native mutation and the bounded live canary require separate confirmation.
 
 - Run a bounded live canary, then direct/RedShield/Cisco, DNS, IPv4/IPv6, MTU, TCP/UDP/QUIC and tunnel-down assertions.
 - Test adapter loss, daemon crash, OS restart, recovery and emergency disable.
@@ -76,4 +78,4 @@ Exit: `pc-core-ready`; own VPS and Flint 2 are not required.
 
 ## Validation batch
 
-Focused Go tests run during implementation. At the phase gate run `scripts/dev.ps1 -Command verify`, P2 regressions, Windows install/remove smoke and the separately approved live safety matrix. Real config contents must never appear in test or support artifacts.
+Focused Go tests run during implementation. P3.4 closes with `scripts/dev.ps1 -Command verify` and offline P2/transaction regressions. Windows install/remove smoke and the live safety matrix belong to separately approved P3.5/P3.6 work. Real config contents must never appear in test or support artifacts.

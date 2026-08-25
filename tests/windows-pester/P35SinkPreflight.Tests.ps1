@@ -24,6 +24,7 @@ Describe 'P3.5 sink qualification preflight' {
             'Get-PktmonFilterState',
             'Get-PktmonComponentState',
             'Get-PreflightExitCode',
+            'Test-TargetRouteUnavailableError',
             'Test-TargetStateReady',
             'Get-LoopbackAssessment'
         )
@@ -100,6 +101,7 @@ Describe 'P3.5 sink qualification preflight' {
     }
 
     It 'rejects direct file execution and binds output to the approved payload and boot' {
+        $script:Content | Should -Match 'home-gateway/p35/sink-preflight/v2'
         $script:Content | Should -Match '\$PSCommandPath'
         $script:Content | Should -Match 'hash-pinned in-memory payload'
         $script:Content | Should -Match 'ExpectedPayloadSHA256'
@@ -193,12 +195,54 @@ Describe 'P3.5 sink qualification preflight' {
     }
 
     It 'accepts an active non-loopback virtual default only for the sink primitive baseline' {
-        $ready = Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -SelectedRouteCount 1 `
-            -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $false
+        $ready = Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -ActiveDefaultCount 1 -SelectedRouteCount 1 `
+            -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $false `
+            -SelectedRouteUnavailable $false
         $ready | Should -BeTrue
 
-        (Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -SelectedRouteCount 1 `
-                -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $true) | Should -BeFalse
+        (Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -ActiveDefaultCount 1 -SelectedRouteCount 1 `
+                -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $true `
+                -SelectedRouteUnavailable $false) | Should -BeFalse
+    }
+
+    It 'accepts only the exact unreachable-route error as an empty sink baseline' {
+        $unavailable = Test-TargetRouteUnavailableError `
+            -ExceptionTypeName 'Microsoft.Management.Infrastructure.CimException' `
+            -FullyQualifiedErrorId 'Windows System Error 1231,Find-NetRoute' `
+            -MessageId 'Windows System Error 1231' -StatusCode 1 -ErrorHResult -2146233088
+        $unavailable | Should -BeTrue
+
+        (Test-TargetRouteUnavailableError `
+                -ExceptionTypeName 'Microsoft.Management.Infrastructure.CimException' `
+                -FullyQualifiedErrorId 'Windows System Error 5,Find-NetRoute' `
+                -MessageId 'Windows System Error 5' -StatusCode 1 -ErrorHResult -2146233088) | Should -BeFalse
+
+        (Test-TargetRouteUnavailableError `
+                -ExceptionTypeName 'System.InvalidOperationException' `
+                -FullyQualifiedErrorId 'Windows System Error 1231,Find-NetRoute' `
+                -MessageId 'Windows System Error 1231' -StatusCode 1 -ErrorHResult -2146233088) | Should -BeFalse
+
+        (Test-TargetRouteUnavailableError `
+                -ExceptionTypeName 'Microsoft.Management.Infrastructure.CimException' `
+                -FullyQualifiedErrorId 'Windows System Error 1231,Find-NetRoute' `
+                -MessageId '' -StatusCode 1 -ErrorHResult -2146233088) | Should -BeFalse
+
+        $ready = Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -ActiveDefaultCount 0 -SelectedRouteCount 0 `
+            -SelectedIsDefault $false -SelectedAdapterCount 0 -SelectedAdapterUp $false -SelectedAdapterLoopback $false `
+            -SelectedRouteUnavailable $true
+        $ready | Should -BeTrue
+
+        (Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -ActiveDefaultCount 1 -SelectedRouteCount 1 `
+                -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $false `
+                -SelectedRouteUnavailable $true) | Should -BeFalse
+
+        (Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -ActiveDefaultCount 1 -SelectedRouteCount 0 `
+                -SelectedIsDefault $false -SelectedAdapterCount 0 -SelectedAdapterUp $false -SelectedAdapterLoopback $false `
+                -SelectedRouteUnavailable $true) | Should -BeFalse
+
+        (Test-TargetStateReady -ActiveExactCount 1 -PersistentExactCount 0 -ActiveDefaultCount 0 -SelectedRouteCount 0 `
+                -SelectedIsDefault $false -SelectedAdapterCount 0 -SelectedAdapterUp $false -SelectedAdapterLoopback $false `
+                -SelectedRouteUnavailable $true) | Should -BeFalse
     }
 
     It 'identifies loopback by stable index and canonical address without ProtocolIFType' {

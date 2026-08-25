@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:Schema = 'home-gateway/p35/sink-preflight/v1'
+$script:Schema = 'home-gateway/p35/sink-preflight/v2'
 $script:Targets = @(
     [pscustomobject]@{ Family = 'IPv4'; Address = '192.0.2.1'; Prefix = '192.0.2.1/32' },
     [pscustomobject]@{ Family = 'IPv6'; Address = '2001:db8::1'; Prefix = '2001:db8::1/128' }
@@ -256,58 +256,122 @@ function Get-PreflightExitCode {
     return 3
 }
 
+function Test-TargetRouteUnavailableError {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ExceptionTypeName,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$FullyQualifiedErrorId,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$MessageId,
+        [Parameter(Mandatory = $true)][uint32]$StatusCode,
+        [Parameter(Mandatory = $true)][int]$ErrorHResult
+    )
+
+    return $ExceptionTypeName -ceq 'Microsoft.Management.Infrastructure.CimException' -and
+        $FullyQualifiedErrorId -ceq 'Windows System Error 1231,Find-NetRoute' -and
+        $MessageId -ceq 'Windows System Error 1231' -and $StatusCode -eq 1 -and
+        $ErrorHResult -eq -2146233088
+}
+
+function Get-TargetRouteLookup {
+    param([Parameter(Mandatory = $true)][string]$Address)
+
+    try {
+        $items = @(NetTCPIP\Find-NetRoute -RemoteIPAddress $Address -ErrorAction Stop)
+        return [ordered]@{ unreachable = $false; items = $items }
+    } catch {
+        $exceptionTypeName = $_.Exception.GetType().FullName
+        if ($exceptionTypeName -cne 'Microsoft.Management.Infrastructure.CimException') { throw }
+        $fullyQualifiedErrorId = [string]$_.FullyQualifiedErrorId
+        $messageId = [string]$_.Exception.MessageId
+        $statusCode = $_.Exception.StatusCode
+        if ([string]::IsNullOrEmpty($fullyQualifiedErrorId) -or [string]::IsNullOrEmpty($messageId) -or
+            $statusCode -isnot [uint32]) { throw }
+        $isUnavailable = Test-TargetRouteUnavailableError `
+            -ExceptionTypeName $exceptionTypeName `
+            -FullyQualifiedErrorId $fullyQualifiedErrorId `
+            -MessageId $messageId `
+            -StatusCode $statusCode `
+            -ErrorHResult ([int]$_.Exception.HResult)
+        if (-not $isUnavailable) { throw }
+        return [ordered]@{ unreachable = $true; items = @() }
+    }
+}
+
 function Test-TargetStateReady {
     param(
         [Parameter(Mandatory = $true)][int]$ActiveExactCount,
         [Parameter(Mandatory = $true)][int]$PersistentExactCount,
+        [Parameter(Mandatory = $true)][int]$ActiveDefaultCount,
         [Parameter(Mandatory = $true)][int]$SelectedRouteCount,
         [Parameter(Mandatory = $true)][bool]$SelectedIsDefault,
         [Parameter(Mandatory = $true)][int]$SelectedAdapterCount,
         [Parameter(Mandatory = $true)][bool]$SelectedAdapterUp,
-        [Parameter(Mandatory = $true)][bool]$SelectedAdapterLoopback
+        [Parameter(Mandatory = $true)][bool]$SelectedAdapterLoopback,
+        [Parameter(Mandatory = $true)][bool]$SelectedRouteUnavailable
     )
 
     # This qualifies only the documentation-target sink primitive. The real
     # provider endpoint remains subject to its separate physical-route gate.
-    return $ActiveExactCount -eq 0 -and $PersistentExactCount -eq 0 -and
+    $defaultReady = -not $SelectedRouteUnavailable -and
+        $ActiveDefaultCount -gt 0 -and
         $SelectedRouteCount -eq 1 -and $SelectedIsDefault -and
         $SelectedAdapterCount -eq 1 -and $SelectedAdapterUp -and -not $SelectedAdapterLoopback
+    $unreachableReady = $SelectedRouteUnavailable -and
+        $ActiveDefaultCount -eq 0 -and
+        $SelectedRouteCount -eq 0 -and -not $SelectedIsDefault -and
+        $SelectedAdapterCount -eq 0 -and -not $SelectedAdapterUp -and -not $SelectedAdapterLoopback
+    return $ActiveExactCount -eq 0 -and $PersistentExactCount -eq 0 -and
+        ($defaultReady -or $unreachableReady)
 }
 
 function Get-TargetState {
     param([Parameter(Mandatory = $true)]$Target)
 
-    $active = @(NetTCPIP\Get-NetRoute -PolicyStore ActiveStore -IncludeAllCompartments -ErrorAction Stop | Where-Object {
+    $expectedDefault = if ($Target.Family -ceq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
+    $activeRoutes = @(NetTCPIP\Get-NetRoute -PolicyStore ActiveStore -IncludeAllCompartments -ErrorAction Stop)
+    $active = @($activeRoutes | Where-Object {
         [string]$_.DestinationPrefix -ceq $Target.Prefix
+    })
+    $defaultScopeRoutes = @(NetTCPIP\Get-NetRoute -AddressFamily $Target.Family -PolicyStore ActiveStore -ErrorAction Stop)
+    $activeDefaults = @($defaultScopeRoutes | Where-Object {
+        [string]$_.DestinationPrefix -ceq $expectedDefault
     })
     $persistent = @(NetTCPIP\Get-NetRoute -PolicyStore PersistentStore -ErrorAction Stop | Where-Object {
         [string]$_.DestinationPrefix -ceq $Target.Prefix
     })
-    $found = @(NetTCPIP\Find-NetRoute -RemoteIPAddress $Target.Address -ErrorAction Stop)
+    $lookup = Get-TargetRouteLookup -Address $Target.Address
+    $found = @($lookup.items)
     $route = @($found | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_NetRoute' })
     $adapter = @()
     if ($route.Count -eq 1) {
         $adapter = @(NetAdapter\Get-NetAdapter -IncludeHidden -InterfaceIndex ([int]$route[0].InterfaceIndex) -ErrorAction Stop)
     }
-    $expectedDefault = if ($Target.Family -ceq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
     $selectedIsDefault = $route.Count -eq 1 -and [string]$route[0].DestinationPrefix -ceq $expectedDefault
     $selectedIsHardware = $adapter.Count -eq 1 -and [bool]$adapter[0].HardwareInterface
     $selectedIsUp = $adapter.Count -eq 1 -and [int]$adapter[0].MediaConnectionState -eq 1
     $selectedIsLoopback = $route.Count -eq 1 -and [int]$route[0].InterfaceIndex -eq 1
     $ready = Test-TargetStateReady -ActiveExactCount $active.Count -PersistentExactCount $persistent.Count `
+        -ActiveDefaultCount $activeDefaults.Count `
         -SelectedRouteCount $route.Count -SelectedIsDefault $selectedIsDefault -SelectedAdapterCount $adapter.Count `
-        -SelectedAdapterUp $selectedIsUp -SelectedAdapterLoopback $selectedIsLoopback
+        -SelectedAdapterUp $selectedIsUp -SelectedAdapterLoopback $selectedIsLoopback `
+        -SelectedRouteUnavailable ([bool]$lookup.unreachable)
+    $pathState = if ($ready -and [bool]$lookup.unreachable) { 'no_route' } elseif ($ready) { 'qualified_default' } else { 'unqualified' }
+    $routeResolutionError = if ([bool]$lookup.unreachable) { 1231 } else { $null }
 
     return [ordered]@{
         family                    = $Target.Family
         active_exact_count        = $active.Count
         persistent_exact_count    = $persistent.Count
+        active_default_count      = $activeDefaults.Count
+        path_state                = $pathState
+        current_egress_path       = $route.Count -eq 1
+        route_resolution_error    = $routeResolutionError
         selected_route_count      = $route.Count
         selected_is_default       = $selectedIsDefault
         selected_adapter_count    = $adapter.Count
         selected_adapter_hardware = $selectedIsHardware
         selected_adapter_up       = $selectedIsUp
         selected_adapter_loopback = $selectedIsLoopback
+        selected_route_unreachable = [bool]$lookup.unreachable
         ready                     = $ready
     }
 }

@@ -62,9 +62,44 @@ function Get-TextSHA256 {
 function Invoke-PktmonReadOnly {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
+    $argumentKey = [string]::Join([char]0, $Arguments)
+    $argumentLine = switch ($argumentKey) {
+        'status' { 'status'; break }
+        "filter$([char]0)list" { 'filter list'; break }
+        "list$([char]0)--json" { 'list --json'; break }
+        default { throw 'pktmon read-only arguments are not allowlisted' }
+    }
     $pktmon = Join-Path ([Environment]::SystemDirectory) 'pktmon.exe'
-    $text = & $pktmon @Arguments 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
+    $item = Get-Item -LiteralPath $pktmon -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'pktmon executable is invalid'
+    }
+
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $pktmon
+    $startInfo.Arguments = $argumentLine
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+    $startInfo.StandardOutputEncoding = $utf8
+    $startInfo.StandardErrorEncoding = $utf8
+
+    $process = [Diagnostics.Process]::new()
+    try {
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw 'pktmon read-only query did not start' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $text = $stdoutTask.GetAwaiter().GetResult()
+        $errorText = $stderrTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+    if ($exitCode -ne 0 -or $errorText.Length -ne 0) {
         throw 'pktmon read-only query failed'
     }
     if ($text.Length -gt 4MB) {
@@ -125,10 +160,17 @@ function Get-PktmonFilterState {
         'None',
         (ConvertFrom-CodePoints -Value @(1053, 1077, 1090))
     )
+    $emptySummaries = @(
+        'No packet filters are specified.',
+        'Packet filters are not specified.',
+        (ConvertFrom-CodePoints -Value @(1060, 1080, 1083, 1100, 1090, 1088, 1099, 32, 1087, 1072, 1082, 1077, 1090, 1086, 1074, 32, 1085, 1077, 32, 1091, 1082, 1072, 1079, 1072, 1085, 1099, 46))
+    )
     $hasHeader = @($lines | Where-Object { $_ -in $headers }).Count -eq 1
     $hasEmpty = @($lines | Where-Object { $_ -in $emptyMarkers }).Count -eq 1
+    $hasEmptySummary = @($lines | Where-Object { $_ -in $emptySummaries }).Count -eq 1
     $filterCount = @($lines | Where-Object { $_ -match '^\d+\s+' }).Count
-    $recognizedEmpty = $hasHeader -and $hasEmpty -and $filterCount -eq 0
+    $recognizedEmpty = ($lines.Count -eq 2 -and $hasHeader -and $hasEmpty -and $filterCount -eq 0) -or
+        ($lines.Count -eq 1 -and $hasEmptySummary -and $filterCount -eq 0)
     $recognizedNonEmpty = $hasHeader -and -not $hasEmpty -and $filterCount -gt 0
     return [ordered]@{
         recognized = $recognizedEmpty -or $recognizedNonEmpty
@@ -146,34 +188,53 @@ function Get-PktmonComponentState {
         return [ordered]@{ recognized = $false; monitorable_count = 0 }
     }
 
-    if ($null -eq $parsed -or $parsed -is [Array]) {
+    if ($null -eq $parsed) {
         return [ordered]@{ recognized = $false; monitorable_count = 0 }
     }
-    $componentProperties = @($parsed.PSObject.Properties | Where-Object { $_.Name -ceq 'Components' })
-    if ($componentProperties.Count -ne 1 -or $componentProperties[0].Value -isnot [Array]) {
+    $roots = if ($parsed -is [Array]) { @($parsed) } else { @($parsed) }
+    if ($roots.Count -eq 0 -or $roots.Count -gt 1024) {
         return [ordered]@{ recognized = $false; monitorable_count = 0 }
     }
-    $components = @($componentProperties[0].Value)
-    if ($components.Count -eq 0 -or $components.Count -gt 65535) {
+
+    $components = [Collections.Generic.List[object]]::new()
+    foreach ($root in $roots) {
+        if ($null -eq $root -or $root -is [Array] -or $root -is [string] -or $root.GetType().IsValueType) {
+            return [ordered]@{ recognized = $false; monitorable_count = 0 }
+        }
+        $componentProperties = @($root.PSObject.Properties | Where-Object { $_.Name -ceq 'Components' })
+        if ($componentProperties.Count -ne 1 -or $componentProperties[0].Value -isnot [Array]) {
+            return [ordered]@{ recognized = $false; monitorable_count = 0 }
+        }
+        $rootComponents = @($componentProperties[0].Value)
+        if ($rootComponents.Count -eq 0 -or $components.Count + $rootComponents.Count -gt 65535) {
+            return [ordered]@{ recognized = $false; monitorable_count = 0 }
+        }
+        foreach ($component in $rootComponents) { $components.Add($component) }
+    }
+    if ($components.Count -eq 0) {
         return [ordered]@{ recognized = $false; monitorable_count = 0 }
     }
 
     $integerTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])
     $ids = @{}
     foreach ($component in $components) {
-        if ($null -eq $component -or $component -is [Array]) {
+        if ($null -eq $component -or $component -is [Array] -or $component -is [string] -or $component.GetType().IsValueType) {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
         }
         $idProperties = @($component.PSObject.Properties | Where-Object { $_.Name -ceq 'Id' })
         $secondaryProperties = @($component.PSObject.Properties | Where-Object { $_.Name -ceq 'SecondaryId' })
-        if ($idProperties.Count -ne 1 -or $secondaryProperties.Count -ne 1) {
+        if ($idProperties.Count -ne 1 -or $secondaryProperties.Count -gt 1) {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
         }
         $id = $idProperties[0].Value
-        $secondaryID = $secondaryProperties[0].Value
-        if ($id.GetType() -notin $integerTypes -or [decimal]$id -le 0 -or
-            $secondaryID.GetType() -notin $integerTypes -or [decimal]$secondaryID -lt 0) {
+        if ($null -eq $id -or $id.GetType() -notin $integerTypes -or [decimal]$id -le 0) {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
+        }
+        if ($secondaryProperties.Count -eq 1) {
+            $secondaryID = $secondaryProperties[0].Value
+            if ($null -eq $secondaryID -or $secondaryID.GetType() -notin $integerTypes -or [decimal]$secondaryID -lt 0) {
+                return [ordered]@{ recognized = $false; monitorable_count = 0 }
+            }
         }
         $idKey = ([uint64]$id).ToString([Globalization.CultureInfo]::InvariantCulture)
         if ($ids.ContainsKey($idKey)) {
@@ -195,6 +256,24 @@ function Get-PreflightExitCode {
     return 3
 }
 
+function Test-TargetStateReady {
+    param(
+        [Parameter(Mandatory = $true)][int]$ActiveExactCount,
+        [Parameter(Mandatory = $true)][int]$PersistentExactCount,
+        [Parameter(Mandatory = $true)][int]$SelectedRouteCount,
+        [Parameter(Mandatory = $true)][bool]$SelectedIsDefault,
+        [Parameter(Mandatory = $true)][int]$SelectedAdapterCount,
+        [Parameter(Mandatory = $true)][bool]$SelectedAdapterUp,
+        [Parameter(Mandatory = $true)][bool]$SelectedAdapterLoopback
+    )
+
+    # This qualifies only the documentation-target sink primitive. The real
+    # provider endpoint remains subject to its separate physical-route gate.
+    return $ActiveExactCount -eq 0 -and $PersistentExactCount -eq 0 -and
+        $SelectedRouteCount -eq 1 -and $SelectedIsDefault -and
+        $SelectedAdapterCount -eq 1 -and $SelectedAdapterUp -and -not $SelectedAdapterLoopback
+}
+
 function Get-TargetState {
     param([Parameter(Mandatory = $true)]$Target)
 
@@ -210,9 +289,14 @@ function Get-TargetState {
     if ($route.Count -eq 1) {
         $adapter = @(NetAdapter\Get-NetAdapter -IncludeHidden -InterfaceIndex ([int]$route[0].InterfaceIndex) -ErrorAction Stop)
     }
-    $selectedIsDefault = $route.Count -eq 1 -and [string]$route[0].DestinationPrefix -in @('0.0.0.0/0', '::/0')
+    $expectedDefault = if ($Target.Family -ceq 'IPv4') { '0.0.0.0/0' } else { '::/0' }
+    $selectedIsDefault = $route.Count -eq 1 -and [string]$route[0].DestinationPrefix -ceq $expectedDefault
     $selectedIsHardware = $adapter.Count -eq 1 -and [bool]$adapter[0].HardwareInterface
     $selectedIsUp = $adapter.Count -eq 1 -and [int]$adapter[0].MediaConnectionState -eq 1
+    $selectedIsLoopback = $route.Count -eq 1 -and [int]$route[0].InterfaceIndex -eq 1
+    $ready = Test-TargetStateReady -ActiveExactCount $active.Count -PersistentExactCount $persistent.Count `
+        -SelectedRouteCount $route.Count -SelectedIsDefault $selectedIsDefault -SelectedAdapterCount $adapter.Count `
+        -SelectedAdapterUp $selectedIsUp -SelectedAdapterLoopback $selectedIsLoopback
 
     return [ordered]@{
         family                    = $Target.Family
@@ -223,31 +307,54 @@ function Get-TargetState {
         selected_adapter_count    = $adapter.Count
         selected_adapter_hardware = $selectedIsHardware
         selected_adapter_up       = $selectedIsUp
-        ready                     = $active.Count -eq 0 -and $persistent.Count -eq 0 -and $selectedIsDefault -and $selectedIsHardware -and $selectedIsUp
+        selected_adapter_loopback = $selectedIsLoopback
+        ready                     = $ready
+    }
+}
+
+function Get-LoopbackAssessment {
+    param(
+        [Parameter(Mandatory = $true)][string]$Family,
+        [Parameter(Mandatory = $true)][object[]]$InterfaceItems,
+        [Parameter(Mandatory = $true)][object[]]$AddressItems
+    )
+
+    $expectedAddress = if ($Family -ceq 'IPv4') { '127.0.0.1' } else { '::1' }
+    $expectedPrefixLength = if ($Family -ceq 'IPv4') { 8 } else { 128 }
+    $items = @($InterfaceItems | Where-Object {
+        [int]$_.CompartmentId -eq 1 -and [int]$_.InterfaceIndex -eq 1
+    })
+    $addresses = @($AddressItems | Where-Object {
+        $compartmentProperties = @($_.PSObject.Properties | Where-Object { $_.Name -ceq 'CompartmentId' })
+        $isDefaultCompartment = $compartmentProperties.Count -eq 0 -or
+            ($compartmentProperties.Count -eq 1 -and [int]$compartmentProperties[0].Value -eq 1)
+        $isDefaultCompartment -and [int]$_.InterfaceIndex -eq 1 -and
+        [string]$_.IPAddress -ceq $expectedAddress -and
+        [int]$_.PrefixLength -eq $expectedPrefixLength -and
+        [int]$_.AddressState -eq 4
+    })
+    $metric = $null
+    $connected = $false
+    if ($items.Count -eq 1 -and $null -ne $items[0].InterfaceMetric) {
+        $metric = [uint64]$items[0].InterfaceMetric
+        $connected = [int]$items[0].ConnectionState -eq 1
+    }
+    return [ordered]@{
+        family        = $Family
+        count         = $items.Count
+        address_count = $addresses.Count
+        metric        = $metric
+        connected     = $connected
+        ready         = $items.Count -eq 1 -and $addresses.Count -eq 1 -and $connected -and $null -ne $metric -and $metric -le 65535
     }
 }
 
 function Get-LoopbackState {
     param([Parameter(Mandatory = $true)][string]$Family)
 
-    $items = @(NetTCPIP\Get-NetIPInterface -AddressFamily $Family -IncludeAllCompartments -ErrorAction Stop | Where-Object {
-        [int]$_.CompartmentId -eq 1 -and
-        [int]$_.InterfaceIndex -eq 1 -and
-        [int]$_.ProtocolIFType -eq 24
-    })
-    $metric = $null
-    $connected = $false
-    if ($items.Count -eq 1) {
-        $metric = [uint64]$items[0].InterfaceMetric
-        $connected = [int]$items[0].ConnectionState -eq 1
-    }
-    return [ordered]@{
-        family    = $Family
-        count     = $items.Count
-        metric    = $metric
-        connected = $connected
-        ready     = $items.Count -eq 1 -and $connected -and $metric -le 65535
-    }
+    $interfaceItems = @(NetTCPIP\Get-NetIPInterface -AddressFamily $Family -IncludeAllCompartments -ErrorAction Stop)
+    $addressItems = @(NetTCPIP\Get-NetIPAddress -AddressFamily $Family -ErrorAction Stop)
+    return Get-LoopbackAssessment -Family $Family -InterfaceItems $interfaceItems -AddressItems $addressItems
 }
 
 if (-not [string]::IsNullOrEmpty($PSCommandPath)) {

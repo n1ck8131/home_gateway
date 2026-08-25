@@ -17,12 +17,15 @@ Describe 'P3.5 sink qualification preflight' {
         })
         $script:Content = [IO.File]::ReadAllText($script:PreflightPath)
         $functionNames = @(
+            'Get-TextSHA256',
             'ConvertFrom-CodePoints',
             'Test-ContainsAny',
             'Get-PktmonStatusState',
             'Get-PktmonFilterState',
             'Get-PktmonComponentState',
-            'Get-PreflightExitCode'
+            'Get-PreflightExitCode',
+            'Test-TargetStateReady',
+            'Get-LoopbackAssessment'
         )
         foreach ($functionName in $functionNames) {
             $definition = @($script:Ast.FindAll({
@@ -72,6 +75,11 @@ Describe 'P3.5 sink qualification preflight' {
     It 'pins pktmon to System32 and invokes only read-only subcommands' {
         $script:Content | Should -Match "Join-Path \(\[Environment\]::SystemDirectory\) 'pktmon\.exe'"
         $script:Content | Should -Not -Match '\$env:SystemRoot'
+        $script:Content | Should -Match 'StandardOutputEncoding = \$utf8'
+        $script:Content | Should -Match 'StandardErrorEncoding = \$utf8'
+        $script:Content | Should -Match "'filter list'"
+        $script:Content | Should -Match "'list --json'"
+        $script:Content | Should -Not -Match '& \$pktmon'
         $script:Content | Should -Match "Invoke-PktmonReadOnly -Arguments @\('status'\)"
         $script:Content | Should -Match "Invoke-PktmonReadOnly -Arguments @\('filter', 'list'\)"
         $script:Content | Should -Match "Invoke-PktmonReadOnly -Arguments @\('list', '--json'\)"
@@ -85,6 +93,8 @@ Describe 'P3.5 sink qualification preflight' {
         $script:Content | Should -Match 'NetTCPIP\\Get-NetRoute'
         $script:Content | Should -Match 'NetTCPIP\\Find-NetRoute'
         $script:Content | Should -Match 'NetTCPIP\\Get-NetIPInterface'
+        $script:Content | Should -Match 'NetTCPIP\\Get-NetIPAddress -AddressFamily \$Family -ErrorAction Stop'
+        $script:Content | Should -Not -Match 'NetTCPIP\\Get-NetIPAddress -AddressFamily \$Family -IncludeAllCompartments'
         $script:Content | Should -Match 'NetAdapter\\Get-NetAdapter'
         $script:Content | Should -Match 'CimCmdlets\\Get-CimInstance'
     }
@@ -113,6 +123,11 @@ Describe 'P3.5 sink qualification preflight' {
         $russianStopped.stopped | Should -BeTrue
         $russianStopped.running | Should -BeFalse
 
+        $legacyOEM = [Text.Encoding]::GetEncoding(866).GetString([Text.Encoding]::UTF8.GetBytes($russianStoppedText))
+        $legacyOEM.Length | Should -Be 50
+        (Get-TextSHA256 -Text $legacyOEM) | Should -Be 'c40ef82dac4ecfe635a8863f085690e5f686e605fc1429ae13867fdcac9613ee'
+        (Get-PktmonStatusState -Text $legacyOEM).recognized | Should -BeFalse
+
         $englishRunning = Get-PktmonStatusState -Text 'Packet Monitor is already running.'
         $englishRunning.recognized | Should -BeTrue
         $englishRunning.running | Should -BeTrue
@@ -131,6 +146,20 @@ Describe 'P3.5 sink qualification preflight' {
         $russianEmpty.recognized | Should -BeTrue
         $russianEmpty.empty | Should -BeTrue
 
+        $legacyHeader = [Text.Encoding]::GetEncoding(866).GetString([Text.Encoding]::UTF8.GetBytes($russianHeader))
+        $legacyNone = [Text.Encoding]::GetEncoding(866).GetString([Text.Encoding]::UTF8.GetBytes($russianNone))
+        (Get-TextSHA256 -Text $legacyHeader) | Should -Be 'e10086990c97ed0b56ab48a87734c8b37cfe98a475d9fbc4fb5f18c660de95e9'
+        (Get-TextSHA256 -Text $legacyNone) | Should -Be '9f66b7ccd12590c02b4c489255863d72ca23bf5651f7d40cf06308b8dd6968bd'
+
+        $russianSummary = ConvertFrom-CodePoints -Value @(1060, 1080, 1083, 1100, 1090, 1088, 1099, 32, 1087, 1072, 1082, 1077, 1090, 1086, 1074, 32, 1085, 1077, 32, 1091, 1082, 1072, 1079, 1072, 1085, 1099, 46)
+        $summaryEmpty = Get-PktmonFilterState -Text $russianSummary
+        $summaryEmpty.recognized | Should -BeTrue
+        $summaryEmpty.empty | Should -BeTrue
+
+        $emptyWithUnknownLine = Get-PktmonFilterState -Text ("Packet Filters:`r`nNone`r`nunexpected")
+        $emptyWithUnknownLine.recognized | Should -BeFalse
+        $emptyWithUnknownLine.empty | Should -BeFalse
+
         $nonEmpty = Get-PktmonFilterState -Text "Packet Filters:`r`n # Name IP Address`r`n - ---- ----------`r`n 1 owned 192.0.2.1/32"
         $nonEmpty.recognized | Should -BeTrue
         $nonEmpty.empty | Should -BeFalse
@@ -146,14 +175,44 @@ Describe 'P3.5 sink qualification preflight' {
         $valid.recognized | Should -BeTrue
         $valid.monitorable_count | Should -Be 1
 
+        $grouped = Get-PktmonComponentState -Text '[{"Layer":"one","Components":[{"Id":7,"SecondaryId":0,"UnknownA":1}]},{"Layer":"two","Components":[{"Id":8,"UnknownB":2}]}]'
+        $grouped.recognized | Should -BeTrue
+        $grouped.monitorable_count | Should -Be 2
+
         (Get-PktmonComponentState -Text '{}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '[]').recognized | Should -BeFalse
+        (Get-PktmonComponentState -Text '[{"Layer":"one"}]').recognized | Should -BeFalse
+        (Get-PktmonComponentState -Text '[{"Components":[]}]').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text 'not-json').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"note":"\\"Id\\":7,\\"SecondaryId\\":0"}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":{"Id":7,"SecondaryId":0}}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":[{"Id":"7","SecondaryId":0}]}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":[{"Id":7,"SecondaryId":"0"}]}').recognized | Should -BeFalse
+        (Get-PktmonComponentState -Text '{"Components":[{"Id":null}]}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":[{"Id":7,"SecondaryId":0},{"Id":7,"SecondaryId":1}]}').recognized | Should -BeFalse
+    }
+
+    It 'accepts an active non-loopback virtual default only for the sink primitive baseline' {
+        $ready = Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -SelectedRouteCount 1 `
+            -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $false
+        $ready | Should -BeTrue
+
+        (Test-TargetStateReady -ActiveExactCount 0 -PersistentExactCount 0 -SelectedRouteCount 1 `
+                -SelectedIsDefault $true -SelectedAdapterCount 1 -SelectedAdapterUp $true -SelectedAdapterLoopback $true) | Should -BeFalse
+    }
+
+    It 'identifies loopback by stable index and canonical address without ProtocolIFType' {
+        $interface = [pscustomobject]@{ CompartmentId = 1; InterfaceIndex = 1; ProtocolIFType = $null; InterfaceMetric = 75; ConnectionState = 1 }
+        $ipv4 = [pscustomobject]@{ InterfaceIndex = 1; IPAddress = '127.0.0.1'; PrefixLength = 8; AddressState = 4 }
+        $state = Get-LoopbackAssessment -Family 'IPv4' -InterfaceItems @($interface) -AddressItems @($ipv4)
+        $state.ready | Should -BeTrue
+        $state.address_count | Should -Be 1
+
+        $wrongAddress = [pscustomobject]@{ InterfaceIndex = 1; IPAddress = '127.0.0.2'; PrefixLength = 8; AddressState = 4 }
+        (Get-LoopbackAssessment -Family 'IPv4' -InterfaceItems @($interface) -AddressItems @($wrongAddress)).ready | Should -BeFalse
+
+        $otherCompartment = [pscustomobject]@{ CompartmentId = 2; InterfaceIndex = 1; IPAddress = '127.0.0.1'; PrefixLength = 8; AddressState = 4 }
+        (Get-LoopbackAssessment -Family 'IPv4' -InterfaceItems @($interface) -AddressItems @($otherCompartment)).ready | Should -BeFalse
     }
 
     It 'returns a nonzero fail-closed code for an unready result' {

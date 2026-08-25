@@ -55,6 +55,8 @@ const (
 )
 
 type Status struct {
+	// State describes provider-reported tunnel or handshake health. It must not
+	// be inferred from the presence of a local operating-system interface.
 	State    State `json:"state"`
 	Observed bool  `json:"observed"`
 }

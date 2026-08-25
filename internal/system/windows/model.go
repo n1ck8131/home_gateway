@@ -20,26 +20,46 @@ const (
 )
 
 type Adapter struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	Index       int         `json:"index"`
-	Kind        AdapterKind `json:"kind"`
-	Up          bool        `json:"up"`
-	Addresses   []string    `json:"addresses,omitempty"`
+	Name              string      `json:"name"`
+	Description       string      `json:"description"`
+	Index             int         `json:"index"`
+	InterfaceGUID     string      `json:"interface_guid"`
+	HardwareInterface bool        `json:"hardware_interface"`
+	Kind              AdapterKind `json:"kind"`
+	AdminStatus       int         `json:"admin_status"`
+	OperationalStatus int         `json:"operational_status"`
+	Up                bool        `json:"up"`
+	Addresses         []string    `json:"addresses,omitempty"`
 }
 
 type Route struct {
-	Family           AddressFamily `json:"family"`
-	Destination      string        `json:"destination"`
-	NextHop          string        `json:"next_hop,omitempty"`
-	InterfaceIndex   int           `json:"interface_index,omitempty"`
-	InterfaceAddress string        `json:"interface_address,omitempty"`
-	Metric           int           `json:"metric"`
+	Family          AddressFamily `json:"family"`
+	Destination     string        `json:"destination"`
+	NextHop         string        `json:"next_hop,omitempty"`
+	InterfaceIndex  int           `json:"interface_index,omitempty"`
+	InterfaceGUID   string        `json:"interface_guid,omitempty"`
+	RouteMetric     uint64        `json:"route_metric"`
+	InterfaceMetric uint64        `json:"interface_metric"`
+	Metric          uint64        `json:"metric"`
+	State           int           `json:"state"`
+}
+
+type DNSServerSet struct {
+	Family         AddressFamily `json:"family"`
+	InterfaceIndex int           `json:"interface_index"`
+	InterfaceGUID  string        `json:"interface_guid,omitempty"`
+	Servers        []string      `json:"servers"`
+}
+
+type DNSPolicy struct {
+	ServerSets             []DNSServerSet `json:"server_sets"`
+	EffectiveNRPTRuleCount int            `json:"effective_nrpt_rule_count"`
 }
 
 type Inventory struct {
 	Adapters                   []Adapter `json:"adapters"`
 	Routes                     []Route   `json:"routes"`
+	DNSPolicy                  DNSPolicy `json:"dns_policy"`
 	EndpointAddresses          []string  `json:"endpoint_addresses,omitempty"`
 	RouteSnapshotAuthoritative bool      `json:"route_snapshot_authoritative"`
 	DNSPolicyObserved          bool      `json:"dns_policy_observed"`
@@ -73,18 +93,39 @@ const (
 )
 
 // Operation is declarative. It intentionally contains no executable, shell
-// fragment, or argument vector.
+// fragment, or argument vector. InterfaceGUID is required for every operation
+// that refers to an existing Windows adapter.
 type Operation struct {
 	Kind           OperationKind `json:"kind"`
 	Family         AddressFamily `json:"family,omitempty"`
 	Destination    string        `json:"destination,omitempty"`
 	NextHop        string        `json:"next_hop,omitempty"`
 	InterfaceIndex int           `json:"interface_index,omitempty"`
+	InterfaceGUID  string        `json:"interface_guid,omitempty"`
+}
+
+type LocalTunnelState string
+
+const (
+	LocalTunnelUnknown LocalTunnelState = "unknown"
+	LocalTunnelDown    LocalTunnelState = "down"
+	LocalTunnelUp      LocalTunnelState = "up"
+)
+
+// LocalTunnelStatus is derived only from the authoritative Windows adapter and
+// address snapshot. It is deliberately separate from provider/handshake health.
+type LocalTunnelStatus struct {
+	State         LocalTunnelState `json:"state"`
+	Observed      bool             `json:"observed"`
+	InterfaceGUID string           `json:"interface_guid,omitempty"`
 }
 
 type Preflight struct {
-	Ready        bool        `json:"ready"`
-	ApplyBlocked bool        `json:"apply_blocked"`
-	Findings     []Finding   `json:"findings"`
-	Operations   []Operation `json:"operations"`
+	// Ready remains false in P3.3 because Windows mutation is unsupported.
+	Ready             bool              `json:"ready"`
+	ReadOnlyQualified bool              `json:"read_only_qualified"`
+	ApplyBlocked      bool              `json:"apply_blocked"`
+	LocalTunnelStatus LocalTunnelStatus `json:"local_tunnel_status"`
+	Findings          []Finding         `json:"findings"`
+	Operations        []Operation       `json:"operations"`
 }

@@ -2,13 +2,13 @@
 
 Status: planned for 2026-08-26
 
-Этот план продолжает текущий P3.3. Сначала Windows PC работает через RedShield. Затем приложение получает управление, обновляемые списки и Cisco-aware routing. После этого P8 переводит тот же control plane на один собственный VPN-сервер DigitalOcean. Покупка роутера и домашняя сеть начинаются только после отдельного PC-first acceptance gate.
+Этот план продолжает завершённый software scope P3.3. Сначала Windows PC работает через RedShield. Затем приложение получает управление, обновляемые списки и Cisco-aware routing. После этого P8 переводит тот же control plane на один собственный VPN-сервер DigitalOcean. Покупка роутера и домашняя сеть начинаются только после отдельного PC-first acceptance gate.
 
 ## Контракт документа
 
 - **Тип**: execution plan
 - **Аудитория**: владелец проекта и implementation agents
-- **Одна задача**: довести текущий P3.3 до принятого Windows-приложения с одним собственным VPN
+- **Одна задача**: довести Windows PC от завершённого P3.3 до принятого приложения с одним собственным VPN
 - **Canonical roadmap**: [PLAN.md](../../../PLAN.md)
 - **Текущий phase plan**: [P3 RedShield-backed Windows pilot](2026-08-24-p03-redshield-windows.md)
 - **Evidence status**: repository state и официальная документация DigitalOcean проверены 2026-08-25
@@ -54,9 +54,11 @@ Official references:
 
 1 GiB RAM достаточно только как стартовая гипотеза для одного AmneziaWG server, restricted `server-agent` и малой telemetry workload. P8 обязан измерить memory, CPU, packet loss, throughput и out-of-memory risk. Resize остаётся rollback-compatible capacity action, а не скрытым изменением бюджета.
 
-## Phase 1: завершить P3.3 read-only foundation
+## Phase 1: P3.3 read-only foundation — software-complete
 
 Эта фаза закрывает безопасное наблюдение Windows state. Она не применяет routes или DNS.
+
+State: software-complete 2026-08-25. Fresh combined preflight с внешним `Netherlands.conf` не повторён: файл отсутствует по ранее указанному пути. Этот evidence gap остаётся до P3.5 field acceptance и не превращает read-only qualification в apply readiness.
 
 ### Scope
 
@@ -72,7 +74,8 @@ Official references:
 ### Exit gate
 
 - fixture tests отклоняют malformed, duplicate, stale и oversized snapshots
-- реальный `Netherlands.conf` проходит read-only preflight без вывода keys или config path
+- ранее предоставленный `Netherlands.conf` прошёл importer и baseline preflight без вывода keys или config path; свежий combined replay выполнить после возврата внешнего файла
+- production `NativeCollector` проходит opt-in live smoke для structured ActiveStore routes, stable identities и effective DNS/NRPT
 - direct endpoint, RedShield binding, IPv4, IPv6 и Cisco state имеют явные findings
 - apply остаётся недоступным
 
@@ -372,14 +375,14 @@ Router purchase разрешается только после принятог�
 
 Завтрашняя последовательность:
 
-1. Закрыть software scope P3.3 и повторить redacted read-only preflight.
+1. Зафиксировать P3.3 closure evidence; повторить redacted read-only preflight, когда внешний config снова доступен.
 2. Зафиксировать P3.4 ownership, transaction и rollback contracts; начать offline tests.
 3. Создать Phase 6A source scorecard и candidate discovery protocol.
 4. Зафиксировать P8 provisioning, server-agent и telemetry data contracts.
 5. Подготовить DigitalOcean create plan без создания Droplet.
 6. Выпустить end-of-day gate report с passed evidence, blockers и следующим approval request.
 
-Ожидаемый результат дня: P3.3 software-complete или точный blocker; P3.4 implementation started; GitHub research protocol; reviewed DigitalOcean and traffic-accounting design. Готовое приложение, live traffic mutation и работающий billable VPN не являются обещанием одного дня.
+Ожидаемый результат дня: P3.3 software-complete зафиксирован; P3.4 implementation started; GitHub research protocol; reviewed DigitalOcean and traffic-accounting design. Готовое приложение, live traffic mutation и работающий billable VPN не являются обещанием одного дня.
 
 ## Approval gates
 

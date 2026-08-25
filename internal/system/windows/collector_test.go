@@ -3,272 +3,326 @@ package windows
 import (
 	"context"
 	"errors"
-	"net"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/vsevo/home-gateway/internal/tunnel"
 )
 
-type fakeInterfaceProvider struct {
-	interfaces []InterfaceSnapshot
+const (
+	testPhysicalGUID  = "11111111-1111-4111-8111-111111111111"
+	testRedShieldGUID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+	testCiscoGUID     = "cdefabcd-efab-4cde-8abc-cdefabcdefab"
+)
+
+type fakeSnapshotRunner struct {
+	output []byte
+	err    error
+	calls  int
 }
 
-func (provider fakeInterfaceProvider) Interfaces() ([]InterfaceSnapshot, error) {
-	return provider.interfaces, nil
+func (runner *fakeSnapshotRunner) Output(context.Context) ([]byte, error) {
+	runner.calls++
+	return runner.output, runner.err
 }
 
-type commandCall struct {
-	executable string
-	arguments  []string
-}
-
-type fakeInventoryRunner struct {
-	netAdapters []byte
-	ipv4        []byte
-	ipv6        []byte
-	calls       []commandCall
-}
-
-func (runner *fakeInventoryRunner) Output(_ context.Context, executable string, arguments ...string) ([]byte, error) {
-	runner.calls = append(runner.calls, commandCall{executable: executable, arguments: append([]string(nil), arguments...)})
-	switch executable {
-	case "powershell.exe":
-		return runner.netAdapters, nil
-	case "route.exe":
-		if len(arguments) == 2 && arguments[0] == "PRINT" && arguments[1] == "-4" {
-			return runner.ipv4, nil
-		}
-		if len(arguments) == 2 && arguments[0] == "PRINT" && arguments[1] == "-6" {
-			return runner.ipv6, nil
-		}
-	}
-	return nil, errors.New("unexpected command")
-}
-
-func TestExecRunnerRejectsCommandsOutsideReadOnlyAllowlist(t *testing.T) {
-	for _, testCase := range []struct {
-		executable string
-		arguments  []string
-	}{
-		{executable: "cmd.exe", arguments: []string{"/c", "route print"}},
-		{executable: "route.exe", arguments: []string{"ADD", "203.0.113.1"}},
-		{executable: "powershell.exe", arguments: []string{"-Command", "Get-NetAdapter"}},
-	} {
-		if _, err := (ExecRunner{}).Output(context.Background(), testCase.executable, testCase.arguments...); err == nil {
-			t.Fatalf("native runner accepted unsupported command %q %#v", testCase.executable, testCase.arguments)
-		}
-	}
-}
-
-func TestNativeCollectorUsesDescriptionsBeforePhysicalClassification(t *testing.T) {
-	runner := &fakeInventoryRunner{
-		netAdapters: []byte(`[
-{"Name":"Ethernet","InterfaceDescription":"Intel Ethernet Controller","ifIndex":1,"Status":"Up"},
-{"Name":"Ethernet 2","InterfaceDescription":"Cisco AnyConnect Secure Mobility Client Virtual Miniport Adapter for Windows x64","ifIndex":2,"Status":"Up"},
-{"Name":"redlink","InterfaceDescription":"WireGuard Tunnel","ifIndex":3,"Status":"Up"},
-{"Name":"6to4 Adapter","InterfaceDescription":"","ifIndex":99,"Status":"Disconnected"}
-]`),
-		ipv4: []byte(`
-0.0.0.0          0.0.0.0          192.168.1.1  192.168.1.10  25
-10.50.0.0        255.255.0.0      On-link      172.16.0.2    1
-203.0.113.5      255.255.255.255  On-link      10.20.30.2    1
-`),
-		ipv6: []byte(`
-2 1 ::/0 On-link
-2 2 2001:db8:50::/48
-3 1 fd00::/8 On-link
-`),
-	}
-	interfaces := fakeInterfaceProvider{interfaces: []InterfaceSnapshot{
-		{Name: "Ethernet", Index: 1, Flags: net.FlagUp, Addresses: []string{"192.168.1.10/24"}},
-		{Name: "Ethernet 2", Index: 2, Flags: net.FlagUp, Addresses: []string{"172.16.0.2/32"}},
-		{Name: "redlink", Index: 3, Flags: net.FlagUp, Addresses: []string{"10.20.30.2/32", "fd00::2/128"}},
-	}}
-
-	inventory, err := (NativeCollector{Runner: runner, Interfaces: interfaces}).Collect(context.Background())
+func TestNativeCollectorParsesAuthoritativeStructuredSnapshot(t *testing.T) {
+	runner := &fakeSnapshotRunner{output: validSnapshotJSON()}
+	inventory, err := (NativeCollector{Runner: runner}).Collect(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertAdapterKind(t, inventory.Adapters, 1, AdapterPhysical)
-	assertAdapterKind(t, inventory.Adapters, 2, AdapterCisco)
-	assertAdapterKind(t, inventory.Adapters, 3, AdapterRedShield)
-	if inventory.RouteSnapshotAuthoritative || inventory.DNSPolicyObserved {
-		t.Fatalf("partial native inventory overstated capabilities: %#v", inventory)
+	if runner.calls != 1 {
+		t.Fatalf("snapshot command calls = %d, want 1", runner.calls)
 	}
+	if !inventory.RouteSnapshotAuthoritative || !inventory.DNSPolicyObserved {
+		t.Fatalf("complete strict snapshot was not authoritative: %#v", inventory)
+	}
+	physical := assertAdapter(t, inventory.Adapters, 12, AdapterPhysical, testPhysicalGUID, true)
+	if !physical.HardwareInterface {
+		t.Fatal("physical adapter did not retain the authoritative Windows hardware marker")
+	}
+	redShield := assertAdapter(t, inventory.Adapters, 21, AdapterRedShield, testRedShieldGUID, true)
+	if !reflect.DeepEqual(redShield.Addresses, []string{"10.20.30.2/32", "fd00::2/128"}) {
+		t.Fatalf("usable RedShield addresses = %#v", redShield.Addresses)
+	}
+	assertAdapter(t, inventory.Adapters, 31, AdapterCisco, testCiscoGUID, true)
 
-	wantPowerShellArguments := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", netAdapterInventoryScript}
-	if len(runner.calls) != 3 || runner.calls[0].executable != "powershell.exe" || !reflect.DeepEqual(runner.calls[0].arguments, wantPowerShellArguments) {
-		t.Fatalf("unexpected read-only command calls: %#v", runner.calls)
+	endpointRoute := findRoute(t, inventory.Routes, "203.0.113.5/32", 12)
+	if endpointRoute.RouteMetric != 2 || endpointRoute.InterfaceMetric != 25 || endpointRoute.Metric != 27 || endpointRoute.InterfaceGUID != testPhysicalGUID {
+		t.Fatalf("route metrics or identity were not joined: %#v", endpointRoute)
 	}
-	for _, call := range runner.calls {
-		joined := strings.ToLower(call.executable + " " + strings.Join(call.arguments, " "))
-		for _, forbidden := range []string{"set-net", "remove-net", "disable-net", "enable-net", "start-service", "stop-service"} {
-			if strings.Contains(joined, forbidden) {
-				t.Fatalf("collector attempted mutation %q", joined)
-			}
+	loopbackRoute := findRoute(t, inventory.Routes, "127.0.0.0/8", 1)
+	if loopbackRoute.InterfaceGUID != "" {
+		t.Fatalf("unmatched system route gained an identity: %#v", loopbackRoute)
+	}
+	if inventory.DNSPolicy.EffectiveNRPTRuleCount != 2 || len(inventory.DNSPolicy.ServerSets) != 2 {
+		t.Fatalf("DNS/NRPT snapshot = %#v", inventory.DNSPolicy)
+	}
+	var physicalDNS DNSServerSet
+	for _, serverSet := range inventory.DNSPolicy.ServerSets {
+		if serverSet.InterfaceIndex == 12 {
+			physicalDNS = serverSet
 		}
 	}
-
-	inventory.EndpointAddresses = []string{"203.0.113.5"}
-	plan := (Planner{}).Plan(inventory, tunnel.Inspection{
-		Metadata: tunnel.Metadata{
-			Provider:           "redshield",
-			Transport:          tunnel.TransportWireGuard,
-			Endpoint:           tunnel.Endpoint{Host: "vpn.example.test", Port: 51820},
-			InterfaceAddresses: []string{"10.20.30.2/24", "fd00::2/64"},
-			IPv4FullTunnel:     true,
-			IPv6FullTunnel:     true,
-		},
-		Status: tunnel.Status{State: tunnel.StateUp, Observed: true},
-	})
-	assertFinding(t, plan, "cisco_routes_identified", SeverityInfo)
-	assertFinding(t, plan, "route_inventory_not_authoritative", SeverityBlock)
-	assertFinding(t, plan, "dns_policy_unobserved", SeverityBlock)
-	assertOperation(t, plan, OperationPreserveCiscoRoute, "10.50.0.0/16")
-	assertOperation(t, plan, OperationPreserveCiscoRoute, "::/0")
-	assertOperation(t, plan, OperationPreserveCiscoRoute, "2001:db8:50::/48")
-	assertFinding(t, plan, "endpoint_direct_exception_missing", SeverityBlock)
-	for _, finding := range plan.Findings {
-		if finding.Code == "default_route_adapter_unclassified" {
-			t.Fatalf("classified Cisco default was treated as unknown: %#v", plan.Findings)
+	if physicalDNS.InterfaceGUID != testPhysicalGUID || !reflect.DeepEqual(physicalDNS.Servers, []string{"1.1.1.1", "8.8.8.8"}) {
+		t.Fatalf("DNS identity or canonical servers = %#v", physicalDNS)
+	}
+	var systemDNS DNSServerSet
+	for _, serverSet := range inventory.DNSPolicy.ServerSets {
+		if serverSet.InterfaceIndex == 1 {
+			systemDNS = serverSet
 		}
+	}
+	if systemDNS.InterfaceGUID != "" || !reflect.DeepEqual(systemDNS.Servers, []string{"::1"}) {
+		t.Fatalf("unmatched system DNS set was not preserved honestly: %#v", systemDNS)
 	}
 }
 
-func TestNetAdapterInventoryParserFailsClosed(t *testing.T) {
+func TestStructuredSnapshotParserFailsClosed(t *testing.T) {
+	valid := string(validSnapshotJSON())
 	for name, data := range map[string][]byte{
-		"malformed":      []byte(`not-json`),
-		"single object":  []byte(`{"Name":"Ethernet","InterfaceDescription":"Intel","ifIndex":1,"Status":"Up"}`),
-		"missing name":   []byte(`[{"Name":"","InterfaceDescription":"Intel","ifIndex":1,"Status":"Up"}]`),
-		"missing status": []byte(`[{"Name":"Ethernet","InterfaceDescription":"Intel","ifIndex":1,"Status":""}]`),
-		"unknown field":  []byte(`[{"Name":"Ethernet","InterfaceDescription":"Intel","ifIndex":1,"Status":"Up","Extra":true}]`),
+		"malformed":               []byte(`not-json`),
+		"incomplete":              []byte(`{"adapters":[]}`),
+		"unknown root":            []byte(strings.Replace(valid, `"nrptRuleCount":2`, `"nrptRuleCount":2,"extra":true`, 1)),
+		"unknown nested":          []byte(strings.Replace(valid, `"adminStatus":1`, `"adminStatus":1,"extra":true`, 1)),
+		"trailing":                append(validSnapshotJSON(), []byte(` {}`)...),
+		"oversized":               []byte(strings.Repeat("x", maxSnapshotBytes+1)),
+		"duplicate GUID":          []byte(strings.Replace(valid, testRedShieldGUID, testPhysicalGUID, 1)),
+		"zero GUID":               []byte(strings.Replace(valid, testRedShieldGUID, "00000000-0000-0000-0000-000000000000", 1)),
+		"noncanonical GUID":       []byte(strings.Replace(valid, testRedShieldGUID, strings.ToUpper(testRedShieldGUID), 1)),
+		"duplicate index":         []byte(strings.Replace(valid, `"interfaceIndex":21,"interfaceGuid":"`+testRedShieldGUID, `"interfaceIndex":12,"interfaceGuid":"`+testRedShieldGUID, 1)),
+		"invalid admin":           []byte(strings.Replace(valid, `"adminStatus":1`, `"adminStatus":4`, 1)),
+		"invalid oper":            []byte(strings.Replace(valid, `"operationalStatus":1`, `"operationalStatus":8`, 1)),
+		"invalid address state":   []byte(strings.Replace(valid, `"addressState":4`, `"addressState":5`, 1)),
+		"address family mismatch": []byte(strings.Replace(valid, `"addressFamily":2,"ipAddress":"192.168.1.10"`, `"addressFamily":23,"ipAddress":"192.168.1.10"`, 1)),
+		"route family mismatch":   []byte(strings.Replace(valid, `"addressFamily":2,"destinationPrefix":"0.0.0.0/0"`, `"addressFamily":23,"destinationPrefix":"0.0.0.0/0"`, 1)),
+		"invalid route state":     []byte(strings.Replace(valid, `"state":0`, `"state":3`, 1)),
+		"metric overflow":         []byte(strings.Replace(valid, `"routeMetric":5`, `"routeMetric":4294967296`, 1)),
+		"DNS family mismatch":     []byte(strings.Replace(valid, `"serverAddresses":["8.8.8.8","1.1.1.1"]`, `"serverAddresses":["2001:4860:4860::8888"]`, 1)),
+		"DNS zone mismatch":       []byte(strings.Replace(valid, `"serverAddresses":["::1"]`, `"serverAddresses":["fe80::1%12"]`, 1)),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseNetAdapterInventory(data); err == nil {
-				t.Fatal("unsafe adapter inventory accepted")
-			}
-		})
-	}
-	records, err := parseNetAdapterInventory([]byte(`[{"Name":"Teredo Tunneling Pseudo-Interface","InterfaceDescription":"","ifIndex":5,"Status":"Disconnected"}]`))
-	if err != nil {
-		t.Fatalf("inactive hidden adapter with empty description was rejected: %v", err)
-	}
-	if records[5].Description != "" {
-		t.Fatalf("description = %q", records[5].Description)
-	}
-}
-
-func TestNativeCollectorFailsClosedWhenDescriptionCannotBeJoined(t *testing.T) {
-	runner := &fakeInventoryRunner{netAdapters: []byte(`[{"Name":"Ethernet","InterfaceDescription":"Intel Ethernet Controller","ifIndex":1,"Status":"Up"}]`)}
-	interfaces := fakeInterfaceProvider{interfaces: []InterfaceSnapshot{
-		{Name: "Ethernet 2", Index: 2, Flags: net.FlagUp, Addresses: []string{"172.16.0.2/32"}},
-	}}
-	if _, err := (NativeCollector{Runner: runner, Interfaces: interfaces}).Collect(context.Background()); err == nil {
-		t.Fatal("collector accepted an adapter without description enrichment")
-	}
-}
-
-func TestNativeCollectorRejectsActiveGenericAdapterWithoutDescription(t *testing.T) {
-	runner := &fakeInventoryRunner{netAdapters: []byte(`[{"Name":"Ethernet 2","InterfaceDescription":"","ifIndex":2,"Status":"Up"}]`)}
-	interfaces := fakeInterfaceProvider{interfaces: []InterfaceSnapshot{
-		{Name: "Ethernet 2", Index: 2, Flags: net.FlagUp, Addresses: []string{"172.16.0.2/32"}},
-	}}
-	if _, err := (NativeCollector{Runner: runner, Interfaces: interfaces}).Collect(context.Background()); err == nil {
-		t.Fatal("collector accepted an active generic adapter without description")
-	}
-}
-
-func TestNativeCollectorRejectsUnmatchedActiveNetAdapterRecord(t *testing.T) {
-	for name, description := range map[string]string{
-		"Cisco":             "Cisco AnyConnect Secure Mobility Client Virtual Miniport Adapter for Windows x64",
-		"generic":           "Unknown Virtual Adapter",
-		"WAN near miss":     "WAN Miniport (IP) Extra",
-		"Hyper-V near miss": "Hyper-V Virtual Switch Extension Adapter Extra",
-	} {
-		t.Run(name, func(t *testing.T) {
-			runner := &fakeInventoryRunner{netAdapters: []byte(`[{"Name":"Unmatched","InterfaceDescription":"` + description + `","ifIndex":9,"Status":"Up"}]`)}
-			if _, err := (NativeCollector{Runner: runner, Interfaces: fakeInterfaceProvider{}}).Collect(context.Background()); err == nil {
-				t.Fatal("collector accepted an unmatched active Get-NetAdapter record")
+			if _, err := parseInventorySnapshot(data); err == nil {
+				t.Fatal("unsafe snapshot was accepted")
 			}
 		})
 	}
 }
 
-func TestNativeCollectorAllowsExactUnmatchedActiveWindowsSystemPseudoAdapters(t *testing.T) {
-	runner := &fakeInventoryRunner{netAdapters: []byte(`[
-{"Name":"Localized WAN 1","InterfaceDescription":"WAN Miniport (IP)","ifIndex":90,"Status":"Up"},
-{"Name":"Localized WAN 2","InterfaceDescription":"  wan miniport (ipv6)  ","ifIndex":91,"Status":"Up"},
-{"Name":"Localized WAN 3","InterfaceDescription":"WAN Miniport (Network Monitor)","ifIndex":92,"Status":"Up"},
-{"Name":"Localized Hyper-V Extension","InterfaceDescription":"Hyper-V Virtual Switch Extension Adapter","ifIndex":93,"Status":"Up"}
-]`)}
-	if _, err := (NativeCollector{Runner: runner, Interfaces: fakeInterfaceProvider{}}).Collect(context.Background()); err != nil {
-		t.Fatalf("known Windows pseudo-adapters were rejected: %v", err)
-	}
-}
-
-func TestNativeCollectorAllowsInactiveHiddenAdapterAndPlannerBlocksItsStaleDefault(t *testing.T) {
-	runner := &fakeInventoryRunner{
-		netAdapters: []byte(`[{"Name":"Teredo Tunneling Pseudo-Interface","InterfaceDescription":"","ifIndex":5,"Status":"Disconnected"}]`),
-		ipv6:        []byte("5 999 ::/0 On-link\n"),
-	}
-	interfaces := fakeInterfaceProvider{interfaces: []InterfaceSnapshot{
-		{Name: "Teredo Tunneling Pseudo-Interface", Index: 5, Addresses: []string{"2001:0::2/32"}},
-	}}
-	inventory, err := (NativeCollector{Runner: runner, Interfaces: interfaces}).Collect(context.Background())
+func TestStructuredSnapshotAllowsObservedStatusEnumsButUsesOnlyUsableAddresses(t *testing.T) {
+	valid := string(validSnapshotJSON())
+	valid = strings.Replace(valid, `"adminStatus":1,"operationalStatus":1`, `"adminStatus":2,"operationalStatus":6`, 1)
+	inventory, err := parseInventorySnapshot([]byte(valid))
 	if err != nil {
-		t.Fatalf("inactive hidden adapter blocked inventory: %v", err)
+		t.Fatal(err)
 	}
-	assertAdapterKind(t, inventory.Adapters, 5, AdapterOther)
-	if inventory.Adapters[0].Up {
-		t.Fatal("disconnected hidden adapter marked active")
+	physical := assertAdapter(t, inventory.Adapters, 12, AdapterPhysical, testPhysicalGUID, false)
+	if len(physical.Addresses) != 1 || physical.Addresses[0] != "192.168.1.10/24" {
+		t.Fatalf("tentative address was treated as usable: %#v", physical.Addresses)
 	}
-	plan := (Planner{}).Plan(inventory, fullTunnelInspection())
-	assertFinding(t, plan, "default_route_adapter_unclassified", SeverityBlock)
 }
 
-func TestUnknownIPv6DefaultIsNotMarkedPhysicalAndBlocksPlanner(t *testing.T) {
-	inventory := safeInventory()
-	inventory.Adapters = append(inventory.Adapters, Adapter{
-		Name:        "Ethernet 9",
-		Description: "Unclassified Virtual Miniport",
-		Index:       9,
-		Kind:        AdapterOther,
-		Up:          true,
-		Addresses:   []string{"2001:db8:9::2/64"},
-	})
-	inventory.Routes = append(inventory.Routes, Route{
-		Family:         FamilyIPv6,
-		Destination:    "::/0",
-		InterfaceIndex: 9,
-		Metric:         1,
-	})
-	for index := range inventory.Adapters {
-		if inventory.Adapters[index].Index == 1 {
-			inventory.Adapters[index].Kind = AdapterPhysical
+func TestStructuredSnapshotAcceptsMatchingWindowsIPv6Zone(t *testing.T) {
+	valid := strings.Replace(
+		string(validSnapshotJSON()),
+		`"ipAddress":"fd00::2"`,
+		`"ipAddress":"fd00::2%21"`,
+		1,
+	)
+	inventory, err := parseInventorySnapshot([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redShield := assertAdapter(t, inventory.Adapters, 21, AdapterRedShield, testRedShieldGUID, true)
+	if !reflect.DeepEqual(redShield.Addresses, []string{"10.20.30.2/32", "fd00::2/128"}) {
+		t.Fatalf("zoned IPv6 address was not normalized: %#v", redShield.Addresses)
+	}
+
+	invalid := strings.Replace(valid, `"ipAddress":"fd00::2%21"`, `"ipAddress":"fd00::2%12"`, 1)
+	if _, err := parseInventorySnapshot([]byte(invalid)); err == nil {
+		t.Fatal("IPv6 address with a mismatched interface zone was accepted")
+	}
+}
+
+func TestStructuredSnapshotAcceptsMatchingWindowsIPv6DNSZone(t *testing.T) {
+	valid := strings.Replace(
+		string(validSnapshotJSON()),
+		`"serverAddresses":["::1"]`,
+		`"serverAddresses":["fe80::1%1"]`,
+		1,
+	)
+	inventory, err := parseInventorySnapshot([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var systemDNS DNSServerSet
+	for _, serverSet := range inventory.DNSPolicy.ServerSets {
+		if serverSet.InterfaceIndex == 1 {
+			systemDNS = serverSet
 		}
 	}
-
-	plan := (Planner{}).Plan(inventory, fullTunnelInspection())
-	assertFinding(t, plan, "default_route_adapter_unclassified", SeverityBlock)
-	if plan.Ready || !plan.ApplyBlocked {
-		t.Fatalf("unknown IPv6 default did not block apply: %#v", plan)
+	if !reflect.DeepEqual(systemDNS.Servers, []string{"fe80::1%1"}) {
+		t.Fatalf("scoped IPv6 DNS server was not preserved: %#v", systemDNS)
 	}
-
-	adapters := normalizedAdapters(inventory.Adapters, inventory.Routes)
-	assertAdapterKind(t, adapters, 9, AdapterOther)
 }
 
-func assertAdapterKind(t *testing.T, adapters []Adapter, index int, want AdapterKind) {
+func TestStructuredSnapshotRejectsUnresolvedDefaultIdentityButAllowsSystemRoute(t *testing.T) {
+	valid := string(validSnapshotJSON())
+	if _, err := parseInventorySnapshot([]byte(valid)); err != nil {
+		t.Fatalf("unmatched non-default system route was rejected: %v", err)
+	}
+	unsafe := strings.Replace(valid, `"destinationPrefix":"127.0.0.0/8"`, `"destinationPrefix":"0.0.0.0/0"`, 1)
+	if _, err := parseInventorySnapshot([]byte(unsafe)); err == nil {
+		t.Fatal("unresolved active default route was accepted")
+	}
+}
+
+func TestStructuredSnapshotCountCaps(t *testing.T) {
+	route := `{"interfaceIndex":12,"addressFamily":2,"destinationPrefix":"10.0.0.0/8","nextHop":"192.168.1.1","routeMetric":5,"interfaceMetric":25,"state":0}`
+	routes := strings.Repeat(route+",", maxRoutes) + route
+	data := strings.Replace(string(validSnapshotJSON()), validRoutesJSON(), routes, 1)
+	if _, err := parseInventorySnapshot([]byte(data)); err == nil {
+		t.Fatal("route count above cap was accepted")
+	}
+}
+
+func TestTrustedInventoryCommandUsesAbsoluteSystem32SurfaceAndSanitizedEnvironment(t *testing.T) {
+	windowsDirectory := filepath.Join(t.TempDir(), "Windows")
+	systemDirectory := filepath.Join(windowsDirectory, "System32")
+	spec, err := buildInventoryCommand(nativeInventoryPaths{
+		WindowsDirectory: windowsDirectory,
+		SystemDirectory:  systemDirectory,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantExecutable := filepath.Join(systemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe")
+	if spec.Executable != wantExecutable || !filepath.IsAbs(spec.Executable) || spec.Directory != systemDirectory {
+		t.Fatalf("untrusted executable spec: %#v", spec)
+	}
+	if len(spec.Arguments) < 2 || spec.Arguments[len(spec.Arguments)-1] != inventoryScript {
+		t.Fatalf("fixed inventory script missing from args: %#v", spec.Arguments)
+	}
+	joined := strings.ToLower(strings.Join(spec.Arguments, " "))
+	for _, required := range []string{"get-netadapter", "get-netipaddress", "get-netroute", "activestore", "get-dnsclientserveraddress", "get-dnsclientnrptpolicy", "convertto-json"} {
+		if !strings.Contains(joined, required) {
+			t.Fatalf("trusted script lacks %q", required)
+		}
+	}
+	for _, forbidden := range []string{"route.exe", "set-net", "remove-net", "disable-net", "enable-net", "start-service", "stop-service"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("trusted script contains mutating or PATH command %q", forbidden)
+		}
+	}
+	for _, entry := range spec.Environment {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 {
+			t.Fatalf("malformed environment entry %q", entry)
+		}
+		if strings.HasPrefix(parts[0], "HG_") && !filepath.IsAbs(parts[1]) {
+			t.Fatalf("module manifest is not absolute: %q", entry)
+		}
+	}
+	if len(spec.Environment) != 10 {
+		t.Fatalf("unexpected inherited environment surface: %#v", spec.Environment)
+	}
+
+	if _, err := buildInventoryCommand(nativeInventoryPaths{WindowsDirectory: "relative", SystemDirectory: "relative"}); err == nil {
+		t.Fatal("relative trusted paths were accepted")
+	}
+	if _, err := buildInventoryCommand(nativeInventoryPaths{WindowsDirectory: windowsDirectory, SystemDirectory: filepath.Dir(windowsDirectory)}); err == nil {
+		t.Fatal("system directory outside Windows directory was accepted")
+	}
+	if _, err := buildInventoryCommand(nativeInventoryPaths{WindowsDirectory: windowsDirectory, SystemDirectory: filepath.Join(windowsDirectory, "SysWOW64")}); err == nil {
+		t.Fatal("non-System32 inventory path was accepted")
+	}
+}
+
+func TestBoundedInventoryBufferDoesNotGrowPastLimit(t *testing.T) {
+	buffer := boundedBuffer{limit: 4}
+	if count, err := buffer.Write([]byte("123456")); err != nil || count != 6 {
+		t.Fatalf("bounded write = %d, %v", count, err)
+	}
+	if string(buffer.data) != "1234" || !buffer.overflow {
+		t.Fatalf("bounded buffer = %#v", buffer)
+	}
+}
+
+func TestNativeCollectorDoesNotExposeRunnerErrors(t *testing.T) {
+	secret := `C:\private\provider.conf`
+	_, err := (NativeCollector{Runner: &fakeSnapshotRunner{err: errors.New(secret)}}).Collect(context.Background())
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("runner error was not safely wrapped: %v", err)
+	}
+}
+
+func TestDetectAdapterKind(t *testing.T) {
+	if got := DetectAdapterKind("redlink", "AmneziaWG tunnel"); got != AdapterRedShield {
+		t.Fatalf("redlink kind = %q", got)
+	}
+	if got := DetectAdapterKind("Ethernet 2", "Cisco AnyConnect Secure Mobility Client Virtual Miniport Adapter"); got != AdapterCisco {
+		t.Fatalf("Cisco kind = %q", got)
+	}
+	if got := DetectAdapterKind("Loopback", "Software Loopback Interface"); got != AdapterLoopback {
+		t.Fatalf("loopback kind = %q", got)
+	}
+}
+
+func assertAdapter(t *testing.T, adapters []Adapter, index int, kind AdapterKind, guid string, up bool) Adapter {
 	t.Helper()
 	for _, adapter := range adapters {
 		if adapter.Index == index {
-			if adapter.Kind != want {
-				t.Fatalf("adapter %d kind = %q, want %q", index, adapter.Kind, want)
+			if adapter.Kind != kind || adapter.InterfaceGUID != guid || adapter.Up != up {
+				t.Fatalf("adapter %d = %#v", index, adapter)
 			}
-			return
+			return adapter
 		}
 	}
-	t.Fatalf("adapter %d missing from %#v", index, adapters)
+	t.Fatalf("missing adapter %d", index)
+	return Adapter{}
+}
+
+func findRoute(t *testing.T, routes []Route, destination string, interfaceIndex int) Route {
+	t.Helper()
+	for _, route := range routes {
+		if route.Destination == destination && route.InterfaceIndex == interfaceIndex {
+			return route
+		}
+	}
+	t.Fatalf("missing route %s on %d", destination, interfaceIndex)
+	return Route{}
+}
+
+func validSnapshotJSON() []byte {
+	return []byte(`{
+"adapters":[
+  {"name":"Ethernet","description":"Intel Ethernet Controller","interfaceIndex":12,"interfaceGuid":"` + testPhysicalGUID + `","hardwareInterface":true,"adminStatus":1,"operationalStatus":1},
+  {"name":"redlink","description":"AmneziaWG Tunnel","interfaceIndex":21,"interfaceGuid":"` + testRedShieldGUID + `","hardwareInterface":false,"adminStatus":1,"operationalStatus":1},
+  {"name":"Cisco Secure Client","description":"Cisco AnyConnect Virtual Adapter","interfaceIndex":31,"interfaceGuid":"` + testCiscoGUID + `","hardwareInterface":false,"adminStatus":1,"operationalStatus":1}
+],
+"addresses":[
+  {"interfaceIndex":12,"addressFamily":2,"ipAddress":"192.168.1.10","prefixLength":24,"addressState":4,"skipAsSource":false},
+  {"interfaceIndex":12,"addressFamily":23,"ipAddress":"2001:db8:1::10","prefixLength":64,"addressState":1,"skipAsSource":false},
+  {"interfaceIndex":21,"addressFamily":2,"ipAddress":"10.20.30.2","prefixLength":32,"addressState":4,"skipAsSource":false},
+  {"interfaceIndex":21,"addressFamily":23,"ipAddress":"fd00::2","prefixLength":128,"addressState":3,"skipAsSource":false},
+  {"interfaceIndex":1,"addressFamily":2,"ipAddress":"127.0.0.1","prefixLength":8,"addressState":4,"skipAsSource":false}
+],
+"routes":[` + validRoutesJSON() + `],
+"dnsServers":[
+  {"interfaceIndex":12,"addressFamily":2,"serverAddresses":["8.8.8.8","1.1.1.1"]},
+  {"interfaceIndex":1,"addressFamily":23,"serverAddresses":["::1"]}
+],
+"nrptRuleCount":2
+}`)
+}
+
+func validRoutesJSON() string {
+	return `
+  {"interfaceIndex":12,"addressFamily":2,"destinationPrefix":"0.0.0.0/0","nextHop":"192.168.1.1","routeMetric":5,"interfaceMetric":25,"state":0},
+  {"interfaceIndex":12,"addressFamily":2,"destinationPrefix":"203.0.113.5/32","nextHop":"192.168.1.1","routeMetric":2,"interfaceMetric":25,"state":0},
+  {"interfaceIndex":21,"addressFamily":2,"destinationPrefix":"0.0.0.0/1","nextHop":"0.0.0.0","routeMetric":0,"interfaceMetric":5,"state":0},
+  {"interfaceIndex":31,"addressFamily":2,"destinationPrefix":"10.50.0.0/16","nextHop":"0.0.0.0","routeMetric":1,"interfaceMetric":1,"state":0},
+  {"interfaceIndex":1,"addressFamily":2,"destinationPrefix":"127.0.0.0/8","nextHop":"0.0.0.0","routeMetric":0,"interfaceMetric":75,"state":0}
+`
 }

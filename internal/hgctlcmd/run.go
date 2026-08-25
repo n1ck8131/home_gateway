@@ -72,7 +72,7 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	if code := encodeJSON(stdout, stderr, result); code != 0 {
 		return code
 	}
-	if result.Preflight.ApplyBlocked {
+	if !result.Preflight.ReadOnlyQualified {
 		return 3
 	}
 	return 0
@@ -106,5 +106,5 @@ func writeUsage(program string, writer io.Writer) {
 	fmt.Fprintf(writer, "usage: %s version --json\n", program)
 	fmt.Fprintf(writer, "       %s redshield inspect --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows preflight --config <path> --json\n", program)
-	fmt.Fprintln(writer, "exit codes: 0=success/ready, 1=runtime error, 2=usage error, 3=preflight blocked")
+	fmt.Fprintln(writer, "exit codes: 0=success/read-only-qualified, 1=runtime error, 2=usage error, 3=read-only preflight blocked")
 }

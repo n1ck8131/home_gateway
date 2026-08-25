@@ -29,6 +29,11 @@ type staticInspectionBackend struct {
 	inspection tunnel.Inspection
 }
 
+const (
+	commandPhysicalGUID  = "11111111-1111-4111-8111-111111111111"
+	commandRedShieldGUID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+)
+
 func (backend staticInspectionBackend) Inspect(context.Context, tunnel.ConfigSource) (tunnel.Inspection, error) {
 	return backend.inspection, nil
 }
@@ -71,7 +76,7 @@ func TestRunRedShieldInspectJSONIsRedacted(t *testing.T) {
 	}
 }
 
-func TestRunWindowsPreflightReturnsZeroOnlyWhenReady(t *testing.T) {
+func TestRunWindowsPreflightReturnsZeroOnlyWhenReadOnlyQualified(t *testing.T) {
 	inspection := tunnel.Inspection{
 		Metadata: tunnel.Metadata{
 			Provider:           "redshield",
@@ -81,16 +86,16 @@ func TestRunWindowsPreflightReturnsZeroOnlyWhenReady(t *testing.T) {
 			IPv4FullTunnel:     true,
 			IPv6FullTunnel:     true,
 		},
-		Status: tunnel.Status{State: tunnel.StateUp, Observed: true},
+		Status: tunnel.Status{State: tunnel.StateUnknown, Observed: false},
 	}
 	inventory := windowssystem.Inventory{
 		Adapters: []windowssystem.Adapter{
-			{Name: "Ethernet", Index: 1, Kind: windowssystem.AdapterPhysical, Up: true, Addresses: []string{"192.168.1.10/24"}},
-			{Name: "redlink", Index: 2, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32", "fd00::2/128"}},
+			{Name: "Ethernet", Index: 1, InterfaceGUID: commandPhysicalGUID, Kind: windowssystem.AdapterPhysical, Up: true, Addresses: []string{"192.168.1.10/24"}},
+			{Name: "redlink", Index: 2, InterfaceGUID: commandRedShieldGUID, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32", "fd00::2/128"}},
 		},
 		Routes: []windowssystem.Route{
-			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, Metric: 25},
-			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", NextHop: "192.168.1.1", InterfaceIndex: 1, Metric: 1},
+			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 25},
+			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 1},
 		},
 		RouteSnapshotAuthoritative: true,
 		DNSPolicyObserved:          true,
@@ -114,8 +119,8 @@ func TestRunWindowsPreflightReturnsZeroOnlyWhenReady(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Preflight.Ready || result.Preflight.ApplyBlocked {
-		t.Fatalf("exit zero returned for non-ready plan: %#v", result.Preflight)
+	if result.Preflight.Ready || !result.Preflight.ApplyBlocked || !result.Preflight.ReadOnlyQualified {
+		t.Fatalf("exit zero did not preserve P3.3 apply block: %#v", result.Preflight)
 	}
 }
 
@@ -123,13 +128,15 @@ func TestRunWindowsPreflightIsReadOnlyAndBlocksRedlinkEndpointRoute(t *testing.T
 	path := writeCommandConfig(t, commandSyntheticKey(51), commandSyntheticKey(52))
 	inventory := windowssystem.Inventory{
 		Adapters: []windowssystem.Adapter{
-			{Name: "Ethernet", Index: 1, Kind: windowssystem.AdapterPhysical, Up: true, Addresses: []string{"192.168.1.10/24"}},
-			{Name: "redlink", Index: 2, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32", "fd00::2/128"}},
+			{Name: "Ethernet", Index: 1, InterfaceGUID: commandPhysicalGUID, Kind: windowssystem.AdapterPhysical, Up: true, Addresses: []string{"192.168.1.10/24"}},
+			{Name: "redlink", Index: 2, InterfaceGUID: commandRedShieldGUID, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32", "fd00::2/128"}},
 		},
 		Routes: []windowssystem.Route{
-			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, Metric: 25},
-			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", InterfaceIndex: 2, Metric: 1},
+			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 25},
+			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", InterfaceIndex: 2, InterfaceGUID: commandRedShieldGUID, Metric: 1},
 		},
+		RouteSnapshotAuthoritative: true,
+		DNSPolicyObserved:          true,
 	}
 	deps := dependencies{
 		backend: redshield.Backend{},
@@ -150,7 +157,7 @@ func TestRunWindowsPreflightIsReadOnlyAndBlocksRedlinkEndpointRoute(t *testing.T
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.Preflight.ApplyBlocked || result.Preflight.Ready {
+	if !result.Preflight.ApplyBlocked || result.Preflight.Ready || result.Preflight.ReadOnlyQualified {
 		t.Fatalf("preflight did not block unsafe endpoint route: %#v", result.Preflight)
 	}
 	found := false
@@ -161,6 +168,44 @@ func TestRunWindowsPreflightIsReadOnlyAndBlocksRedlinkEndpointRoute(t *testing.T
 	}
 	if !found {
 		t.Fatalf("direct endpoint exception requirement missing: %#v", result.Preflight.Operations)
+	}
+}
+
+func TestRunWindowsPreflightReturnsThreeForAuthoritativeBackendDown(t *testing.T) {
+	inspection := tunnel.Inspection{
+		Metadata: tunnel.Metadata{
+			Provider:           "redshield",
+			Transport:          tunnel.TransportAmneziaWG,
+			Endpoint:           tunnel.Endpoint{Host: "203.0.113.5", Port: 51820},
+			InterfaceAddresses: []string{"10.20.30.2/32"},
+			IPv4FullTunnel:     true,
+		},
+		Status: tunnel.Status{State: tunnel.StateDown, Observed: true},
+	}
+	inventory := windowssystem.Inventory{
+		Adapters: []windowssystem.Adapter{
+			{Name: "Ethernet", Index: 1, InterfaceGUID: commandPhysicalGUID, Kind: windowssystem.AdapterPhysical, Up: true, Addresses: []string{"192.168.1.10/24"}},
+			{Name: "redlink", Index: 2, InterfaceGUID: commandRedShieldGUID, Kind: windowssystem.AdapterRedShield, Up: true, Addresses: []string{"10.20.30.2/32"}},
+		},
+		Routes: []windowssystem.Route{
+			{Family: windowssystem.FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 25},
+			{Family: windowssystem.FamilyIPv4, Destination: "203.0.113.5/32", NextHop: "192.168.1.1", InterfaceIndex: 1, InterfaceGUID: commandPhysicalGUID, Metric: 1},
+		},
+		RouteSnapshotAuthoritative: true,
+		DNSPolicyObserved:          true,
+	}
+	deps := dependencies{
+		backend: staticInspectionBackend{inspection: inspection},
+		collect: staticCollector{inventory: inventory},
+		resolve: func(context.Context, string) ([]string, error) {
+			return []string{"203.0.113.5"}, nil
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithDependencies("hgctl", []string{"windows", "preflight", "--config", `C:\synthetic.conf`, "--json"}, &stdout, &stderr, deps)
+	if code != 3 {
+		t.Fatalf("backend-down preflight code = %d, stderr = %q, stdout = %q", code, stderr.String(), stdout.String())
 	}
 }
 

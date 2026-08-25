@@ -41,10 +41,11 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 | Provider-neutral tunnel contract and strict RedShield importer | local-verified | Full Go/Pester tests, format, static analysis, security scans and reproducible build pass. Synthetic WireGuard/AmneziaWG, unsafe-input and redaction tests pass; path validation and post-read stability checks are implemented, and the external config is never copied into repository fixtures |
 | User-supplied RedShield config qualification | read-only-passed | One interface, one peer, IPv4/IPv6 full-tunnel and AWG capability were recognized without printing keys or retaining them in repository/evidence |
 | Native Windows preflight baseline | baseline-observed | The imported addresses match one active WireGuard/Amnezia adapter; a physical endpoint route and both IP-family prerequisites were observed. The preflight returned blocked exit code `3` |
-| Authoritative routes, effective DNS/NRPT and provider tunnel status | in-progress | The current collector deliberately marks these inputs unobserved/non-authoritative, so readiness cannot be reported |
+| Authoritative routes, effective DNS/NRPT and local tunnel status | read-only-passed | On 2026-08-25 the production collector passed an opt-in live Windows smoke using structured ActiveStore routes and metrics, stable interface GUIDs and hardware markers, effective DNS servers and effective NRPT count. Local RedShield status is derived separately from provider health |
+| Provider handshake and egress health | field-not-run | P3.5 live-canary gate; an interface being present is not treated as provider or handshake proof |
 | Route/firewall/DNS apply or live canary | not-run | P3.4/P3.5 gates; requires offline rollback evidence and separate confirmation before any live mutation |
 
-P3.1 and P3.2 are complete. P3.3 has a fail-closed read-only foundation but remains open; no Windows field-acceptance or `pc-core-ready` claim is made.
+P3.1 through P3.3 are complete for their read-only software scope. The fresh combined preflight with the prior external config is not run because that file is currently absent; no Windows field acceptance, apply readiness or `pc-core-ready` claim is made.
 
 | Requirement | Owner phase | Evidence type |
 |---|---|---|

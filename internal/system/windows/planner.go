@@ -14,11 +14,12 @@ type Planner struct{}
 
 func (Planner) Plan(inventory Inventory, inspection tunnel.Inspection) Preflight {
 	plan := Preflight{
-		Findings:   make([]Finding, 0),
-		Operations: make([]Operation, 0),
+		LocalTunnelStatus: LocalTunnelStatus{State: LocalTunnelUnknown, Observed: true},
+		Findings:          make([]Finding, 0),
+		Operations:        make([]Operation, 0),
 	}
 	metadata := inspection.Metadata
-	adapters := normalizedAdapters(inventory.Adapters, inventory.Routes)
+	adapters := normalizedAdapters(inventory.Adapters)
 
 	if !inventory.RouteSnapshotAuthoritative {
 		plan.block("route_inventory_not_authoritative", "The current route snapshot is not authoritative enough for apply readiness.")
@@ -27,11 +28,11 @@ func (Planner) Plan(inventory Inventory, inspection tunnel.Inspection) Preflight
 		plan.block("dns_policy_unobserved", "The effective Windows DNS policy has not been observed.")
 	}
 	if !inspection.Status.Observed {
-		plan.block("tunnel_status_unobserved", "The provider tunnel status has not been observed authoritatively.")
+		plan.info("backend_tunnel_status_unobserved", "Provider handshake health is not observed; local Windows tunnel status is evaluated separately.")
 	} else if inspection.Status.State != tunnel.StateUp {
-		plan.block("tunnel_status_not_up", "The observed provider tunnel state is not up.")
+		plan.block("backend_tunnel_status_not_up", "The authoritatively observed provider tunnel state is not up.")
 	} else {
-		plan.info("tunnel_status_up", "The provider tunnel status is authoritatively observed as up.")
+		plan.info("backend_tunnel_status_up", "The provider tunnel status is authoritatively observed as up.")
 	}
 	matchedRedShieldAdapters := planTunnelBinding(&plan, adapters, metadata)
 
@@ -49,8 +50,10 @@ func (Planner) Plan(inventory Inventory, inspection tunnel.Inspection) Preflight
 	planCiscoPreservation(&plan, inventory.Routes, adapters)
 	planFailClosed(&plan, metadata, inventory.Routes, matchedRedShieldAdapters, physicalDefaults, unclassifiedIPv6Default)
 
-	plan.ApplyBlocked = hasBlockingFinding(plan.Findings)
-	plan.Ready = !plan.ApplyBlocked
+	plan.ReadOnlyQualified = !hasBlockingFinding(plan.Findings)
+	plan.ApplyBlocked = true
+	plan.Ready = false
+	plan.info("windows_apply_unsupported", "P3.3 is read-only; Windows network mutation remains unsupported and blocked.")
 	return plan
 }
 
@@ -58,6 +61,7 @@ func planTunnelBinding(plan *Preflight, adapters []Adapter, metadata tunnel.Meta
 	redShieldAdapters := activeAdapters(adapters, AdapterRedShield)
 	switch len(redShieldAdapters) {
 	case 0:
+		plan.LocalTunnelStatus = LocalTunnelStatus{State: LocalTunnelDown, Observed: true}
 		plan.block("redshield_tunnel_not_active", "No active RedShield WireGuard or AmneziaWG adapter was found.")
 		return nil
 	case 1:
@@ -66,10 +70,19 @@ func planTunnelBinding(plan *Preflight, adapters []Adapter, metadata tunnel.Meta
 		plan.block("redshield_adapter_count_invalid", "More than one active RedShield tunnel adapter was found.")
 		return nil
 	}
+	if redShieldAdapters[0].InterfaceGUID == "" {
+		plan.block("redshield_interface_identity_unresolved", "The active RedShield adapter has no stable Windows interface GUID.")
+		return nil
+	}
 
 	if !adapterMatchesImportedAddresses(redShieldAdapters[0], metadata.InterfaceAddresses) {
 		plan.block("redshield_adapter_binding_mismatch", "The active RedShield adapter does not match the imported tunnel addresses.")
 		return nil
+	}
+	plan.LocalTunnelStatus = LocalTunnelStatus{
+		State:         LocalTunnelUp,
+		Observed:      true,
+		InterfaceGUID: redShieldAdapters[0].InterfaceGUID,
 	}
 	plan.info("redshield_adapter_binding_matched", "The active RedShield adapter matches the imported tunnel addresses.")
 	return []Adapter{redShieldAdapters[0]}
@@ -106,10 +119,23 @@ func normalizedInterfaceAddresses(values []string) map[netip.Addr]struct{} {
 func planEndpointDirect(plan *Preflight, endpoint netip.Addr, routes []Route, adapters []Adapter, physicalDefaults map[AddressFamily]Route) {
 	family := addressFamily(endpoint)
 	hostPrefix := netip.PrefixFrom(endpoint, endpoint.BitLen()).String()
-	effective, adapter, found := effectiveRoute(endpoint, routes, adapters)
-	if found && adapter.Kind == AdapterPhysical {
+	effective, routeFound, routeAmbiguous := effectiveRouteRecord(endpoint, routes)
+	adapter, adapterFound := adapterForRoute(effective, adapters)
+	if routeAmbiguous {
+		plan.block("endpoint_route_ambiguous", "More than one equally preferred route can carry the provider endpoint.")
+	}
+	if routeFound && (effective.InterfaceGUID == "" || !adapterFound) {
+		plan.block("endpoint_route_interface_identity_unresolved", "The effective provider-endpoint route has no stable Windows interface identity.")
+	}
+	if routeFound && adapterFound && !adapter.Up {
+		plan.block("endpoint_route_adapter_not_up", "The effective provider-endpoint route belongs to an adapter that is not operationally up.")
+	}
+	if routeFound && adapterFound && adapter.Up && adapter.Kind == AdapterPhysical {
 		prefix, err := netip.ParsePrefix(effective.Destination)
 		if err == nil && prefix.Bits() == endpoint.BitLen() {
+			if effective.InterfaceGUID == "" {
+				return
+			}
 			plan.info("endpoint_direct_exception_present", "The provider endpoint has a dedicated route through the physical adapter.")
 			return
 		}
@@ -117,10 +143,14 @@ func planEndpointDirect(plan *Preflight, endpoint netip.Addr, routes []Route, ad
 
 	plan.block("endpoint_direct_exception_missing", "The provider endpoint is not protected by a dedicated physical-adapter route.")
 	operation := Operation{Kind: OperationAddEndpointDirectException, Family: family, Destination: hostPrefix}
-	if physicalDefault, ok := physicalDefaults[family]; ok {
-		operation.NextHop = physicalDefault.NextHop
-		operation.InterfaceIndex = physicalDefault.InterfaceIndex
+	physicalDefault, ok := physicalDefaults[family]
+	if !ok || physicalDefault.InterfaceGUID == "" {
+		plan.block("endpoint_direct_interface_identity_unresolved", "No operational physical default route with a stable Windows interface GUID is available for an endpoint exception.")
+		return
 	}
+	operation.NextHop = physicalDefault.NextHop
+	operation.InterfaceIndex = physicalDefault.InterfaceIndex
+	operation.InterfaceGUID = physicalDefault.InterfaceGUID
 	plan.Operations = append(plan.Operations, operation)
 }
 
@@ -131,9 +161,13 @@ func planCiscoPreservation(plan *Preflight, routes []Route, adapters []Adapter) 
 		return
 	}
 	for _, adapter := range ciscoAdapters {
+		if adapter.InterfaceGUID == "" {
+			plan.block("cisco_interface_identity_unresolved", "An active Cisco adapter has no stable Windows interface GUID.")
+			continue
+		}
 		preserved := 0
 		for _, route := range routes {
-			if !routeUsesAdapter(route, adapter) {
+			if route.State != routeStateAlive || !routeUsesAdapter(route, adapter) {
 				continue
 			}
 			plan.Operations = append(plan.Operations, Operation{
@@ -142,6 +176,7 @@ func planCiscoPreservation(plan *Preflight, routes []Route, adapters []Adapter) 
 				Destination:    route.Destination,
 				NextHop:        route.NextHop,
 				InterfaceIndex: adapter.Index,
+				InterfaceGUID:  adapter.InterfaceGUID,
 			})
 			preserved++
 		}
@@ -182,7 +217,7 @@ func planUnclassifiedDefaultRoutes(plan *Preflight, routes []Route, adapters []A
 	unclassifiedFamilies := make(map[AddressFamily]bool)
 	for _, route := range routes {
 		prefix, err := netip.ParsePrefix(route.Destination)
-		if err != nil || prefix.Bits() != 0 {
+		if err != nil || route.State != routeStateAlive || prefix.Bits() != 0 {
 			continue
 		}
 		adapter, found := adapterForRoute(route, adapters)
@@ -197,14 +232,16 @@ func planUnclassifiedDefaultRoutes(plan *Preflight, routes []Route, adapters []A
 	return unclassifiedFamilies[FamilyIPv6]
 }
 
-func normalizedAdapters(input []Adapter, routes []Route) []Adapter {
+func normalizedAdapters(input []Adapter) []Adapter {
 	adapters := append([]Adapter(nil), input...)
 	for index := range adapters {
 		if adapters[index].Kind == "" {
-			adapters[index].Kind = DetectAdapterKind(adapters[index].Name, adapters[index].Description, 0)
+			adapters[index].Kind = DetectAdapterKind(adapters[index].Name, adapters[index].Description)
+		}
+		if adapters[index].Kind == AdapterOther && adapters[index].HardwareInterface {
+			adapters[index].Kind = AdapterPhysical
 		}
 	}
-	markPhysicalDefaultAdapters(adapters, routes)
 	return adapters
 }
 
@@ -223,7 +260,7 @@ func defaultRoutesByFamily(routes []Route, adapters []Adapter, kind AdapterKind)
 	for _, route := range routes {
 		prefix, err := netip.ParsePrefix(route.Destination)
 		adapter, found := adapterForRoute(route, adapters)
-		if err != nil || prefix.Bits() != 0 || !found || !adapter.Up || adapter.Kind != kind {
+		if err != nil || route.State != routeStateAlive || prefix.Bits() != 0 || !found || !adapter.Up || adapter.Kind != kind {
 			continue
 		}
 		current, exists := result[route.Family]
@@ -234,25 +271,28 @@ func defaultRoutesByFamily(routes []Route, adapters []Adapter, kind AdapterKind)
 	return result
 }
 
-func effectiveRoute(address netip.Addr, routes []Route, adapters []Adapter) (Route, Adapter, bool) {
+func effectiveRouteRecord(address netip.Addr, routes []Route) (Route, bool, bool) {
 	var selected Route
-	var selectedAdapter Adapter
 	selectedBits := -1
-	selectedMetric := 0
+	var selectedMetric uint64
+	ambiguous := false
 	for _, route := range routes {
 		prefix, err := netip.ParsePrefix(route.Destination)
-		adapter, found := adapterForRoute(route, adapters)
-		if err != nil || !found || !adapter.Up || !prefix.Contains(address) {
+		if err != nil || route.State != routeStateAlive || !prefix.Contains(address) {
 			continue
 		}
 		if prefix.Bits() > selectedBits || prefix.Bits() == selectedBits && route.Metric < selectedMetric {
 			selected = route
-			selectedAdapter = adapter
 			selectedBits = prefix.Bits()
 			selectedMetric = route.Metric
+			ambiguous = false
+			continue
+		}
+		if prefix.Bits() == selectedBits && route.Metric == selectedMetric && (route.InterfaceIndex != selected.InterfaceIndex || route.InterfaceGUID != selected.InterfaceGUID || route.NextHop != selected.NextHop) {
+			ambiguous = true
 		}
 	}
-	return selected, selectedAdapter, selectedBits >= 0
+	return selected, selectedBits >= 0, ambiguous
 }
 
 func adapterForRoute(route Route, adapters []Adapter) (Adapter, bool) {
@@ -292,7 +332,7 @@ func adaptersHaveFamily(adapters []Adapter, routes []Route, family AddressFamily
 			}
 		}
 		for _, route := range routes {
-			if route.Family == family && routeUsesAdapter(route, adapter) {
+			if route.Family == family && route.State == routeStateAlive && routeUsesAdapter(route, adapter) {
 				return true
 			}
 		}

@@ -40,7 +40,7 @@ The project treats the following as explicit threats:
 
 ## Command execution
 
-The P3 read-only collector uses `exec.CommandContext` behind an exact executable/argument allowlist. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input. Before privileged service use, Windows executables must be pinned to trusted System32 paths and the PowerShell module environment must be sanitized.
+The P3 read-only collector uses `exec.CommandContext` with a fixed script and no caller-supplied executable or arguments. Windows APIs resolve the trusted Windows and System32 directories; Windows PowerShell and inbox module manifests use absolute paths, and the process receives a minimal sanitized environment with bounded output. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input. Physical adapters require the authoritative Windows hardware marker, while routes and future operations bind to stable interface GUIDs. P3.3 exposes no network mutation path.
 
 ## Supply chain controls
 

@@ -1,7 +1,7 @@
 # Project Status
 
 Current phase: P3 RedShield-backed Windows pilot in progress
-Release level: P2-software-verified; P3-read-only-baseline
+Release level: P2-software-verified; P3.3-read-only-software-verified
 
 ## P0A Foundation
 
@@ -32,15 +32,17 @@ Release level: P2-software-verified; P3-read-only-baseline
 
 ## P3 RedShield-backed Windows pilot
 
-- State: P3.1 and P3.2 complete; P3.3 in progress; no live network mutation performed
+- State: P3.1 through P3.3 complete for their read-only software scope; P3.4 is next; no live network mutation performed
 - Plan: [P3 RedShield-backed Windows implementation plan](docs/superpowers/plans/2026-08-24-p03-redshield-windows.md)
 - Architecture: [ADR-0011](docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md) keeps policy/API semantics independent from the Windows/OpenWrt platform and RedShield/self-hosted tunnel backends
 - Real-config qualification on 2026-08-24: the user-supplied external `.conf` passed the strict one-interface/one-peer AmneziaWG importer with IPv4/IPv6 full-tunnel capability; key material was neither printed nor copied into repository evidence
 - Latest read-only Windows preflight on 2026-08-24: one active WireGuard/Amnezia adapter matches both imported interface addresses, a physical endpoint host route was observed, and IPv4/IPv6 fail-closed prerequisites were identified. The command returned the expected blocked exit code `3`
-- The preflight remains blocked because the current collector intentionally marks its route snapshot non-authoritative, does not yet inspect effective DNS/NRPT policy, and cannot authoritatively observe provider tunnel status. Apply is unavailable
-- Cisco was active in an earlier read-only snapshot but inactive in the latest one. Its configuration, profile, service and routes were not changed; Cisco preservation field evidence remains open
-- The external config inherits a broad read permission. It is acceptable for the bounded interactive inspection, but must be tightened before any unattended service can consume the file
-- Local software evidence: full Go tests, 41 Pester tests, format, vet, staticcheck, gosec, govulncheck, repository and working-tree secret scans, governance smoke and reproducible four-target build passed
+- P3.3 live evidence on 2026-08-25: the production collector completed an opt-in read-only smoke against this Windows host and returned authoritative structured ActiveStore routes and metrics, stable adapter GUIDs and hardware markers, effective DNS servers and the effective NRPT rule count. No route, DNS, firewall, service, adapter, RedShield or Cisco state was changed
+- `read_only_qualified` is separate from apply readiness: provider handshake/egress remains unobserved until the P3.5 live canary, `ready` remains false, and apply is unavailable
+- A fresh combined preflight with the prior `Netherlands.conf` was not run because the external file is no longer present at the supplied path. The earlier importer/baseline evidence remains valid, but current-PC field acceptance is not claimed
+- Cisco was active in an earlier read-only snapshot but inactive in the latest combined preflight. Its configuration, profile, service and routes were not changed; Cisco preservation field evidence remains open
+- The previously inspected external config had a broad read permission. That was acceptable for bounded interactive inspection, but any replacement must have restrictive access before an unattended service can consume it
+- Local P3.3 evidence on 2026-08-25: focused tests and the production live read-only collector smoke passed. The phase-closing `verify` batch passed all Go tests, 41 Pester tests, format, vet, staticcheck, gosec with zero issues, govulncheck with no callable vulnerabilities, repository and working-tree secret scans, governance/toolchain smokes and reproducible four-target builds
 - Branch: `phase/p3-redshield-windows`, based on completed `phase/p2-dataplane`
 
 ## External gates
@@ -55,6 +57,7 @@ Release level: P2-software-verified; P3-read-only-baseline
 
 - P1 software blockers: none
 - P2 software blockers: none
-- P3.3 still requires authoritative structured `Get-NetRoute`, DNS/NRPT and provider-status inventory, stable adapter identities and trusted System32/module resolution. P3.4 then owns project-marked apply, snapshot, rollback and recovery; none of these mutations is implemented or enabled yet.
+- P3.3 software blockers: none. P3.4 owns project-marked apply, snapshot, rollback and recovery; none of these mutations is implemented or enabled yet.
+- Fresh combined real-config replay remains an external evidence gap until the user-supplied config is available again. Provider handshake and egress are P3.5 field gates, not inferred P3.3 status.
 - `pc-core-ready` remains open until real direct/RedShield/Cisco, IPv4/IPv6 fail-closed, restart/recovery and full uninstall restoration evidence passes on the current Windows PC.
 - P2 does not claim Windows field acceptance, Flint 2 hardware compatibility or throughput.

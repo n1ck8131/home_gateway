@@ -1,6 +1,6 @@
 # P3 RedShield-backed Windows pilot implementation plan
 
-Status: Active — P3.1 and P3.2 complete; P3.3 in progress
+Status: Active — P3.1 through P3.3 complete for their software scope; P3.4 next
 
 ## Goal
 
@@ -40,16 +40,20 @@ Exit: synthetic WireGuard/AmneziaWG tests pass and the real config produces reda
 
 ### P3.3 Windows routing adapter foundation
 
-Status: in progress. The native read-only preflight is fail-closed and returns exit code `3` until structured routes, effective DNS/NRPT and authoritative provider status are observed.
+Status: complete for the read-only software scope. The production collector passed an opt-in live Windows inventory smoke on 2026-08-25; deterministic parser and planner fixtures pass. Exit code `0` means only `read_only_qualified`; `ready` remains false and apply remains blocked.
 
 - Model Windows adapters, routes, DNS and tunnel status without executing mutation commands.
-- Detect the physical default route, active RedShield tunnel and Cisco adapter, then replace heuristic labels with stable identities before apply work begins.
+- Detect physical adapters from the authoritative Windows hardware marker, identify the active RedShield tunnel and Cisco adapter, and bind routes to stable interface GUIDs before apply work begins. Unknown virtual default adapters fail closed.
 - Pin trusted Windows executable/module resolution before the collector can run in a privileged or unattended process.
 - Produce a structured dry-run/readiness report; block when endpoint-direct, Cisco preservation or IPv4/IPv6 fail-closed prerequisites are unresolved.
 
 Exit: read-only live inventory and deterministic fixture tests pass; apply remains unavailable.
 
+Provider handshake and egress health are deliberately separate from local Windows adapter status. They remain P3.5 live-canary evidence and cannot be inferred from an interface being present.
+
 ### P3.4 Fail-closed apply and rollback
+
+Status: next
 
 - Implement project-owned Windows route/firewall/DNS operations with explicit ownership.
 - Preserve the RedShield endpoint and protected Cisco/system routes on direct paths.

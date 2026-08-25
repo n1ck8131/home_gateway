@@ -202,10 +202,14 @@ function Get-PktmonComponentState {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
         }
         $componentProperties = @($root.PSObject.Properties | Where-Object { $_.Name -ceq 'Components' })
-        if ($componentProperties.Count -ne 1 -or $componentProperties[0].Value -isnot [Array]) {
+        if ($componentProperties.Count -ne 1 -or $null -eq $componentProperties[0].Value) {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
         }
-        $rootComponents = @($componentProperties[0].Value)
+        $componentValue = $componentProperties[0].Value
+        if ($componentValue -isnot [Array] -and $componentValue -isnot [Management.Automation.PSCustomObject]) {
+            return [ordered]@{ recognized = $false; monitorable_count = 0 }
+        }
+        $rootComponents = @($componentValue)
         if ($rootComponents.Count -eq 0 -or $components.Count + $rootComponents.Count -gt 65535) {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
         }
@@ -235,8 +239,11 @@ function Get-PktmonComponentState {
             if ($null -eq $secondaryID -or $secondaryID.GetType() -notin $integerTypes -or [decimal]$secondaryID -lt 0) {
                 return [ordered]@{ recognized = $false; monitorable_count = 0 }
             }
+            $secondaryKey = ([uint64]$secondaryID).ToString([Globalization.CultureInfo]::InvariantCulture)
+        } else {
+            $secondaryKey = '<none>'
         }
-        $idKey = ([uint64]$id).ToString([Globalization.CultureInfo]::InvariantCulture)
+        $idKey = ([uint64]$id).ToString([Globalization.CultureInfo]::InvariantCulture) + '|' + $secondaryKey
         if ($ids.ContainsKey($idKey)) {
             return [ordered]@{ recognized = $false; monitorable_count = 0 }
         }

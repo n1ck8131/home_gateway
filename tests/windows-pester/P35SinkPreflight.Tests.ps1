@@ -177,9 +177,13 @@ Describe 'P3.5 sink qualification preflight' {
         $valid.recognized | Should -BeTrue
         $valid.monitorable_count | Should -Be 1
 
-        $grouped = Get-PktmonComponentState -Text '[{"Layer":"one","Components":[{"Id":7,"SecondaryId":0,"UnknownA":1}]},{"Layer":"two","Components":[{"Id":8,"UnknownB":2}]}]'
+        $grouped = Get-PktmonComponentState -Text '[{"Layer":"one","Components":[{"Id":7,"SecondaryId":0,"UnknownA":1}]},{"Layer":"two","Components":[{"Id":7,"SecondaryId":1,"UnknownB":2}]}]'
         $grouped.recognized | Should -BeTrue
         $grouped.monitorable_count | Should -Be 2
+
+        $singleton = Get-PktmonComponentState -Text '{"Components":{"Id":8,"SecondaryId":0}}'
+        $singleton.recognized | Should -BeTrue
+        $singleton.monitorable_count | Should -Be 1
 
         (Get-PktmonComponentState -Text '{}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '[]').recognized | Should -BeFalse
@@ -187,11 +191,11 @@ Describe 'P3.5 sink qualification preflight' {
         (Get-PktmonComponentState -Text '[{"Components":[]}]').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text 'not-json').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"note":"\\"Id\\":7,\\"SecondaryId\\":0"}').recognized | Should -BeFalse
-        (Get-PktmonComponentState -Text '{"Components":{"Id":7,"SecondaryId":0}}').recognized | Should -BeFalse
+        (Get-PktmonComponentState -Text '{"Components":"not-an-object"}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":[{"Id":"7","SecondaryId":0}]}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":[{"Id":7,"SecondaryId":"0"}]}').recognized | Should -BeFalse
         (Get-PktmonComponentState -Text '{"Components":[{"Id":null}]}').recognized | Should -BeFalse
-        (Get-PktmonComponentState -Text '{"Components":[{"Id":7,"SecondaryId":0},{"Id":7,"SecondaryId":1}]}').recognized | Should -BeFalse
+        (Get-PktmonComponentState -Text '{"Components":[{"Id":7,"SecondaryId":0},{"Id":7,"SecondaryId":0}]}').recognized | Should -BeFalse
     }
 
     It 'accepts an active non-loopback virtual default only for the sink primitive baseline' {

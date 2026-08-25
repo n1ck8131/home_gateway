@@ -490,9 +490,8 @@ func TestWindowsFirewallNameCannotAliasAnotherRevision(t *testing.T) {
 	backend := newSafeBackend()
 	candidate := safeCandidate(t, "r2")
 	artifacts := decodeCandidate(t, candidate)
-	artifacts.routes.Routes[2].Destination = "198.51.101.0/24"
-	artifacts.firewall.Rules[0].RemoteCIDR = "198.51.101.0/24"
-	artifacts.firewall.Rules[0].Name = FirewallRuleName("r1", FamilyIPv4, "198.51.100.0/24", testPhysicalGUID)
+	setCandidateIPv4VPN(&artifacts, "198.51.101.53/32", "198.51.101.53")
+	artifacts.firewall.Rules[0].Name = FirewallRuleName("r1", FamilyIPv4, "198.51.100.53/32", testPhysicalGUID)
 	candidate = encodeCandidate(t, artifacts)
 	runtime := &Runtime{Root: filepath.Join(t.TempDir(), "runtime"), Backend: backend, QualifiedEndpoints: testQualifiedEndpoints()}
 	if err := runtime.Stage(context.Background(), candidate); err == nil {
@@ -514,10 +513,10 @@ func TestWindowsTransactionOrdersDualStackAndPreservesForeignState(t *testing.T)
 	assertOrdered(t, backend.calls,
 		"add-route:endpoint-direct:203.0.113.5/32",
 		"add-route:endpoint-direct:2001:db8:ffff::5/128",
-		"put-firewall:"+FirewallRuleName("r1", FamilyIPv4, "198.51.100.0/24", testPhysicalGUID),
-		"put-firewall:"+FirewallRuleName("r1", FamilyIPv6, "2001:db8:100::/64", testPhysicalGUID),
-		"add-route:vpn-class:198.51.100.0/24",
-		"add-route:vpn-class:2001:db8:100::/64",
+		"put-firewall:"+FirewallRuleName("r1", FamilyIPv4, "198.51.100.53/32", testPhysicalGUID),
+		"put-firewall:"+FirewallRuleName("r1", FamilyIPv6, "2001:db8:100::53/128", testPhysicalGUID),
+		"add-route:vpn-class:198.51.100.53/32",
+		"add-route:vpn-class:2001:db8:100::53/128",
 		"put-nrpt:dns-v4",
 		"put-nrpt:dns-v6",
 	)
@@ -527,8 +526,8 @@ func TestWindowsTransactionOrdersDualStackAndPreservesForeignState(t *testing.T)
 func TestWindowsTransactionFaultsRestoreBeforeSnapshot(t *testing.T) {
 	faults := []string{
 		"add-route:endpoint-direct:2001:db8:ffff::5/128",
-		"put-firewall:" + FirewallRuleName("r1", FamilyIPv6, "2001:db8:100::/64", testPhysicalGUID),
-		"add-route:vpn-class:2001:db8:100::/64",
+		"put-firewall:" + FirewallRuleName("r1", FamilyIPv6, "2001:db8:100::53/128", testPhysicalGUID),
+		"add-route:vpn-class:2001:db8:100::53/128",
 		"put-nrpt:dns-v6",
 		"reload",
 	}
@@ -564,7 +563,7 @@ func TestWindowsFailedRollbackRemainsDurablyRetryable(t *testing.T) {
 	before := cloneMutationSnapshot(backend.state)
 	root := filepath.Join(t.TempDir(), "runtime")
 	tx := transactionForRoot(root, backend, &mutableClock{now: time.Unix(100, 0).UTC()})
-	backend.failCall = "add-route:vpn-class:2001:db8:100::/64"
+	backend.failCall = "add-route:vpn-class:2001:db8:100::53/128"
 	backend.persistentFailCall = "remove-route:endpoint-direct:203.0.113.5/32"
 	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil {
 		t.Fatal("activation plus rollback fault did not fail")
@@ -747,7 +746,7 @@ func TestWindowsReplacementFaultRestoresLKG(t *testing.T) {
 	if err := tx.Confirm(); err != nil {
 		t.Fatal(err)
 	}
-	backend.failCall = "add-route:vpn-class:2001:db8:100::/64"
+	backend.failCall = "add-route:vpn-class:2001:db8:100::53/128"
 	if err := tx.Apply(context.Background(), safeCandidate(t, "r2")); err == nil {
 		t.Fatal("replacement fault did not fail")
 	}
@@ -778,7 +777,7 @@ func TestWindowsStalePruneFaultRestoresLKG(t *testing.T) {
 	if err := tx.Confirm(); err != nil {
 		t.Fatal(err)
 	}
-	backend.failCall = "remove-firewall:" + FirewallRuleName("r1", FamilyIPv4, "198.51.100.0/24", testPhysicalGUID)
+	backend.failCall = "remove-firewall:" + FirewallRuleName("r1", FamilyIPv4, "198.51.100.53/32", testPhysicalGUID)
 	if err := tx.Apply(context.Background(), safeCandidate(t, "r2")); err == nil {
 		t.Fatal("stale-prune fault did not fail")
 	}
@@ -792,12 +791,12 @@ func TestWindowsStalePruneFaultRestoresLKG(t *testing.T) {
 func TestWindowsReconcileFaultsRemainRetryable(t *testing.T) {
 	tests := map[string]func(*fakeMutationBackend){
 		"partial route": func(backend *fakeMutationBackend) {
-			backend.failCall = "add-route:vpn-class:2001:db8:100::/64"
+			backend.failCall = "add-route:vpn-class:2001:db8:100::53/128"
 		},
 		"reload":     func(backend *fakeMutationBackend) { backend.failCall = "reload" },
 		"post-check": func(backend *fakeMutationBackend) { backend.failSnapshotAfterReload = true },
 		"persistent then cleared": func(backend *fakeMutationBackend) {
-			backend.persistentFailCall = "add-route:vpn-class:2001:db8:100::/64"
+			backend.persistentFailCall = "add-route:vpn-class:2001:db8:100::53/128"
 		},
 	}
 	for name, inject := range tests {
@@ -1075,7 +1074,7 @@ func TestWindowsRecoveryOperationsResumeDurableIntentAfterFault(t *testing.T) {
 	if err := tx.Confirm(); err != nil {
 		t.Fatal(err)
 	}
-	backend.failCall = "remove-route:vpn-class:198.51.100.0/24"
+	backend.failCall = "remove-route:vpn-class:198.51.100.53/32"
 	if err := tx.EmergencyDisable(context.Background()); err == nil {
 		t.Fatal("emergency fault did not fail")
 	}
@@ -1143,14 +1142,18 @@ func safeCandidate(t *testing.T, revision string) apply.Candidate {
 		routes: RoutesArtifact{Version: ArtifactVersion, Owner: ArtifactOwner, Revision: revision, Routes: []ManagedRoute{
 			{Role: RouteRoleEndpointDirect, Family: FamilyIPv4, Destination: "203.0.113.5/32", NextHop: "192.168.1.1", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, Metric: ReservedRouteMetric, PolicyStore: RoutePolicyStore, Protocol: RouteProtocol, JournalOwned: true},
 			{Role: RouteRoleEndpointDirect, Family: FamilyIPv6, Destination: "2001:db8:ffff::5/128", NextHop: "2001:db8:1::1", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, Metric: ReservedRouteMetric, PolicyStore: RoutePolicyStore, Protocol: RouteProtocol, JournalOwned: true},
-			{Role: RouteRoleVPNClass, Family: FamilyIPv4, Destination: "198.51.100.0/24", NextHop: "10.20.30.1", InterfaceGUID: testRedShieldGUID, InterfaceIndex: 21, Metric: ReservedRouteMetric, PolicyStore: RoutePolicyStore, Protocol: RouteProtocol, JournalOwned: true},
-			{Role: RouteRoleVPNClass, Family: FamilyIPv6, Destination: "2001:db8:100::/64", NextHop: "fd00::1", InterfaceGUID: testRedShieldGUID, InterfaceIndex: 21, Metric: ReservedRouteMetric, PolicyStore: RoutePolicyStore, Protocol: RouteProtocol, JournalOwned: true},
+			{Role: RouteRoleVPNClass, Family: FamilyIPv4, Destination: "198.51.100.53/32", NextHop: "10.20.30.1", InterfaceGUID: testRedShieldGUID, InterfaceIndex: 21, Metric: ReservedRouteMetric, PolicyStore: RoutePolicyStore, Protocol: RouteProtocol, JournalOwned: true},
+			{Role: RouteRoleVPNClass, Family: FamilyIPv6, Destination: "2001:db8:100::53/128", NextHop: "fd00::1", InterfaceGUID: testRedShieldGUID, InterfaceIndex: 21, Metric: ReservedRouteMetric, PolicyStore: RoutePolicyStore, Protocol: RouteProtocol, JournalOwned: true},
+		}},
+		sinks: SinkArtifact{Version: ArtifactVersion, Owner: ArtifactOwner, Revision: revision, Routes: []SinkRoute{
+			sinkForVPNRoute(ManagedRoute{Family: FamilyIPv4, Destination: "198.51.100.53/32"}),
+			sinkForVPNRoute(ManagedRoute{Family: FamilyIPv6, Destination: "2001:db8:100::53/128"}),
 		}},
 		firewall: FirewallArtifact{Version: ArtifactVersion, Owner: ArtifactOwner, Revision: revision, Rules: []FirewallRule{
-			{Name: FirewallRuleName(revision, FamilyIPv4, "198.51.100.0/24", testPhysicalGUID), Family: FamilyIPv4, RemoteCIDR: "198.51.100.0/24", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
-			{Name: FirewallRuleName(revision, FamilyIPv6, "2001:db8:100::/64", testPhysicalGUID), Family: FamilyIPv6, RemoteCIDR: "2001:db8:100::/64", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
-			{Name: FirewallRuleName(revision, FamilyIPv4, "198.51.100.0/24", testCiscoGUID), Family: FamilyIPv4, RemoteCIDR: "198.51.100.0/24", Action: "block", Direction: "outbound", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
-			{Name: FirewallRuleName(revision, FamilyIPv6, "2001:db8:100::/64", testCiscoGUID), Family: FamilyIPv6, RemoteCIDR: "2001:db8:100::/64", Action: "block", Direction: "outbound", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
+			{Name: FirewallRuleName(revision, FamilyIPv4, "198.51.100.53/32", testPhysicalGUID), Family: FamilyIPv4, RemoteCIDR: "198.51.100.53/32", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
+			{Name: FirewallRuleName(revision, FamilyIPv6, "2001:db8:100::53/128", testPhysicalGUID), Family: FamilyIPv6, RemoteCIDR: "2001:db8:100::53/128", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
+			{Name: FirewallRuleName(revision, FamilyIPv4, "198.51.100.53/32", testCiscoGUID), Family: FamilyIPv4, RemoteCIDR: "198.51.100.53/32", Action: "block", Direction: "outbound", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
+			{Name: FirewallRuleName(revision, FamilyIPv6, "2001:db8:100::53/128", testCiscoGUID), Family: FamilyIPv6, RemoteCIDR: "2001:db8:100::53/128", Action: "block", Direction: "outbound", InterfaceGUID: testCiscoGUID, InterfaceIndex: 31, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)},
 		}},
 		dns: DNSArtifact{Version: ArtifactVersion, Owner: ArtifactOwner, Revision: revision, Rules: []NRPTRule{
 			{LogicalID: "dns-v4", DisplayName: "hg-" + revision + "-dns-v4", Namespace: ".vpn.example", NameServers: []string{"198.51.100.53"}, Comment: ownershipDescription(revision)},
@@ -1164,6 +1167,11 @@ func setCandidateIPv4VPN(artifacts *artifactSet, destination, nameServer string)
 	for index := range artifacts.routes.Routes {
 		if artifacts.routes.Routes[index].Role == RouteRoleVPNClass && artifacts.routes.Routes[index].Family == FamilyIPv4 {
 			artifacts.routes.Routes[index].Destination = destination
+		}
+	}
+	for index := range artifacts.sinks.Routes {
+		if artifacts.sinks.Routes[index].Family == FamilyIPv4 {
+			artifacts.sinks.Routes[index] = sinkForVPNRoute(ManagedRoute{Family: FamilyIPv4, Destination: destination})
 		}
 	}
 	for index := range artifacts.firewall.Rules {
@@ -1182,14 +1190,15 @@ func setCandidateIPv4VPN(artifacts *artifactSet, destination, nameServer string)
 func encodeCandidate(t *testing.T, artifacts artifactSet) apply.Candidate {
 	t.Helper()
 	routes, _ := json.Marshal(artifacts.routes)
+	sinks, _ := json.Marshal(artifacts.sinks)
 	firewall, _ := json.Marshal(artifacts.firewall)
 	dns, _ := json.Marshal(artifacts.dns)
-	return apply.Candidate{RevisionID: artifacts.routes.Revision, Routes: routes, Firewall: firewall, DNS: dns}
+	return apply.Candidate{RevisionID: artifacts.routes.Revision, Routes: routes, Sinks: sinks, Firewall: firewall, DNS: dns}
 }
 
 func decodeCandidate(t *testing.T, candidate apply.Candidate) artifactSet {
 	t.Helper()
-	artifacts, err := parseArtifacts(candidate.RevisionID, candidate.Routes, candidate.Firewall, candidate.DNS)
+	artifacts, err := parseArtifacts(candidate.RevisionID, candidate.Routes, candidate.Sinks, candidate.Firewall, candidate.DNS)
 	if err != nil {
 		t.Fatal(err)
 	}

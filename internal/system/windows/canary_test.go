@@ -24,7 +24,7 @@ func TestBuildCanaryPlanProducesBoundedDualStackArtifacts(t *testing.T) {
 	if !slices.Equal(plan.QualifiedEndpoints, []string{"203.0.113.5/32", "2001:db8:ffff::5/128"}) {
 		t.Fatalf("qualified endpoints = %v", plan.QualifiedEndpoints)
 	}
-	if plan.RouteCount != 4 || plan.FirewallRuleCount != 8 || plan.DNSRuleCount != 1 {
+	if plan.RouteCount != 4 || plan.SinkCount != 4 || plan.FirewallRuleCount != 8 || plan.DNSRuleCount != 1 {
 		t.Fatalf("unexpected summary: %#v", plan)
 	}
 	challenge := plan.ConfirmationChallenge(`C:\ProgramData\HomeGateway\p35`)
@@ -34,12 +34,26 @@ func TestBuildCanaryPlanProducesBoundedDualStackArtifacts(t *testing.T) {
 	if challenge == plan.ConfirmationChallenge(`C:\ProgramData\HomeGateway\other`) {
 		t.Fatal("confirmation challenge is not bound to the state root")
 	}
-	artifacts, err := parseArtifacts(plan.Candidate.RevisionID, plan.Candidate.Routes, plan.Candidate.Firewall, plan.Candidate.DNS)
+	artifacts, err := parseArtifacts(
+		plan.Candidate.RevisionID,
+		plan.Candidate.Routes,
+		plan.Candidate.Sinks,
+		plan.Candidate.Firewall,
+		plan.Candidate.DNS,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(artifacts.routes.DirectAssertions) != 2 || len(artifacts.routes.Routes) != 4 {
 		t.Fatalf("routes artifact = %#v", artifacts.routes)
+	}
+	if len(artifacts.sinks.Routes) != len(plan.TargetPrefixes) {
+		t.Fatalf("sink count = %d, targets = %d", len(artifacts.sinks.Routes), len(plan.TargetPrefixes))
+	}
+	for _, route := range artifacts.sinks.Routes {
+		if route.InterfaceIndex != LoopbackInterfaceIndex || route.Metric != ReservedSinkMetric || route.PolicyStore != SinkPolicyStore {
+			t.Fatalf("unsafe sink route: %#v", route)
+		}
 	}
 	for _, route := range artifacts.routes.Routes {
 		if route.Role != RouteRoleVPNClass || route.InterfaceGUID != testRedShieldGUID || route.Metric != ReservedRouteMetric || !route.JournalOwned {
@@ -52,7 +66,7 @@ func TestBuildCanaryPlanProducesBoundedDualStackArtifacts(t *testing.T) {
 	if got := artifacts.dns.Rules[0]; got.Namespace != CanaryDNSNamespace || !slices.Equal(got.NameServers, []string{"10.20.30.1", "fd00::1"}) {
 		t.Fatalf("DNS artifact = %#v", got)
 	}
-	for _, payload := range [][]byte{plan.Candidate.Routes, plan.Candidate.Firewall, plan.Candidate.DNS} {
+	for _, payload := range [][]byte{plan.Candidate.Routes, plan.Candidate.Sinks, plan.Candidate.Firewall, plan.Candidate.DNS} {
 		var decoded any
 		if err := json.Unmarshal(payload, &decoded); err != nil {
 			t.Fatal(err)
@@ -82,7 +96,7 @@ func TestBuildCanaryPlanCoversRetainedDownCiscoDefaultPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifacts, err := parseArtifacts(plan.Candidate.RevisionID, plan.Candidate.Routes, plan.Candidate.Firewall, plan.Candidate.DNS)
+	artifacts, err := parseArtifacts(plan.Candidate.RevisionID, plan.Candidate.Routes, plan.Candidate.Sinks, plan.Candidate.Firewall, plan.Candidate.DNS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +111,30 @@ func TestBuildCanaryPlanCoversRetainedDownCiscoDefaultPath(t *testing.T) {
 	}
 	if ciscoRules != 3 {
 		t.Fatalf("Cisco exact-target fail-closed rules = %d, want 3", ciscoRules)
+	}
+}
+
+func TestBuildCanaryPlanAllowsIPv6WithoutDefaultWhenLoopbackSinkIsQualified(t *testing.T) {
+	inventory, inspection := qualifiedCanaryInput()
+	inventory.Routes = slices.DeleteFunc(inventory.Routes, func(route Route) bool {
+		return route.Family == FamilyIPv6 && route.Destination == "::/0" && route.InterfaceGUID == testPhysicalGUID
+	})
+	plan, err := BuildCanaryPlan(inventory, inspection, CanaryRequest{
+		Revision:        "p35-canary-v6-sink",
+		TargetAddresses: []string{"2001:db8:100::10"},
+		DNSNamespace:    CanaryDNSNamespace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := parseArtifacts(plan.Candidate.RevisionID, plan.Candidate.Routes, plan.Candidate.Sinks, plan.Candidate.Firewall, plan.Candidate.DNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(artifacts.sinks.Routes, func(route SinkRoute) bool {
+		return route.Family == FamilyIPv6 && route.Destination == "2001:db8:100::10/128" && route.NextHop == "::"
+	}) {
+		t.Fatalf("IPv6 target sink missing: %#v", artifacts.sinks.Routes)
 	}
 }
 
@@ -176,6 +214,23 @@ func TestLoadQualifiedEndpointsUsesManifestVerifiedRevisionData(t *testing.T) {
 	if err := runtime.Stage(t.Context(), plan.Candidate); err != nil {
 		t.Fatal(err)
 	}
+	manifest := filepath.Join(root, "revisions", plan.Candidate.RevisionID, revisionManifestName)
+	manifestData, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded revisionManifest
+	if err := json.Unmarshal(manifestData, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Files) != 4 {
+		t.Fatalf("manifest file count = %d, want 4: %#v", len(decoded.Files), decoded.Files)
+	}
+	for _, name := range []string{routesArtifactName, sinksArtifactName, firewallArtifactName, dnsArtifactName} {
+		if _, ok := decoded.Files[name]; !ok {
+			t.Fatalf("manifest missing %s: %#v", name, decoded.Files)
+		}
+	}
 	loaded, err := LoadQualifiedEndpoints(root, []string{plan.Candidate.RevisionID})
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +238,6 @@ func TestLoadQualifiedEndpointsUsesManifestVerifiedRevisionData(t *testing.T) {
 	if !slices.Equal(loaded, plan.QualifiedEndpoints) {
 		t.Fatalf("loaded endpoints = %v, want %v", loaded, plan.QualifiedEndpoints)
 	}
-	manifest := filepath.Join(root, "revisions", plan.Candidate.RevisionID, revisionManifestName)
 	if err := os.WriteFile(manifest, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

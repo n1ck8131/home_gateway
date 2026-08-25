@@ -16,6 +16,7 @@ type Candidate struct {
 	Firewall []byte
 	DNS      []byte
 	Routes   []byte
+	Sinks    []byte
 }
 
 type Runtime interface {

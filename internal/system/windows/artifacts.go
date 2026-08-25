@@ -104,14 +104,18 @@ type NRPTRule struct {
 
 type artifactSet struct {
 	routes   RoutesArtifact
+	sinks    SinkArtifact
 	firewall FirewallArtifact
 	dns      DNSArtifact
 }
 
-func parseArtifacts(revision string, routesData, firewallData, dnsData []byte) (artifactSet, error) {
+func parseArtifacts(revision string, routesData, sinksData, firewallData, dnsData []byte) (artifactSet, error) {
 	var artifacts artifactSet
 	if err := decodeStrict(routesData, &artifacts.routes); err != nil {
 		return artifactSet{}, fmt.Errorf("invalid routes artifact: %w", err)
+	}
+	if err := decodeStrict(sinksData, &artifacts.sinks); err != nil {
+		return artifactSet{}, fmt.Errorf("invalid sinks artifact: %w", err)
 	}
 	if err := decodeStrict(firewallData, &artifacts.firewall); err != nil {
 		return artifactSet{}, fmt.Errorf("invalid firewall artifact: %w", err)
@@ -155,6 +159,7 @@ func (artifacts artifactSet) validate(revision string) error {
 		revision string
 	}{
 		{"routes", artifacts.routes.Version, artifacts.routes.Owner, artifacts.routes.Revision},
+		{"sinks", artifacts.sinks.Version, artifacts.sinks.Owner, artifacts.sinks.Revision},
 		{"firewall", artifacts.firewall.Version, artifacts.firewall.Owner, artifacts.firewall.Revision},
 		{"DNS", artifacts.dns.Version, artifacts.dns.Owner, artifacts.dns.Revision},
 	} {
@@ -219,6 +224,47 @@ func (artifacts artifactSet) validate(revision string) error {
 			return fmt.Errorf("route %d duplicates an exact route tuple", index)
 		}
 		seenRoutes[key] = struct{}{}
+	}
+
+	if len(artifacts.sinks.Routes) > maxManagedRoutes {
+		return errors.New("sinks artifact exceeds the route limit")
+	}
+	seenSinks := make(map[string]struct{}, len(artifacts.sinks.Routes))
+	sinkCoverage := make(map[string]int, len(artifacts.sinks.Routes))
+	for index, route := range artifacts.sinks.Routes {
+		prefix, err := parseExplicitPrefix(route.Family, route.Destination)
+		if err != nil || prefix.Bits() != prefix.Addr().BitLen() {
+			return fmt.Errorf("sink route %d is not a canonical host route", index)
+		}
+		nextHop, err := netip.ParseAddr(route.NextHop)
+		if err != nil || nextHop.Zone() != "" || nextHop.Is4In6() || addressFamily(nextHop) != route.Family || !nextHop.IsUnspecified() {
+			return fmt.Errorf("sink route %d has an invalid next hop", index)
+		}
+		if route.InterfaceIndex != LoopbackInterfaceIndex || route.Metric != ReservedSinkMetric || route.PolicyStore != SinkPolicyStore || route.Protocol != RouteProtocol || !route.JournalOwned {
+			return fmt.Errorf("sink route %d lacks reserved project ownership metadata", index)
+		}
+		key := sinkTupleKey(route)
+		if _, exists := seenSinks[key]; exists {
+			return fmt.Errorf("sink route %d duplicates an exact route tuple", index)
+		}
+		seenSinks[key] = struct{}{}
+		sinkCoverage[string(route.Family)+"\x00"+route.Destination]++
+	}
+	vpnCoverage := make(map[string]int)
+	for _, route := range artifacts.routes.Routes {
+		if route.Role == RouteRoleVPNClass {
+			vpnCoverage[string(route.Family)+"\x00"+route.Destination]++
+		}
+	}
+	for key, count := range vpnCoverage {
+		if count != 1 || sinkCoverage[key] != 1 {
+			return errors.New("VPN-class route lacks exact persistent sink coverage")
+		}
+	}
+	for key, count := range sinkCoverage {
+		if count != 1 || vpnCoverage[key] != 1 {
+			return errors.New("sink route has no exact VPN-class route coverage")
+		}
 	}
 
 	if len(artifacts.firewall.Rules) > maxFirewallRules {
@@ -336,6 +382,10 @@ func FirewallRuleName(revision string, family AddressFamily, remoteCIDR, interfa
 
 func routeTupleKey(route ManagedRoute) string {
 	return strings.Join([]string{string(route.Family), route.Destination, route.NextHop, route.InterfaceGUID, fmt.Sprint(route.InterfaceIndex), fmt.Sprint(route.Metric), route.PolicyStore, route.Protocol}, "\x00")
+}
+
+func sinkTupleKey(route SinkRoute) string {
+	return strings.Join([]string{string(route.Family), route.Destination, route.NextHop, fmt.Sprint(route.InterfaceIndex), fmt.Sprint(route.Metric), route.PolicyStore, route.Protocol}, "\x00")
 }
 
 func directAssertionKey(assertion DirectRouteAssertion) string {

@@ -20,6 +20,7 @@ import (
 
 const (
 	routesArtifactName      = "windows-routes.v1.json"
+	sinksArtifactName       = "windows-sinks.v1.json"
 	firewallArtifactName    = "windows-firewall.v1.json"
 	dnsArtifactName         = "windows-nrpt.v1.json"
 	beforeSnapshotName      = "pending-before.v1.json"
@@ -229,7 +230,7 @@ func (runtime *Runtime) Stage(_ context.Context, candidate apply.Candidate) erro
 			_ = safeRemoveAll(runtime.Root, temporary)
 		}
 	}()
-	for _, name := range []string{routesArtifactName, firewallArtifactName, dnsArtifactName} {
+	for _, name := range windowsArtifactNames() {
 		data := canonical[name]
 		if err := writeExclusive(filepath.Join(temporary, name), data); err != nil {
 			return err
@@ -1345,12 +1346,12 @@ func (runtime *Runtime) validateManagedSnapshot(snapshot managedSnapshot) error 
 }
 
 func canonicalCandidate(candidate apply.Candidate) (artifactSet, map[string][]byte, error) {
-	artifacts, err := parseArtifacts(candidate.RevisionID, candidate.Routes, candidate.Firewall, candidate.DNS)
+	artifacts, err := parseArtifacts(candidate.RevisionID, candidate.Routes, candidate.Sinks, candidate.Firewall, candidate.DNS)
 	if err != nil {
 		return artifactSet{}, nil, err
 	}
-	canonical := make(map[string][]byte, 3)
-	for name, value := range map[string]any{routesArtifactName: artifacts.routes, firewallArtifactName: artifacts.firewall, dnsArtifactName: artifacts.dns} {
+	canonical := make(map[string][]byte, 4)
+	for name, value := range map[string]any{routesArtifactName: artifacts.routes, sinksArtifactName: artifacts.sinks, firewallArtifactName: artifacts.firewall, dnsArtifactName: artifacts.dns} {
 		data, err := json.Marshal(value)
 		if err != nil {
 			return artifactSet{}, nil, err
@@ -1418,8 +1419,8 @@ func (runtime *Runtime) readRevision(revision string) (artifactSet, error) {
 	if err != nil {
 		return artifactSet{}, err
 	}
-	canonical := make(map[string][]byte, 3)
-	for _, name := range []string{routesArtifactName, firewallArtifactName, dnsArtifactName} {
+	canonical := make(map[string][]byte, 4)
+	for _, name := range windowsArtifactNames() {
 		data, err := readBoundedFile(filepath.Join(directory, name), maxArtifactBytes)
 		if err != nil {
 			return artifactSet{}, err
@@ -1429,7 +1430,7 @@ func (runtime *Runtime) readRevision(revision string) (artifactSet, error) {
 	if err := verifyRevisionManifest(directory, revision, canonical); err != nil {
 		return artifactSet{}, err
 	}
-	return parseArtifacts(revision, canonical[routesArtifactName], canonical[firewallArtifactName], canonical[dnsArtifactName])
+	return parseArtifacts(revision, canonical[routesArtifactName], canonical[sinksArtifactName], canonical[firewallArtifactName], canonical[dnsArtifactName])
 }
 
 func (runtime *Runtime) writeSnapshot(name string, snapshot managedSnapshot, replace bool) error {
@@ -1552,7 +1553,7 @@ func verifyArtifactFiles(directory, revision string, canonical map[string][]byte
 
 func buildRevisionManifest(revision string, canonical map[string][]byte) ([]byte, error) {
 	manifest := revisionManifest{Version: ArtifactVersion, Revision: revision, Files: make(map[string]manifestEntry, len(canonical))}
-	for _, name := range []string{routesArtifactName, firewallArtifactName, dnsArtifactName} {
+	for _, name := range windowsArtifactNames() {
 		digest := sha256.Sum256(canonical[name])
 		manifest.Files[name] = manifestEntry{Size: len(canonical[name]), SHA256: fmt.Sprintf("%x", digest[:])}
 	}
@@ -1576,10 +1577,10 @@ func verifyRevisionManifest(directory, revision string, canonical map[string][]b
 }
 
 func verifyManifestEntries(manifest revisionManifest, canonical map[string][]byte) error {
-	if len(manifest.Files) != 3 {
+	if len(manifest.Files) != len(windowsArtifactNames()) {
 		return errors.New("revision manifest file set mismatch")
 	}
-	for _, name := range []string{routesArtifactName, firewallArtifactName, dnsArtifactName} {
+	for _, name := range windowsArtifactNames() {
 		entry, exists := manifest.Files[name]
 		digest := sha256.Sum256(canonical[name])
 		if !exists || entry.Size != len(canonical[name]) || entry.SHA256 != fmt.Sprintf("%x", digest[:]) {
@@ -1587,6 +1588,10 @@ func verifyManifestEntries(manifest revisionManifest, canonical map[string][]byt
 		}
 	}
 	return nil
+}
+
+func windowsArtifactNames() []string {
+	return []string{routesArtifactName, sinksArtifactName, firewallArtifactName, dnsArtifactName}
 }
 
 func writeExclusive(path string, data []byte) error {

@@ -35,6 +35,7 @@ type CanaryPlan struct {
 	TargetPrefixes     []string
 	ConfigSHA256       string
 	RouteCount         int
+	SinkCount          int
 	FirewallRuleCount  int
 	DNSRuleCount       int
 }
@@ -50,6 +51,8 @@ func (plan CanaryPlan) ConfirmationChallenge(stateRoot string) string {
 	_, _ = digest.Write(plan.Candidate.Routes)
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write(plan.Candidate.Firewall)
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write(plan.Candidate.Sinks)
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write(plan.Candidate.DNS)
 	for _, endpoint := range plan.QualifiedEndpoints {
@@ -99,8 +102,7 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 		return CanaryPlan{}, err
 	}
 
-	fallbackDefaults, err := canaryFallbackDefaults(inventory, redShield)
-	if err != nil {
+	if _, err := canaryFallbackDefaults(inventory, redShield); err != nil {
 		return CanaryPlan{}, err
 	}
 	failClosedAdapters, err := canaryFailClosedAdapters(inventory, redShield)
@@ -108,21 +110,18 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 		return CanaryPlan{}, err
 	}
 	routes := make([]ManagedRoute, 0, len(targets))
+	sinks := make([]SinkRoute, 0, len(targets))
 	if len(targets)*len(failClosedAdapters) > maxFirewallRules {
 		return CanaryPlan{}, errors.New("canary fail-closed rule set exceeds the bounded limit")
 	}
 	firewall := make([]FirewallRule, 0, len(targets)*len(failClosedAdapters))
 	for _, prefix := range targets {
 		family := addressFamily(prefix.Addr())
-		defaults := fallbackDefaults[family]
-		if len(defaults) == 0 {
-			return CanaryPlan{}, fmt.Errorf("canary target family %s has no qualified fallback default path", family)
-		}
 		nextHop := "0.0.0.0"
 		if family == FamilyIPv6 {
 			nextHop = "::"
 		}
-		routes = append(routes, ManagedRoute{
+		route := ManagedRoute{
 			Role:           RouteRoleVPNClass,
 			Family:         family,
 			Destination:    prefix.String(),
@@ -133,7 +132,9 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 			PolicyStore:    RoutePolicyStore,
 			Protocol:       RouteProtocol,
 			JournalOwned:   true,
-		})
+		}
+		routes = append(routes, route)
+		sinks = append(sinks, sinkForVPNRoute(route))
 		for _, fallback := range failClosedAdapters {
 			firewall = append(firewall, FirewallRule{
 				Name:           FirewallRuleName(request.Revision, family, prefix.String(), fallback.InterfaceGUID),
@@ -165,6 +166,12 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 			DirectAssertions: assertions,
 			Routes:           routes,
 		},
+		sinks: SinkArtifact{
+			Version:  ArtifactVersion,
+			Owner:    ArtifactOwner,
+			Revision: request.Revision,
+			Routes:   sinks,
+		},
 		firewall: FirewallArtifact{
 			Version:  ArtifactVersion,
 			Owner:    ArtifactOwner,
@@ -189,6 +196,10 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 	if err != nil {
 		return CanaryPlan{}, err
 	}
+	sinksData, err := json.Marshal(artifacts.sinks)
+	if err != nil {
+		return CanaryPlan{}, err
+	}
 	dnsData, err := json.Marshal(artifacts.dns)
 	if err != nil {
 		return CanaryPlan{}, err
@@ -201,12 +212,14 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 		Candidate: apply.Candidate{
 			RevisionID: request.Revision,
 			Routes:     routesData,
+			Sinks:      sinksData,
 			Firewall:   firewallData,
 			DNS:        dnsData,
 		},
 		QualifiedEndpoints: qualified,
 		TargetPrefixes:     targetStrings,
 		RouteCount:         len(routes),
+		SinkCount:          len(sinks),
 		FirewallRuleCount:  len(firewall),
 		DNSRuleCount:       1,
 	}, nil

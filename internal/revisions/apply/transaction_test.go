@@ -115,6 +115,28 @@ func (runtime *fakeRuntime) Restore(ctx context.Context, _ string) error {
 	}
 	return nil
 }
+func (runtime *fakeRuntime) EmergencyDisable(context.Context) error {
+	return runtime.call("emergency-disable")
+}
+func (runtime *fakeRuntime) FullRestore(context.Context) error {
+	return runtime.call("full-restore")
+}
+
+type failNthSaveJournal struct {
+	value    Journal
+	saves    int
+	failSave int
+}
+
+func (store *failNthSaveJournal) Load() (Journal, error) { return store.value, nil }
+func (store *failNthSaveJournal) Save(value Journal) error {
+	store.saves++
+	if store.saves == store.failSave {
+		return errors.New("injected journal save failure")
+	}
+	store.value = value
+	return nil
+}
 
 func TestRecoverReconcilesPersistedActiveRevisionAfterBoot(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
@@ -447,5 +469,46 @@ func TestRejectsTraversalAndConcurrentPendingApply(t *testing.T) {
 	}
 	if err := tx.Apply(context.Background(), Candidate{RevisionID: "safe"}); err == nil {
 		t.Fatal("expected pending rejection")
+	}
+}
+
+func TestRecoveryOperationIntentSurvivesCompletionSaveFailure(t *testing.T) {
+	runtime := &fakeRuntime{}
+	store := &failNthSaveJournal{
+		value:    Journal{State: StateCommitted, ActiveRevision: "active", LastKnownGoodRevision: "active"},
+		failSave: 2,
+	}
+	tx := &Transaction{Runtime: runtime, Journal: store, Clock: fakeClock{time.Now()}, RecoveryTimeout: time.Second, Locker: &fakeLocker{}, Watchdog: &fakeWatchdog{calls: &runtime.calls}}
+	if err := tx.EmergencyDisable(context.Background()); err == nil {
+		t.Fatal("completion journal save failure was ignored")
+	}
+	if store.value.State != StateDisabling {
+		t.Fatalf("durable intent was lost: %#v", store.value)
+	}
+	store.failSave = 0
+	if err := tx.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.value.State != StateDisabled {
+		t.Fatalf("recovered journal = %#v", store.value)
+	}
+}
+
+func TestApplyBlockedInUnsafeJournalStates(t *testing.T) {
+	tests := []Journal{
+		{State: StateDegraded, ActiveRevision: "active", LastKnownGoodRevision: "active", RollbackResult: "failed"},
+		{State: StateDisabling, ActiveRevision: "active", LastKnownGoodRevision: "active", RollbackResult: "intent"},
+		{State: StateDisabled, ActiveRevision: "active", LastKnownGoodRevision: "active", RollbackResult: "completed"},
+		{State: StateRestoring, ActiveRevision: "active", LastKnownGoodRevision: "active", RollbackResult: "intent"},
+	}
+	for _, journal := range tests {
+		runtime := &fakeRuntime{}
+		tx := newTransaction(runtime, &memoryJournal{value: journal}, time.Now())
+		if err := tx.Apply(context.Background(), Candidate{RevisionID: "next"}); err == nil {
+			t.Fatalf("apply allowed from %q", journal.State)
+		}
+		if len(runtime.calls) != 0 {
+			t.Fatalf("runtime called from %q: %v", journal.State, runtime.calls)
+		}
 	}
 }

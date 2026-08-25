@@ -11,8 +11,11 @@ import (
 type Candidate struct {
 	RevisionID string
 	NFT        []byte
-	DNS        []byte
-	Routes     []byte
+	// Firewall carries a platform-specific structured firewall artifact.
+	// Linux continues to use NFT; runtimes must not interpret one as the other.
+	Firewall []byte
+	DNS      []byte
+	Routes   []byte
 }
 
 type Runtime interface {
@@ -25,6 +28,19 @@ type Runtime interface {
 	PostCheck(context.Context) error
 	Reconcile(context.Context, string) error
 	Restore(context.Context, string) error
+}
+
+type RecoveryPreflighter interface {
+	PreflightRecovery(context.Context, Journal) error
+}
+
+type RecoveryOperator interface {
+	EmergencyDisable(context.Context) error
+	FullRestore(context.Context) error
+}
+
+type CommitRuntime interface {
+	Commit(context.Context, string) error
 }
 
 type Clock interface{ Now() time.Time }
@@ -71,8 +87,8 @@ func (tx *Transaction) Apply(ctx context.Context, candidate Candidate) (resultEr
 	if err != nil {
 		return err
 	}
-	if current.State == StatePending {
-		return errors.New("another revision is pending confirmation")
+	if current.State == StatePending || current.State == StateDegraded || current.State == StateDisabling || current.State == StateDisabled || current.State == StateRestoring {
+		return fmt.Errorf("apply is blocked while journal state is %q", current.State)
 	}
 	if err := tx.Runtime.Preflight(ctx, ownedRevisions(current)); err != nil {
 		return fmt.Errorf("preflight: %w", err)
@@ -139,6 +155,11 @@ func (tx *Transaction) Confirm() (resultErr error) {
 	if !clock.Now().Before(journal.PendingDeadline) {
 		return errors.New("confirmation deadline has expired")
 	}
+	if runtime, ok := tx.Runtime.(CommitRuntime); ok {
+		if err := runtime.Commit(context.Background(), journal.PendingRevision); err != nil {
+			return fmt.Errorf("commit runtime revision pointer: %w", err)
+		}
+	}
 	journal.State = StateCommitted
 	journal.ActiveRevision = journal.PendingRevision
 	journal.LastKnownGoodRevision = journal.PendingRevision
@@ -171,7 +192,7 @@ func (tx *Transaction) Rollback(_ context.Context) (resultErr error) {
 	if journal.State != StatePending {
 		return errors.New("no revision is pending confirmation")
 	}
-	if err := tx.Runtime.Preflight(recoveryCtx, ownedRevisions(journal)); err != nil {
+	if err := tx.preflightRecovery(recoveryCtx, journal); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
 	err = tx.restore(recoveryCtx, journal, "explicit rollback")
@@ -201,7 +222,7 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 	if journal.State == StatePending {
 		recoveryCtx, cancel := tx.recoveryContext()
 		defer cancel()
-		if err := tx.Runtime.Preflight(recoveryCtx, ownedRevisions(journal)); err != nil {
+		if err := tx.preflightRecovery(recoveryCtx, journal); err != nil {
 			return fmt.Errorf("preflight: %w", err)
 		}
 		err = tx.restore(recoveryCtx, journal, "boot/crash recovery")
@@ -209,6 +230,22 @@ func (tx *Transaction) Recover(ctx context.Context) (resultErr error) {
 			tx.cancelWatchdog()
 		}
 		return err
+	}
+	if journal.State == StateDegraded && journal.FailedRevision != "" {
+		recoveryCtx, cancel := tx.recoveryContext()
+		defer cancel()
+		if err := tx.preflightRecovery(recoveryCtx, journal); err != nil {
+			return fmt.Errorf("preflight: %w", err)
+		}
+		return tx.restore(recoveryCtx, journal, "degraded rollback retry")
+	}
+	if journal.State == StateDisabling || journal.State == StateRestoring {
+		recoveryCtx, cancel := tx.recoveryContext()
+		defer cancel()
+		return tx.resumeRecoveryOperation(recoveryCtx, journal)
+	}
+	if journal.State == StateDisabled || journal.State == StateRestored {
+		return nil
 	}
 	if err := tx.Runtime.Preflight(ctx, ownedRevisions(journal)); err != nil {
 		return fmt.Errorf("preflight: %w", err)
@@ -249,7 +286,7 @@ func (tx *Transaction) Expire(_ context.Context) (resultErr error) {
 	if clock.Now().Before(journal.PendingDeadline) {
 		return nil
 	}
-	if err := tx.Runtime.Preflight(recoveryCtx, ownedRevisions(journal)); err != nil {
+	if err := tx.preflightRecovery(recoveryCtx, journal); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
 	err = tx.restore(recoveryCtx, journal, "watchdog expiry")
@@ -259,10 +296,118 @@ func (tx *Transaction) Expire(_ context.Context) (resultErr error) {
 	return err
 }
 
+func (tx *Transaction) EmergencyDisable(ctx context.Context) (resultErr error) {
+	return tx.runRecoveryOperation(ctx, StateDisabling, StateDisabled, "emergency disable", func(operator RecoveryOperator, operationCtx context.Context) error {
+		return operator.EmergencyDisable(operationCtx)
+	})
+}
+
+func (tx *Transaction) FullRestore(ctx context.Context) (resultErr error) {
+	return tx.runRecoveryOperation(ctx, StateRestoring, StateRestored, "full restore", func(operator RecoveryOperator, operationCtx context.Context) error {
+		return operator.FullRestore(operationCtx)
+	})
+}
+
+func (tx *Transaction) runRecoveryOperation(ctx context.Context, intent, complete State, label string, action func(RecoveryOperator, context.Context) error) (resultErr error) {
+	release, err := tx.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, release()) }()
+	operator, ok := tx.Runtime.(RecoveryOperator)
+	if !ok || tx.Journal == nil {
+		return errors.New("runtime recovery operator and journal are required")
+	}
+	journal, err := tx.Journal.Load()
+	if err != nil {
+		return err
+	}
+	if intent == StateDisabling {
+		if journal.State == StateDisabled {
+			return nil
+		}
+		if journal.State != StateCommitted && journal.State != StateRolledBack {
+			return fmt.Errorf("emergency disable is not allowed from journal state %q", journal.State)
+		}
+		if journal.ActiveRevision == "" {
+			return errors.New("emergency disable requires an active revision")
+		}
+	} else {
+		if journal.State == StateRestored {
+			return nil
+		}
+		if journal.State != StateCommitted && journal.State != StateRolledBack && journal.State != StateDisabled {
+			return fmt.Errorf("full restore is not allowed from journal state %q", journal.State)
+		}
+	}
+	if err := tx.preflightRecovery(ctx, journal); err != nil {
+		return fmt.Errorf("preflight: %w", err)
+	}
+	journal.State = intent
+	journal.FailedRevision = ""
+	journal.RollbackResult = label + ": intent"
+	if err := tx.Journal.Save(journal); err != nil {
+		return err
+	}
+	if err := action(operator, ctx); err != nil {
+		journal.RollbackResult = label + ": retry required"
+		_ = tx.Journal.Save(journal)
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	journal.State = complete
+	journal.RollbackResult = label + ": completed"
+	if complete == StateRestored {
+		journal.ActiveRevision = ""
+		journal.LastKnownGoodRevision = ""
+	}
+	return tx.Journal.Save(journal)
+}
+
+func (tx *Transaction) resumeRecoveryOperation(ctx context.Context, journal Journal) error {
+	operator, ok := tx.Runtime.(RecoveryOperator)
+	if !ok {
+		return errors.New("runtime recovery operator is required")
+	}
+	if err := tx.preflightRecovery(ctx, journal); err != nil {
+		return fmt.Errorf("preflight: %w", err)
+	}
+	var err error
+	complete := StateDisabled
+	label := "emergency disable"
+	if journal.State == StateDisabling {
+		err = operator.EmergencyDisable(ctx)
+	} else {
+		complete = StateRestored
+		label = "full restore"
+		err = operator.FullRestore(ctx)
+	}
+	if err != nil {
+		journal.RollbackResult = label + ": retry required"
+		_ = tx.Journal.Save(journal)
+		return fmt.Errorf("resume %s: %w", label, err)
+	}
+	journal.State = complete
+	journal.RollbackResult = label + ": completed"
+	if complete == StateRestored {
+		journal.ActiveRevision = ""
+		journal.LastKnownGoodRevision = ""
+	}
+	return tx.Journal.Save(journal)
+}
+
+func (tx *Transaction) preflightRecovery(ctx context.Context, journal Journal) error {
+	if runtime, ok := tx.Runtime.(RecoveryPreflighter); ok {
+		return runtime.PreflightRecovery(ctx, journal)
+	}
+	return tx.Runtime.Preflight(ctx, ownedRevisions(journal))
+}
+
 func ownedRevisions(journal Journal) []string {
 	values := []string{journal.ActiveRevision}
 	if journal.State == StatePending {
 		values = []string{journal.PendingRevision, journal.ActiveRevision, journal.LastKnownGoodRevision}
+	} else if journal.State == StateDegraded && journal.FailedRevision != "" {
+		values = []string{journal.FailedRevision, journal.ActiveRevision, journal.LastKnownGoodRevision}
 	}
 	result := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
@@ -348,17 +493,23 @@ func (tx *Transaction) recoveryContext() (context.Context, context.CancelFunc) {
 }
 
 func (tx *Transaction) restore(ctx context.Context, journal Journal, reason string) error {
+	failedRevision := journal.PendingRevision
+	if failedRevision == "" {
+		failedRevision = journal.FailedRevision
+	}
 	err := tx.Runtime.Restore(ctx, journal.LastKnownGoodRevision)
 	journal.PendingRevision = ""
 	journal.PendingDeadline = time.Time{}
 	journal.ActiveRevision = journal.LastKnownGoodRevision
 	if err != nil {
 		journal.State = StateDegraded
+		journal.FailedRevision = failedRevision
 		journal.RollbackResult = reason + ": failed"
 		_ = tx.Journal.Save(journal)
 		return fmt.Errorf("rollback failed; last-known-good snapshot retained: %w", err)
 	}
 	journal.State = StateRolledBack
+	journal.FailedRevision = ""
 	journal.RollbackResult = reason + ": restored"
 	if saveErr := tx.Journal.Save(journal); saveErr != nil {
 		return saveErr

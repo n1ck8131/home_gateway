@@ -20,6 +20,10 @@ const (
 	StateCommitted  State = "committed"
 	StateRolledBack State = "rolled-back"
 	StateDegraded   State = "degraded"
+	StateDisabling  State = "disabling"
+	StateDisabled   State = "disabled"
+	StateRestoring  State = "restoring"
+	StateRestored   State = "restored"
 )
 
 type Journal struct {
@@ -27,6 +31,7 @@ type Journal struct {
 	ActiveRevision        string    `json:"active_revision,omitempty"`
 	LastKnownGoodRevision string    `json:"last_known_good_revision,omitempty"`
 	PendingRevision       string    `json:"pending_revision,omitempty"`
+	FailedRevision        string    `json:"failed_revision,omitempty"`
 	PendingDeadline       time.Time `json:"pending_deadline,omitempty"`
 	RollbackResult        string    `json:"rollback_result,omitempty"`
 }
@@ -104,6 +109,7 @@ func validateJournal(journal Journal) error {
 		"active":          journal.ActiveRevision,
 		"last-known-good": journal.LastKnownGoodRevision,
 		"pending":         journal.PendingRevision,
+		"failed":          journal.FailedRevision,
 	} {
 		if revision != "" && !validRevisionID(revision) {
 			return fmt.Errorf("%s revision is invalid", label)
@@ -111,6 +117,9 @@ func validateJournal(journal Journal) error {
 	}
 	if journal.State != StatePending && (journal.PendingRevision != "" || !journal.PendingDeadline.IsZero()) {
 		return errors.New("only a pending journal may contain pending revision data")
+	}
+	if journal.State != StateDegraded && journal.FailedRevision != "" {
+		return errors.New("only a degraded journal may contain a failed revision")
 	}
 	switch journal.State {
 	case StateIdle:
@@ -140,6 +149,21 @@ func validateJournal(journal Journal) error {
 		}
 		if journal.RollbackResult == "" {
 			return errors.New("recovery journal requires a rollback result")
+		}
+	case StateDisabling, StateDisabled:
+		if journal.ActiveRevision == "" || journal.ActiveRevision != journal.LastKnownGoodRevision {
+			return errors.New("disable intent requires one active last-known-good revision")
+		}
+		if journal.RollbackResult == "" {
+			return errors.New("disable intent requires an operation result")
+		}
+	case StateRestoring:
+		if journal.ActiveRevision != journal.LastKnownGoodRevision || journal.RollbackResult == "" {
+			return errors.New("restore intent requires matching active state and an operation result")
+		}
+	case StateRestored:
+		if journal.ActiveRevision != "" || journal.LastKnownGoodRevision != "" || journal.RollbackResult == "" {
+			return errors.New("restored journal must contain only an operation result")
 		}
 	default:
 		return fmt.Errorf("unknown journal state %q", journal.State)

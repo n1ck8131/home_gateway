@@ -37,13 +37,17 @@ type canaryActionOutput struct {
 	Revision              string      `json:"revision,omitempty"`
 	PendingDeadline       time.Time   `json:"pending_deadline,omitempty"`
 	LiveMutationPerformed bool        `json:"live_mutation_performed"`
+	RetainSinks           int         `json:"retain_sinks,omitempty"`
+	RemoveSinks           int         `json:"remove_sinks,omitempty"`
 }
 
 type canaryStatusOutput struct {
-	State           apply.State `json:"state"`
-	HasActive       bool        `json:"has_active_revision"`
-	HasPending      bool        `json:"has_pending_revision"`
-	PendingDeadline time.Time   `json:"pending_deadline,omitempty"`
+	State               apply.State `json:"state"`
+	HasActive           bool        `json:"has_active_revision"`
+	HasPending          bool        `json:"has_pending_revision"`
+	PendingDeadline     time.Time   `json:"pending_deadline,omitempty"`
+	SinkCount           int         `json:"sink_count"`
+	PersistentSinkReady bool        `json:"persistent_sink_ready"`
 }
 
 type alreadyHeldOperationLocker struct{}
@@ -156,7 +160,7 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 		}
 	}
 	if command.action == "status" {
-		return runCanaryStatus(command.plan.stateRoot, stdout, stderr)
+		return runCanaryStatus(command.plan.stateRoot, stdout, stderr, dependencies)
 	}
 	if dependencies.newMutation == nil {
 		fmt.Fprintln(stderr, "native Windows mutation backend is unavailable")
@@ -195,7 +199,7 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 				fmt.Fprintln(stderr, "Windows canary confirmation failed:", err)
 				return 1
 			}
-			return encodeCanaryJournalEvent(stdout, stderr, "resolved", command.action, command.plan.stateRoot, true)
+			return encodeCanaryJournalEvent(stdout, stderr, "resolved", command.action, command.plan.stateRoot, true, windowssystem.RecoveryPlan{})
 		}
 		applyContext, applyCancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer applyCancel()
@@ -221,6 +225,7 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 		return 1
 	}
 	mutated := false
+	recoveryPlan := windowssystem.RecoveryPlan{}
 	if journal.State == apply.StateIdle || journal.State == apply.StateRestored || journal.State == apply.StateRolledBack && journal.ActiveRevision == "" && journal.LastKnownGoodRevision == "" {
 		err = disarmCanaryWatchdog(command.plan.stateRoot, dependencies)
 	} else {
@@ -229,6 +234,9 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 		if err == nil {
 			tx.Locker = alreadyHeldOperationLocker{}
 			mutated = true
+			recoveryPlan, err = canaryRecoveryPlan(recoveryContext, journal, command.action, tx)
+		}
+		if err == nil {
 			switch command.action {
 			case "rollback":
 				err = tx.Rollback(recoveryContext)
@@ -244,9 +252,11 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 		}
 	}
 	if err == nil {
-		if code := encodeCanaryJournalEvent(stdout, stderr, "resolved", command.action, command.plan.stateRoot, mutated); code != 0 {
+		if code := encodeCanaryJournalEvent(stdout, stderr, "resolved", command.action, command.plan.stateRoot, mutated, recoveryPlan); code != 0 {
 			err = errors.New("encode Windows canary recovery result")
 		}
+	} else if mutated {
+		err = errors.Join(err, armRetryableRecoveryWatchdog(recoveryContext, dependencies))
 	}
 	err = errors.Join(err, release())
 	if err != nil {
@@ -254,6 +264,49 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 		return 1
 	}
 	return 0
+}
+
+func canaryRecoveryPlan(ctx context.Context, journal apply.Journal, action string, tx *apply.Transaction) (windowssystem.RecoveryPlan, error) {
+	planner, ok := tx.Runtime.(interface {
+		PlanEmergencyDisable(context.Context) (windowssystem.RecoveryPlan, error)
+		PlanFullRestore(context.Context) (windowssystem.RecoveryPlan, error)
+	})
+	if !ok {
+		return windowssystem.RecoveryPlan{}, nil
+	}
+	if preflighter, ok := tx.Runtime.(apply.RecoveryPreflighter); ok {
+		if err := preflighter.PreflightRecovery(ctx, journal); err != nil {
+			return windowssystem.RecoveryPlan{}, fmt.Errorf("preflight recovery plan: %w", err)
+		}
+	}
+	switch action {
+	case "emergency-disable":
+		return planner.PlanEmergencyDisable(ctx)
+	case "full-restore":
+		return planner.PlanFullRestore(ctx)
+	default:
+		return windowssystem.RecoveryPlan{}, nil
+	}
+}
+
+func armRetryableRecoveryWatchdog(ctx context.Context, dependencies dependencies) error {
+	if dependencies.watchdog == nil {
+		return nil
+	}
+	if _, ok := dependencies.watchdog.(apply.PersistentWatchdog); !ok {
+		return nil
+	}
+	cancel, err := dependencies.watchdog.Arm(time.Now().Add(time.Minute), func() {})
+	if err != nil {
+		return fmt.Errorf("arm retryable recovery watchdog: %w", err)
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func disarmCanaryWatchdog(root string, dependencies dependencies) error {
@@ -322,7 +375,7 @@ func waitForCanaryResolution(tx *apply.Transaction, root string, stdout, stderr 
 			return 1
 		}
 		if journal.State != apply.StatePending {
-			if code := encodeCanaryJournalEvent(stdout, stderr, "resolved", "apply", root, true); code != 0 {
+			if code := encodeCanaryJournalEvent(stdout, stderr, "resolved", "apply", root, true, windowssystem.RecoveryPlan{}); code != 0 {
 				return code
 			}
 			if journal.State == apply.StateCommitted {
@@ -338,21 +391,63 @@ func waitForCanaryResolution(tx *apply.Transaction, root string, stdout, stderr 
 	}
 }
 
-func runCanaryStatus(root string, stdout, stderr io.Writer) int {
+func runCanaryStatus(root string, stdout, stderr io.Writer, dependencies dependencies) int {
 	journal, err := (apply.FileJournal{Path: filepath.Join(root, "journal.json")}).Load()
 	if err != nil {
 		fmt.Fprintln(stderr, "Windows canary status failed:", err)
 		return 1
 	}
+	sinkCount, persistentSinkReady, err := canarySinkStatus(context.Background(), root, dependencies, journal)
+	if err != nil {
+		fmt.Fprintln(stderr, "Windows canary status failed:", err)
+		return 1
+	}
 	return encodeJSON(stdout, stderr, canaryStatusOutput{
-		State:           journal.State,
-		HasActive:       journal.ActiveRevision != "",
-		HasPending:      journal.PendingRevision != "",
-		PendingDeadline: journal.PendingDeadline,
+		State:               journal.State,
+		HasActive:           journal.ActiveRevision != "",
+		HasPending:          journal.PendingRevision != "",
+		PendingDeadline:     journal.PendingDeadline,
+		SinkCount:           sinkCount,
+		PersistentSinkReady: persistentSinkReady,
 	})
 }
 
-func encodeCanaryJournalEvent(stdout, stderr io.Writer, event, action, root string, mutated bool) int {
+func canarySinkStatus(ctx context.Context, root string, dependencies dependencies, journal apply.Journal) (int, bool, error) {
+	if journal.ActiveRevision == "" && journal.PendingRevision == "" || dependencies.newMutation == nil {
+		return 0, false, nil
+	}
+	backend, err := dependencies.newMutation(root)
+	if err != nil {
+		return 0, false, err
+	}
+	snapshot, err := backend.Snapshot(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	count := 0
+	ready := true
+	revisions := canaryStatusRevisions(journal)
+	for _, state := range snapshot.Sinks {
+		if state.Owner != windowssystem.ArtifactOwner || !revisions[state.Revision] {
+			continue
+		}
+		count++
+		ready = ready && state.PersistentPresent && state.ActivePresent
+	}
+	return count, count > 0 && ready, nil
+}
+
+func canaryStatusRevisions(journal apply.Journal) map[string]bool {
+	revisions := make(map[string]bool, 4)
+	for _, revision := range []string{journal.ActiveRevision, journal.PendingRevision, journal.LastKnownGoodRevision, journal.FailedRevision} {
+		if revision != "" {
+			revisions[revision] = true
+		}
+	}
+	return revisions
+}
+
+func encodeCanaryJournalEvent(stdout, stderr io.Writer, event, action, root string, mutated bool, recoveryPlan windowssystem.RecoveryPlan) int {
 	journal, err := (apply.FileJournal{Path: filepath.Join(root, "journal.json")}).Load()
 	if err != nil {
 		fmt.Fprintln(stderr, "load Windows canary journal failed:", err)
@@ -369,6 +464,8 @@ func encodeCanaryJournalEvent(stdout, stderr io.Writer, event, action, root stri
 		Revision:              revision,
 		PendingDeadline:       journal.PendingDeadline,
 		LiveMutationPerformed: mutated,
+		RetainSinks:           recoveryPlan.RetainSinks,
+		RemoveSinks:           recoveryPlan.RemoveSinks,
 	})
 }
 

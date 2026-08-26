@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,14 +20,23 @@ import (
 )
 
 type commandMutationBackend struct {
-	mu    sync.Mutex
-	state windowssystem.MutationSnapshot
+	mu       sync.Mutex
+	state    windowssystem.MutationSnapshot
+	failCall string
 }
 
 type blockingDisarmWatchdog struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+type trackingPersistentWatchdog struct {
+	recovery  bool
+	reconcile bool
+	arms      int
+	commits   int
+	disarms   int
 }
 
 func (watchdog *blockingDisarmWatchdog) Arm(time.Time, func()) (func(), error) {
@@ -38,6 +48,26 @@ func (*blockingDisarmWatchdog) Commit() error { return nil }
 func (watchdog *blockingDisarmWatchdog) Disarm() error {
 	watchdog.once.Do(func() { close(watchdog.entered) })
 	<-watchdog.release
+	return nil
+}
+
+func (watchdog *trackingPersistentWatchdog) Arm(time.Time, func()) (func(), error) {
+	watchdog.arms++
+	watchdog.recovery = true
+	return func() {}, nil
+}
+
+func (watchdog *trackingPersistentWatchdog) Commit() error {
+	watchdog.commits++
+	watchdog.recovery = false
+	watchdog.reconcile = true
+	return nil
+}
+
+func (watchdog *trackingPersistentWatchdog) Disarm() error {
+	watchdog.disarms++
+	watchdog.recovery = false
+	watchdog.reconcile = false
 	return nil
 }
 
@@ -67,6 +97,49 @@ func (backend *commandMutationBackend) RemoveRoute(_ context.Context, state wind
 		return current.Owner == state.Owner && current.Revision == state.Revision && current.ManagedRoute == state.ManagedRoute
 	})
 	return nil
+}
+
+func (backend *commandMutationBackend) PutSink(_ context.Context, state windowssystem.SinkState) error {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.failCall == "put-sink:"+state.Route.Destination {
+		return errors.New("persistent sink fault")
+	}
+	backend.state.Sinks = slices.DeleteFunc(backend.state.Sinks, func(current windowssystem.SinkState) bool {
+		return current.Owner == state.Owner && current.Revision == state.Revision && current.Route == state.Route
+	})
+	state.PersistentPresent = true
+	state.ActivePresent = true
+	backend.state.Sinks = append(backend.state.Sinks, state)
+	return nil
+}
+
+func (backend *commandMutationBackend) RemoveSink(_ context.Context, state windowssystem.SinkState) error {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.failCall == "remove-sink:"+state.Route.Destination {
+		return errors.New("persistent sink fault")
+	}
+	backend.state.Sinks = slices.DeleteFunc(backend.state.Sinks, func(current windowssystem.SinkState) bool {
+		return current.Owner == state.Owner && current.Revision == state.Revision && current.Route == state.Route
+	})
+	return nil
+}
+
+func (backend *commandMutationBackend) ResolveRoute(_ context.Context, family windowssystem.AddressFamily, destination string) (windowssystem.ResolvedRoute, error) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	for _, route := range backend.state.Routes {
+		if route.Owner == windowssystem.ArtifactOwner && route.Family == family && route.Destination == destination && route.Role == windowssystem.RouteRoleVPNClass {
+			return windowssystem.ResolvedRoute{Family: family, Destination: destination, InterfaceGUID: route.InterfaceGUID, InterfaceIndex: route.InterfaceIndex, NextHop: route.NextHop, RouteMetric: route.Metric}, nil
+		}
+	}
+	for _, sink := range backend.state.Sinks {
+		if sink.Owner == windowssystem.ArtifactOwner && sink.Route.Family == family && sink.Route.Destination == destination && sink.PersistentPresent && sink.ActivePresent {
+			return windowssystem.ResolvedRoute{Family: family, Destination: destination, InterfaceIndex: sink.Route.InterfaceIndex, NextHop: sink.Route.NextHop, RouteMetric: sink.Route.Metric}, nil
+		}
+	}
+	return windowssystem.ResolvedRoute{Family: family, Destination: destination, NoRoute: true}, nil
 }
 
 func (backend *commandMutationBackend) PutFirewall(_ context.Context, state windowssystem.FirewallState) error {
@@ -202,7 +275,7 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if countCommandOwnedRoutes(snapshot) != 2 || countCommandOwnedFirewall(snapshot) != 2 || countCommandOwnedNRPT(snapshot) != 1 {
+	if countCommandOwnedRoutes(snapshot) != 2 || countCommandOwnedSinks(snapshot) != 2 || countCommandOwnedFirewall(snapshot) != 2 || countCommandOwnedNRPT(snapshot) != 1 {
 		t.Fatalf("committed managed state = %#v", snapshot)
 	}
 	if !commandForeignStatePresent(snapshot) {
@@ -216,12 +289,181 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 		t.Fatalf("restore code = %d, stderr = %q", code, restoreStderr.String())
 	}
 	snapshot, _ = backend.Snapshot(t.Context())
-	if countCommandOwnedRoutes(snapshot) != 0 || countCommandOwnedFirewall(snapshot) != 0 || countCommandOwnedNRPT(snapshot) != 0 || !commandForeignStatePresent(snapshot) {
+	if countCommandOwnedRoutes(snapshot) != 0 || countCommandOwnedSinks(snapshot) != 0 || countCommandOwnedFirewall(snapshot) != 0 || countCommandOwnedNRPT(snapshot) != 0 || !commandForeignStatePresent(snapshot) {
 		t.Fatalf("full restore state = %#v", snapshot)
 	}
 	journal, err := store.Load()
 	if err != nil || journal.State != apply.StateRestored {
 		t.Fatalf("restored journal = %#v, error = %v", journal, err)
+	}
+}
+
+func TestRunCanaryLiveOutputsRedactedSinkAndRecoveryEvidence(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	inspection, inventory := commandCanaryInputs()
+	backend := &commandMutationBackend{state: commandMutationState(inventory)}
+	deps := dependencies{
+		backend:              staticInspectionBackend{inspection: inspection},
+		collect:              staticCollector{inventory: inventory},
+		resolve:              func(context.Context, string) ([]string, error) { return []string{"203.0.113.5"}, nil },
+		newMutation:          func(string) (windowssystem.MutationBackend, error) { return backend, nil },
+		watchdog:             apply.TimerWatchdog{},
+		validateStateRoot:    func(string) error { return nil },
+		validateConfigSource: func(string) error { return nil },
+	}
+	planCommand := canaryPlanCommand{
+		configPath:   `C:\private-provider-source.conf`,
+		stateRoot:    root,
+		revision:     "p35-canary-001",
+		targets:      []string{"198.51.100.10"},
+		dnsNamespace: windowssystem.CanaryDNSNamespace,
+	}
+	var planStdout, planStderr bytes.Buffer
+	if code := runCanaryPlan(planCommand, &planStdout, &planStderr, deps); code != 0 {
+		t.Fatalf("plan code = %d, stderr = %q", code, planStderr.String())
+	}
+	for _, forbidden := range []string{planCommand.configPath, root, "10.20.30.1", "203.0.113.5", "198.51.100.10", "Ethernet", "redlink"} {
+		if strings.Contains(planStdout.String(), forbidden) {
+			t.Fatalf("plan output leaked %q: %s", forbidden, planStdout.String())
+		}
+	}
+	var planOutput canaryPlanOutput
+	if err := json.Unmarshal(planStdout.Bytes(), &planOutput); err != nil {
+		t.Fatal(err)
+	}
+	if planOutput.SinkCount != 2 || planOutput.PersistentSinkReady {
+		t.Fatalf("plan sink evidence = %#v", planOutput)
+	}
+
+	plan, _, err := collectCanaryPlan(t.Context(), planCommand, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutatedPlan := plan
+	mutatedPlan.Candidate.Sinks = append([]byte(nil), plan.Candidate.Sinks...)
+	mutatedPlan.Candidate.Sinks[len(mutatedPlan.Candidate.Sinks)-2] ^= 1
+	if mutatedPlan.ConfirmationChallenge(root) == plan.ConfirmationChallenge(root) {
+		t.Fatal("confirmation challenge did not change after sink artifact changed")
+	}
+
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := newLiveCanaryTransaction(root, plan.QualifiedEndpoints, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Apply(t.Context(), plan.Candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.ConfirmCandidate(t.Context(), plan.Candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	var statusStdout, statusStderr bytes.Buffer
+	if code := runCanaryLive(canaryLiveCommand{action: "status", plan: canaryPlanCommand{stateRoot: root}}, &statusStdout, &statusStderr, deps); code != 0 {
+		t.Fatalf("status code = %d, stderr = %q", code, statusStderr.String())
+	}
+	for _, forbidden := range []string{planCommand.configPath, root, "10.20.30.1", "203.0.113.5", "198.51.100.10", "Ethernet", "redlink"} {
+		if strings.Contains(statusStdout.String(), forbidden) {
+			t.Fatalf("status output leaked %q: %s", forbidden, statusStdout.String())
+		}
+	}
+	var statusOutput canaryStatusOutput
+	if err := json.Unmarshal(statusStdout.Bytes(), &statusOutput); err != nil {
+		t.Fatal(err)
+	}
+	if statusOutput.SinkCount != 2 || !statusOutput.PersistentSinkReady {
+		t.Fatalf("status sink evidence = %#v", statusOutput)
+	}
+
+	var disableStdout, disableStderr bytes.Buffer
+	disable := canaryLiveCommand{action: "emergency-disable", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryDisableToken}
+	if code := runCanaryLive(disable, &disableStdout, &disableStderr, deps); code != 0 {
+		t.Fatalf("disable code = %d, stderr = %q", code, disableStderr.String())
+	}
+	var disableOutput canaryActionOutput
+	if err := json.Unmarshal(disableStdout.Bytes(), &disableOutput); err != nil {
+		t.Fatal(err)
+	}
+	if disableOutput.RetainSinks != 2 || disableOutput.RemoveSinks != 0 {
+		t.Fatalf("disable recovery sink counts = %#v", disableOutput)
+	}
+
+	var restoreStdout, restoreStderr bytes.Buffer
+	restore := canaryLiveCommand{action: "full-restore", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryRestoreToken}
+	if code := runCanaryLive(restore, &restoreStdout, &restoreStderr, deps); code != 0 {
+		t.Fatalf("restore code = %d, stderr = %q", code, restoreStderr.String())
+	}
+	var restoreOutput canaryActionOutput
+	if err := json.Unmarshal(restoreStdout.Bytes(), &restoreOutput); err != nil {
+		t.Fatal(err)
+	}
+	if restoreOutput.RemoveSinks != 2 || restoreOutput.RetainSinks != 0 {
+		t.Fatalf("restore recovery sink counts = %#v", restoreOutput)
+	}
+	for _, forbidden := range []string{planCommand.configPath, root, "10.20.30.1", "203.0.113.5", "198.51.100.10", "Ethernet", "redlink"} {
+		if strings.Contains(restoreStdout.String(), forbidden) || strings.Contains(disableStdout.String(), forbidden) {
+			t.Fatalf("recovery output leaked %q: disable=%s restore=%s", forbidden, disableStdout.String(), restoreStdout.String())
+		}
+	}
+}
+
+func TestRunCanaryFullRestoreWatchdogSemantics(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	inspection, inventory := commandCanaryInputs()
+	backend := &commandMutationBackend{state: commandMutationState(inventory)}
+	watchdog := &trackingPersistentWatchdog{}
+	deps := dependencies{
+		backend:              staticInspectionBackend{inspection: inspection},
+		collect:              staticCollector{inventory: inventory},
+		resolve:              func(context.Context, string) ([]string, error) { return []string{"203.0.113.5"}, nil },
+		newMutation:          func(string) (windowssystem.MutationBackend, error) { return backend, nil },
+		watchdog:             watchdog,
+		validateStateRoot:    func(string) error { return nil },
+		validateConfigSource: func(string) error { return nil },
+	}
+	planCommand := canaryPlanCommand{
+		configPath:   `C:\private-provider-source.conf`,
+		stateRoot:    root,
+		revision:     "p35-canary-001",
+		targets:      []string{"198.51.100.10"},
+		dnsNamespace: windowssystem.CanaryDNSNamespace,
+	}
+	plan, _, err := collectCanaryPlan(t.Context(), planCommand, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := newLiveCanaryTransaction(root, plan.QualifiedEndpoints, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Apply(t.Context(), plan.Candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.ConfirmCandidate(t.Context(), plan.Candidate); err != nil {
+		t.Fatal(err)
+	}
+	if watchdog.recovery || !watchdog.reconcile {
+		t.Fatalf("confirmed watchdog state = %+v", watchdog)
+	}
+	backend.failCall = "remove-sink:198.51.100.10/32"
+	var failedStdout, failedStderr bytes.Buffer
+	restore := canaryLiveCommand{action: "full-restore", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryRestoreToken}
+	if code := runCanaryLive(restore, &failedStdout, &failedStderr, deps); code == 0 {
+		t.Fatal("faulted full restore unexpectedly succeeded")
+	}
+	if !watchdog.recovery || !watchdog.reconcile || watchdog.disarms != 0 {
+		t.Fatalf("retryable restoring failure did not retain watchdog coverage: %+v", watchdog)
+	}
+	backend.failCall = ""
+	var restoreStdout, restoreStderr bytes.Buffer
+	recover := canaryLiveCommand{action: "recover", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryRecoverToken}
+	if code := runCanaryLive(recover, &restoreStdout, &restoreStderr, deps); code != 0 {
+		t.Fatalf("restore code = %d, stderr = %q", code, restoreStderr.String())
+	}
+	if watchdog.recovery || watchdog.reconcile || watchdog.disarms != 1 {
+		t.Fatalf("successful full restore did not disarm both watchdog tasks: %+v", watchdog)
 	}
 }
 
@@ -273,6 +515,16 @@ func commandMutationState(inventory windowssystem.Inventory) windowssystem.Mutat
 func countCommandOwnedRoutes(snapshot windowssystem.MutationSnapshot) int {
 	count := 0
 	for _, state := range snapshot.Routes {
+		if state.Owner == windowssystem.ArtifactOwner {
+			count++
+		}
+	}
+	return count
+}
+
+func countCommandOwnedSinks(snapshot windowssystem.MutationSnapshot) int {
+	count := 0
+	for _, state := range snapshot.Sinks {
 		if state.Owner == windowssystem.ArtifactOwner {
 			count++
 		}

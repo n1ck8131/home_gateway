@@ -29,6 +29,8 @@ type canaryPlanOutput struct {
 	ReadyForLiveGate      bool   `json:"ready_for_live_gate"`
 	LiveMutationPerformed bool   `json:"live_mutation_performed"`
 	RouteCount            int    `json:"route_count"`
+	SinkCount             int    `json:"sink_count"`
+	PersistentSinkReady   bool   `json:"persistent_sink_ready"`
 	FirewallRuleCount     int    `json:"firewall_rule_count"`
 	DNSRuleCount          int    `json:"dns_rule_count"`
 	ConfirmationChallenge string `json:"confirmation_challenge"`
@@ -101,6 +103,8 @@ func runCanaryPlan(command canaryPlanCommand, stdout, stderr io.Writer, dependen
 		ReadyForLiveGate:      true,
 		LiveMutationPerformed: false,
 		RouteCount:            plan.RouteCount,
+		SinkCount:             plan.SinkCount,
+		PersistentSinkReady:   false,
 		FirewallRuleCount:     plan.FirewallRuleCount,
 		DNSRuleCount:          plan.DNSRuleCount,
 		ConfirmationChallenge: plan.ConfirmationChallenge(command.stateRoot),

@@ -121,3 +121,21 @@ func TestDurableCanaryWatchdogUsesFixedStructuredScheduledTaskCommand(t *testing
 		t.Fatal("commit does not create/verify reconcile before removing recovery")
 	}
 }
+
+func TestDurableCanaryWatchdogDisarmVerifiesOwnedTasksBeforeRemoval(t *testing.T) {
+	disarmStart := strings.Index(canaryWatchdogScript, "function Remove-AllOwnedTasks")
+	if disarmStart < 0 {
+		t.Fatal("disarm removal function is missing")
+	}
+	disarmScript := canaryWatchdogScript[disarmStart:]
+	assertRecovery := strings.Index(disarmScript, "Assert-OwnedRecoveryTask $recovery[0]")
+	assertReconcile := strings.Index(disarmScript, "Assert-OwnedReconcileTask $reconcile[0]")
+	unregisterRecovery := strings.Index(disarmScript, "Unregister-ScheduledTask -InputObject $recovery[0]")
+	unregisterReconcile := strings.Index(disarmScript, "Unregister-ScheduledTask -InputObject $reconcile[0]")
+	if assertRecovery < 0 || assertReconcile < 0 || unregisterRecovery < 0 || unregisterReconcile < 0 {
+		t.Fatal("disarm removal contract is incomplete")
+	}
+	if assertRecovery >= unregisterRecovery || assertReconcile >= unregisterReconcile {
+		t.Fatal("disarm removes a scheduled task before verifying project ownership")
+	}
+}

@@ -372,7 +372,8 @@ function Protect-ConfigSource([string]$Path, [string]$Expected, [object]$Binding
         $security.SetAccessRuleProtection($true, $false)
         $security.SetOwner($script:CurrentSID)
         $allow = [Security.AccessControl.AccessControlType]::Allow
-        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($script:CurrentSID, [Security.AccessControl.FileSystemRights]::ReadAndExecute, $allow))
+        $currentRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+        $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($script:CurrentSID, $currentRights, $allow))
         foreach ($sid in @($script:SystemSID, $script:AdministratorsSID)) {
             $security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $allow))
         }
@@ -383,7 +384,7 @@ function Protect-ConfigSource([string]$Path, [string]$Expected, [object]$Binding
         $seen = @{}
         foreach ($rule in $rules) {
             $sid = $rule.IdentityReference.Value
-            $expectedRights = if ($sid -ceq $script:CurrentSID.Value) { [Security.AccessControl.FileSystemRights]::ReadAndExecute } else { [Security.AccessControl.FileSystemRights]::FullControl }
+            $expectedRights = if ($sid -ceq $script:CurrentSID.Value) { $currentRights } else { [Security.AccessControl.FileSystemRights]::FullControl }
             if ($rule.IsInherited -or $rule.AccessControlType -ne $allow -or $sid -notin @($script:CurrentSID.Value, $script:SystemSID.Value, $script:AdministratorsSID.Value) -or $rule.FileSystemRights -ne $expectedRights -or $seen.ContainsKey($sid)) { throw 'RedShield config ACL contains an unauthorized ACE' }
             $seen[$sid] = $true
         }

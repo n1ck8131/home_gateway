@@ -122,6 +122,111 @@ try {
         ($output | Out-String) | Should -Match 'handle_acl_round_trip_ok'
     }
 
+    It 'protects the config source ACL with only the canonical Synchronize bit added' {
+        $probe = Join-Path $TestDrive 'protect-source-acl.conf'
+        [IO.File]::WriteAllText($probe, '[redacted-test-placeholder]', [Text.UTF8Encoding]::new($false))
+        $bootstrapBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:Bootstrap))
+        $probeBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($probe))
+        $probeScript = @"
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+`$bootstrapPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$bootstrapBase64'))
+`$configPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$probeBase64'))
+`$productionText = [IO.File]::ReadAllText(`$bootstrapPath, [Text.UTF8Encoding]::new(`$false, `$true))
+`$typeMatch = [regex]::Match(`$productionText, "Add-Type -TypeDefinition @'\r?\n(?<csharp>.*?)\r?\n'@", [Text.RegularExpressions.RegexOptions]::Singleline)
+if (-not `$typeMatch.Success) { throw 'native file identity binding not found' }
+Add-Type -TypeDefinition `$typeMatch.Groups['csharp'].Value
+`$tokens = `$null
+`$parseErrors = `$null
+`$ast = [System.Management.Automation.Language.Parser]::ParseInput(`$productionText, [ref]`$tokens, [ref]`$parseErrors)
+if (`$parseErrors) { throw 'production bootstrap payload did not parse' }
+`$requiredFunctions = @(
+    'Resolve-LocalCleanPath',
+    'Assert-RegularFile',
+    'Get-StreamSHA256',
+    'Get-StreamFileIdentity',
+    'Open-ConfigSecurityStream',
+    'Assert-ConfigStreamBinding',
+    'Get-ConfigSourceBinding',
+    'Protect-ConfigSource'
+)
+`$definitions = foreach (`$name in `$requiredFunctions) {
+    `$functionAst = `$ast.Find({
+        param(`$node)
+        `$node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and `$node.Name -ceq `$name
+    }, `$true)
+    if (`$null -eq `$functionAst) { throw "production function `$name not found" }
+    `$functionAst.Extent.Text
+}
+. ([ScriptBlock]::Create((`$definitions -join "`r`n")))
+`$script:SystemSID = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+`$script:AdministratorsSID = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+`$script:CurrentSID = [Security.Principal.WindowsIdentity]::GetCurrent().User
+if (`$script:CurrentSID.Value -in @(`$script:SystemSID.Value, `$script:AdministratorsSID.Value)) { throw 'test requires an ordinary current operator SID' }
+`$expected = (Get-FileHash -LiteralPath `$configPath -Algorithm SHA256).Hash.ToLowerInvariant()
+`$binding = Get-ConfigSourceBinding -Path `$configPath -Expected `$expected
+`$sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+try {
+    try {
+        Protect-ConfigSource -Path `$configPath -Expected `$expected -Binding `$binding
+    } catch {
+        [Console]::Error.WriteLine("p35-bootstrap-elevated.ps1:387 `$(`$_.Exception.Message)")
+        throw
+    }
+    `$acl = [IO.File]::GetAccessControl(`$configPath)
+    if (-not `$acl.AreAccessRulesProtected) { throw 'protected config source still inherits access rules' }
+    if (`$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne `$script:CurrentSID.Value) { throw 'protected config source owner differs' }
+    `$rules = @(`$acl.GetAccessRules(`$true, `$true, [Security.Principal.SecurityIdentifier]))
+    if (`$rules.Count -ne 3) { throw "protected config source ACE count differs: `$(`$rules.Count)" }
+    `$allow = [Security.AccessControl.AccessControlType]::Allow
+    `$currentRights = [Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize
+    `$fullControl = [Security.AccessControl.FileSystemRights]::FullControl
+    `$seen = @{}
+    foreach (`$rule in `$rules) {
+        `$sid = `$rule.IdentityReference.Value
+        if (`$rule.IsInherited -or `$rule.AccessControlType -ne `$allow -or `$seen.ContainsKey(`$sid)) { throw 'protected config source ACE shape differs' }
+        `$sidLabel = if (`$sid -ceq `$script:CurrentSID.Value) {
+            'current'
+        } elseif (`$sid -ceq `$script:SystemSID.Value) {
+            'system'
+        } elseif (`$sid -ceq `$script:AdministratorsSID.Value) {
+            'admin'
+        } else {
+            'other'
+        }
+        `$expectedRights = if (`$sidLabel -ceq 'current') {
+            `$currentRights
+        } elseif (`$sidLabel -in @('system', 'admin')) {
+            `$fullControl
+        } else {
+            throw 'protected config source contains an unauthorized SID'
+        }
+        if (`$rule.FileSystemRights -ne `$expectedRights) { throw "protected config source rights differ for `${sidLabel}: `$(`$rule.FileSystemRights)" }
+        `$seen[`$sid] = `$true
+    }
+    if (-not `$seen.ContainsKey(`$script:CurrentSID.Value) -or -not `$seen.ContainsKey(`$script:SystemSID.Value) -or -not `$seen.ContainsKey(`$script:AdministratorsSID.Value)) { throw 'protected config source lacks an authorized ACE' }
+} finally {
+    `$restoreSections = [Security.AccessControl.AccessControlSections]::Access
+    `$security = [Security.AccessControl.FileSecurity]::new()
+    `$security.SetSecurityDescriptorSddlForm([string]`$binding.sddl, `$restoreSections)
+    [IO.File]::SetAccessControl(`$configPath, `$security)
+}
+`$restored = [IO.File]::GetAccessControl(`$configPath).GetSecurityDescriptorSddlForm(`$sections)
+if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore original config ACL' }
+[Console]::Out.WriteLine('protect_config_source_acl_ok')
+"@
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+        $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        $windowsPowerShell = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
+
+        $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded 2>&1
+
+        if ($LASTEXITCODE -ne 0) { throw "protect config source probe failed: $(($output | Out-String).Trim())" }
+        $LASTEXITCODE | Should -Be 0
+        ($output | Out-String) | Should -Match 'protect_config_source_acl_ok'
+    }
+
     It 'has a non-elevated hash-pinned EncodedCommand driver with a no-mutation WhatIf path' {
         $tokens = $null
         $parseErrors = $null

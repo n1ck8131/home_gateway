@@ -44,6 +44,7 @@ const (
 	nativeTombstoneRoute    = "route"
 	nativeTombstoneFirewall = "firewall"
 	nativeTombstoneNRPT     = "nrpt"
+	nativeTombstoneSink     = "sink"
 	nativeTombstonePut      = "put"
 	nativeTombstoneRemove   = "remove"
 )
@@ -443,17 +444,19 @@ func buildNativeMutationCommand(paths nativeInventoryPaths) (nativeMutationComma
 }
 
 type nativeMutationRequest struct {
-	Version              int                       `json:"version"`
-	Operation            string                    `json:"operation"`
-	Route                *RouteState               `json:"route,omitempty"`
-	Firewall             *FirewallState            `json:"firewall,omitempty"`
-	Firewalls            []FirewallState           `json:"firewalls,omitempty"`
-	FirewallAlias        string                    `json:"firewall_alias,omitempty"`
-	FirewallPattern      string                    `json:"firewall_pattern,omitempty"`
-	FirewallBindings     []nativeFirewallOwnership `json:"firewall_bindings"`
-	FirewallExpectations []nativeFirewallOwnership `json:"firewall_expectations"`
-	MutationTombstones   []nativeMutationTombstone `json:"mutation_tombstones"`
-	NRPT                 *NRPTState                `json:"nrpt,omitempty"`
+	Version              int                        `json:"version"`
+	Operation            string                     `json:"operation"`
+	Route                *RouteState                `json:"route,omitempty"`
+	Sink                 *SinkState                 `json:"sink,omitempty"`
+	ResolveRoute         *nativeRouteResolveRequest `json:"resolve_route,omitempty"`
+	Firewall             *FirewallState             `json:"firewall,omitempty"`
+	Firewalls            []FirewallState            `json:"firewalls,omitempty"`
+	FirewallAlias        string                     `json:"firewall_alias,omitempty"`
+	FirewallPattern      string                     `json:"firewall_pattern,omitempty"`
+	FirewallBindings     []nativeFirewallOwnership  `json:"firewall_bindings"`
+	FirewallExpectations []nativeFirewallOwnership  `json:"firewall_expectations"`
+	MutationTombstones   []nativeMutationTombstone  `json:"mutation_tombstones"`
+	NRPT                 *NRPTState                 `json:"nrpt,omitempty"`
 }
 
 type nativeMutationResponse struct {
@@ -465,6 +468,12 @@ type nativeMutationResponse struct {
 	InterfacePattern string                     `json:"interface_pattern,omitempty"`
 	InterfaceIndex   int                        `json:"interface_index,omitempty"`
 	FirewallBindings []nativeFirewallOwnership  `json:"firewall_bindings,omitempty"`
+	ResolvedRoute    *ResolvedRoute             `json:"resolved_route,omitempty"`
+}
+
+type nativeRouteResolveRequest struct {
+	Family      AddressFamily `json:"family"`
+	Destination string        `json:"destination"`
 }
 
 func (backend *nativeMutationBackend) invoke(ctx context.Context, request nativeMutationRequest) (nativeMutationResponse, error) {
@@ -568,6 +577,29 @@ func finalizeRebootedMutations(snapshot MutationSnapshot, raw rawNativeMutationS
 			registry.Routes = slices.DeleteFunc(registry.Routes, func(state RouteState) bool {
 				return containsNativeRouteMutationOwnership([]RouteState{state}, *tombstone.Route)
 			})
+		case nativeTombstoneSink:
+			if tombstone.Sink == nil {
+				retained = append(retained, tombstone)
+				continue
+			}
+			present := slices.ContainsFunc(snapshot.Sinks, func(state SinkState) bool {
+				return state.Owner == ArtifactOwner && state.Route == tombstone.Sink.Route && state.PersistentPresent && state.ActivePresent
+			})
+			absent := nativeRawSinkAbsent(raw.Sinks, tombstone.Sink.Route)
+			if tombstone.Action == nativeTombstonePut {
+				if present {
+					continue
+				}
+				if absent {
+					delete(registry.Sinks, sinkTupleKey(tombstone.Sink.Route))
+					continue
+				}
+			}
+			if tombstone.Action == nativeTombstoneRemove && absent {
+				delete(registry.Sinks, sinkTupleKey(tombstone.Sink.Route))
+				continue
+			}
+			retained = append(retained, tombstone)
 		case nativeTombstoneNRPT:
 			if tombstone.NRPT == nil || !nativeRawNRPTAbsent(*raw.NRPT, *tombstone.NRPT) || !nativeEffectiveNRPTNamespaceAbsent(*raw.NRPTEffective, tombstone.NRPT.Rule.Namespace) {
 				retained = append(retained, tombstone)
@@ -586,6 +618,22 @@ func finalizeRebootedMutations(snapshot MutationSnapshot, raw rawNativeMutationS
 	}
 	registry.Tombstones = retained
 	return registry
+}
+
+func nativeRawSinkAbsent(records *[]rawNativeSinkRecord, route SinkRoute) bool {
+	if records == nil {
+		return true
+	}
+	for _, record := range *records {
+		observed, _, err := parseNativeSinkRecord(record)
+		if err != nil {
+			return false
+		}
+		if observed == route {
+			return false
+		}
+	}
+	return true
 }
 
 func nativeRawFirewallOwnershipAbsent(records []rawNativeFirewallRecord, ownership nativeFirewallOwnership) bool {
@@ -656,16 +704,114 @@ func nativeEffectiveNRPTNamespaceAbsent(records []rawNativeEffectiveNRPT, namesp
 	return true
 }
 
-func (backend *nativeMutationBackend) PutSink(context.Context, SinkState) error {
-	return errors.New("native Windows sink mutation is not implemented")
+func (backend *nativeMutationBackend) PutSink(ctx context.Context, state SinkState) error {
+	state.PersistentPresent = false
+	state.ActivePresent = false
+	if err := validateNativeSinkState(state); err != nil {
+		return err
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	registry, err := backend.readRegistryLocked()
+	if err != nil {
+		return err
+	}
+	registry, err = backend.reconcilePendingMutationsLocked(registry)
+	if err != nil {
+		return err
+	}
+	if containsNativeSinkTombstone(registry.Tombstones, state) {
+		return errors.New("native Windows sink identity is quarantined by an indeterminate mutation")
+	}
+	bootID, err := backend.currentBootID()
+	if err != nil {
+		return err
+	}
+	key := sinkTupleKey(state.Route)
+	if registry.Sinks == nil {
+		registry.Sinks = make(map[string]SinkState)
+	}
+	registry.Sinks[key] = state
+	tombstone := nativeMutationTombstone{Kind: nativeTombstoneSink, Action: nativeTombstonePut, Phase: nativeFirewallPhasePrepared, BootID: bootID, Sink: &state}
+	registry.Tombstones = upsertNativeMutationTombstone(registry.Tombstones, tombstone)
+	if err := backend.writeRegistryLocked(registry); err != nil {
+		return err
+	}
+	if _, err = backend.invoke(ctx, nativeMutationRequest{Version: nativeMutationVersion, Operation: "put_sink", Sink: &state}); err != nil {
+		tombstone.Phase = nativeFirewallPhaseCleanup
+		registry.Tombstones = upsertNativeMutationTombstone(registry.Tombstones, tombstone)
+		if backend.writeRegistryLocked(registry) == nil {
+			_, _ = backend.reconcilePendingMutationsLocked(registry)
+		}
+		return err
+	}
+	registry.Tombstones = removeNativeMutationTombstone(registry.Tombstones, tombstone)
+	return backend.writeRegistryLocked(registry)
 }
 
-func (backend *nativeMutationBackend) RemoveSink(context.Context, SinkState) error {
-	return errors.New("native Windows sink mutation is not implemented")
+func (backend *nativeMutationBackend) RemoveSink(ctx context.Context, state SinkState) error {
+	state.PersistentPresent = false
+	state.ActivePresent = false
+	if err := validateNativeSinkState(state); err != nil {
+		return err
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	registry, err := backend.readRegistryLocked()
+	if err != nil {
+		return err
+	}
+	if !containsNativeSink(registry.Sinks, state) {
+		return errors.New("native Windows sink is not present in the ownership registry")
+	}
+	if containsNativeSinkTombstone(registry.Tombstones, state) {
+		_, _ = backend.reconcilePendingMutationsLocked(registry)
+		return errors.New("native Windows sink identity is quarantined by an indeterminate mutation")
+	}
+	if containsProtectiveMutationTombstone(registry.Tombstones, state.Revision) {
+		return errors.New("native Windows protective state is quarantined by an indeterminate mutation")
+	}
+	bootID, err := backend.currentBootID()
+	if err != nil {
+		return err
+	}
+	tombstone := nativeMutationTombstone{Kind: nativeTombstoneSink, Action: nativeTombstoneRemove, Phase: nativeFirewallPhasePrepared, BootID: bootID, Sink: &state}
+	registry.Tombstones = upsertNativeMutationTombstone(registry.Tombstones, tombstone)
+	if err := backend.writeRegistryLocked(registry); err != nil {
+		return err
+	}
+	if _, err := backend.invoke(ctx, nativeMutationRequest{Version: nativeMutationVersion, Operation: "remove_sink", Sink: &state}); err != nil {
+		tombstone.Phase = nativeFirewallPhaseCleanup
+		registry.Tombstones = upsertNativeMutationTombstone(registry.Tombstones, tombstone)
+		if backend.writeRegistryLocked(registry) == nil {
+			_, _ = backend.reconcilePendingMutationsLocked(registry)
+		}
+		return err
+	}
+	registry.Tombstones = removeNativeMutationTombstone(registry.Tombstones, tombstone)
+	delete(registry.Sinks, sinkTupleKey(state.Route))
+	return backend.writeRegistryLocked(registry)
 }
 
-func (backend *nativeMutationBackend) ResolveRoute(context.Context, AddressFamily, string) (ResolvedRoute, error) {
-	return ResolvedRoute{}, errors.New("native Windows route resolution is not implemented")
+func (backend *nativeMutationBackend) ResolveRoute(ctx context.Context, family AddressFamily, destination string) (ResolvedRoute, error) {
+	request := nativeRouteResolveRequest{Family: family, Destination: destination}
+	if err := validateNativeRouteResolveRequest(request); err != nil {
+		return ResolvedRoute{}, err
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	response, err := backend.invoke(ctx, nativeMutationRequest{Version: nativeMutationVersion, Operation: "resolve_route", ResolveRoute: &request})
+	if err != nil {
+		return ResolvedRoute{}, err
+	}
+	if response.ResolvedRoute == nil {
+		return ResolvedRoute{}, errors.New("trusted native Windows route resolution response is missing")
+	}
+	resolved := *response.ResolvedRoute
+	if err := validateNativeResolvedRoute(request, resolved); err != nil {
+		return ResolvedRoute{}, err
+	}
+	return resolved, nil
 }
 
 func (backend *nativeMutationBackend) AddRoute(ctx context.Context, state RouteState) error {
@@ -1025,6 +1171,7 @@ func (backend *nativeMutationBackend) Reload(ctx context.Context) error {
 type nativeOwnershipRegistry struct {
 	Version    int                       `json:"version"`
 	Routes     []RouteState              `json:"routes"`
+	Sinks      map[string]SinkState      `json:"sinks,omitempty"`
 	Firewall   []nativeFirewallOwnership `json:"firewall"`
 	NRPT       []NRPTState               `json:"nrpt"`
 	Tombstones []nativeMutationTombstone `json:"tombstones,omitempty"`
@@ -1034,6 +1181,7 @@ type nativeOwnershipRegistry struct {
 type nativeOwnershipPayload struct {
 	Version    int                       `json:"version"`
 	Routes     []RouteState              `json:"routes"`
+	Sinks      map[string]SinkState      `json:"sinks,omitempty"`
 	Firewall   []nativeFirewallOwnership `json:"firewall"`
 	NRPT       []NRPTState               `json:"nrpt"`
 	Tombstones []nativeMutationTombstone `json:"tombstones,omitempty"`
@@ -1045,6 +1193,7 @@ type nativeMutationTombstone struct {
 	Phase    string                   `json:"phase"`
 	BootID   string                   `json:"boot_id,omitempty"`
 	Route    *RouteState              `json:"route,omitempty"`
+	Sink     *SinkState               `json:"sink,omitempty"`
 	Firewall *nativeFirewallOwnership `json:"firewall,omitempty"`
 	NRPT     *NRPTState               `json:"nrpt,omitempty"`
 }
@@ -1061,7 +1210,7 @@ type nativeFirewallOwnership struct {
 }
 
 func emptyNativeOwnershipRegistry() nativeOwnershipRegistry {
-	return nativeOwnershipRegistry{Version: nativeMutationVersion, Routes: []RouteState{}, Firewall: []nativeFirewallOwnership{}, NRPT: []NRPTState{}}
+	return nativeOwnershipRegistry{Version: nativeMutationVersion, Routes: []RouteState{}, Sinks: map[string]SinkState{}, Firewall: []nativeFirewallOwnership{}, NRPT: []NRPTState{}}
 }
 
 func (backend *nativeMutationBackend) registryPath() string {
@@ -1097,6 +1246,9 @@ func (backend *nativeMutationBackend) readRegistryLocked() (nativeOwnershipRegis
 	}
 	if err := validateNativeRegistry(registry); err != nil {
 		return nativeOwnershipRegistry{}, err
+	}
+	if registry.Sinks == nil {
+		registry.Sinks = map[string]SinkState{}
 	}
 	return registry, nil
 }
@@ -1137,6 +1289,7 @@ func (backend *nativeMutationBackend) writeRegistryLocked(registry nativeOwnersh
 	}
 	registry.Version = nativeMutationVersion
 	registry.Routes = append([]RouteState(nil), registry.Routes...)
+	registry.Sinks = cloneNativeSinks(registry.Sinks)
 	registry.Firewall = append([]nativeFirewallOwnership(nil), registry.Firewall...)
 	registry.NRPT = append([]NRPTState(nil), registry.NRPT...)
 	registry.Tombstones = append([]nativeMutationTombstone(nil), registry.Tombstones...)
@@ -1211,7 +1364,7 @@ func replaceNativeRegistryFile(path string, data []byte) error {
 }
 
 func validateNativeRegistry(registry nativeOwnershipRegistry) error {
-	if registry.Version != nativeMutationVersion || len(registry.Routes) > maxManagedRoutes || len(registry.Firewall) > maxFirewallRules || len(registry.NRPT) > maxDNSRules || len(registry.Tombstones) > maxManagedRoutes+maxFirewallRules+maxDNSRules {
+	if registry.Version != nativeMutationVersion || len(registry.Routes) > maxManagedRoutes || len(registry.Sinks) > maxManagedRoutes || len(registry.Firewall) > maxFirewallRules || len(registry.NRPT) > maxDNSRules || len(registry.Tombstones) > maxManagedRoutes+maxManagedRoutes+maxFirewallRules+maxDNSRules {
 		return errors.New("native Windows ownership registry header or count is invalid")
 	}
 	digest, err := hex.DecodeString(registry.SHA256)
@@ -1232,6 +1385,13 @@ func validateNativeRegistry(registry nativeOwnershipRegistry) error {
 			return errors.New("native Windows ownership registry contains duplicate routes")
 		}
 		seenRoutes[key] = struct{}{}
+	}
+	for key, state := range registry.Sinks {
+		state.PersistentPresent = false
+		state.ActivePresent = false
+		if err := validateNativeSinkState(state); err != nil || key != sinkTupleKey(state.Route) {
+			return errors.New("native Windows ownership registry contains an invalid sink")
+		}
 	}
 	seenFirewall := make(map[string]struct{}, len(registry.Firewall))
 	for _, ownership := range registry.Firewall {
@@ -1324,15 +1484,23 @@ func validNativeMutationTombstone(tombstone nativeMutationTombstone, registry na
 	}
 	switch tombstone.Kind {
 	case nativeTombstoneRoute:
-		return tombstone.Route != nil && tombstone.Firewall == nil && tombstone.NRPT == nil && validateNativeRouteState(*tombstone.Route) == nil && containsNativeRouteMutationOwnership(registry.Routes, *tombstone.Route)
+		return tombstone.Route != nil && tombstone.Sink == nil && tombstone.Firewall == nil && tombstone.NRPT == nil && validateNativeRouteState(*tombstone.Route) == nil && containsNativeRouteMutationOwnership(registry.Routes, *tombstone.Route)
+	case nativeTombstoneSink:
+		if tombstone.Sink == nil || tombstone.Route != nil || tombstone.Firewall != nil || tombstone.NRPT != nil {
+			return false
+		}
+		state := *tombstone.Sink
+		state.PersistentPresent = false
+		state.ActivePresent = false
+		return validateNativeSinkState(state) == nil && containsNativeSink(registry.Sinks, state)
 	case nativeTombstoneFirewall:
-		if tombstone.Action != nativeTombstoneRemove || tombstone.Route != nil || tombstone.Firewall == nil || tombstone.NRPT != nil || tombstone.Firewall.State.Effective || validateNativeFirewallState(tombstone.Firewall.State) != nil || !validNativeIdentity(tombstone.Firewall.InterfaceAlias) || tombstone.Firewall.InterfacePattern != escapePowerShellWildcard(tombstone.Firewall.InterfaceAlias) || nativeFirewallOwnershipPhase(*tombstone.Firewall) != nativeFirewallPhaseApplied {
+		if tombstone.Action != nativeTombstoneRemove || tombstone.Route != nil || tombstone.Sink != nil || tombstone.Firewall == nil || tombstone.NRPT != nil || tombstone.Firewall.State.Effective || validateNativeFirewallState(tombstone.Firewall.State) != nil || !validNativeIdentity(tombstone.Firewall.InterfaceAlias) || tombstone.Firewall.InterfacePattern != escapePowerShellWildcard(tombstone.Firewall.InterfaceAlias) || nativeFirewallOwnershipPhase(*tombstone.Firewall) != nativeFirewallPhaseApplied {
 			return false
 		}
 		ownership, exists := findNativeFirewallByName(registry.Firewall, tombstone.Firewall.State.Rule.Name)
 		return exists && ownership == *tombstone.Firewall
 	case nativeTombstoneNRPT:
-		if tombstone.NRPT == nil || tombstone.Route != nil || tombstone.Firewall != nil || validateNativeNRPTState(*tombstone.NRPT, tombstone.Action == nativeTombstoneRemove) != nil {
+		if tombstone.NRPT == nil || tombstone.Route != nil || tombstone.Sink != nil || tombstone.Firewall != nil || validateNativeNRPTState(*tombstone.NRPT, tombstone.Action == nativeTombstoneRemove) != nil {
 			return false
 		}
 		return containsNativeNRPT(registry.NRPT, *tombstone.NRPT)
@@ -1346,6 +1514,10 @@ func nativeMutationTombstoneKey(tombstone nativeMutationTombstone) string {
 	case nativeTombstoneRoute:
 		if tombstone.Route != nil {
 			return tombstone.Kind + "\x00" + tombstone.Route.Revision + "\x00" + nativeRouteGenerationKey(tombstone.Route.ManagedRoute)
+		}
+	case nativeTombstoneSink:
+		if tombstone.Sink != nil {
+			return tombstone.Kind + "\x00" + tombstone.Sink.Revision + "\x00" + sinkTupleKey(tombstone.Sink.Route)
 		}
 	case nativeTombstoneFirewall:
 		if tombstone.Firewall != nil {
@@ -1397,6 +1569,13 @@ func containsNativeRouteTombstone(values []nativeMutationTombstone, state RouteS
 	})
 }
 
+func containsNativeSinkTombstone(values []nativeMutationTombstone, state SinkState) bool {
+	key := sinkTupleKey(state.Route)
+	return slices.ContainsFunc(values, func(current nativeMutationTombstone) bool {
+		return current.Kind == nativeTombstoneSink && current.Sink != nil && sinkTupleKey(current.Sink.Route) == key
+	})
+}
+
 func containsNativeRouteMutationOwnership(values []RouteState, state RouteState) bool {
 	for _, current := range values {
 		if current.Owner != state.Owner || current.Revision != state.Revision {
@@ -1432,6 +1611,8 @@ func containsProtectiveMutationTombstone(values []nativeMutationTombstone, revis
 		switch current.Kind {
 		case nativeTombstoneRoute:
 			return current.Action == nativeTombstonePut && current.Route != nil && current.Route.Revision == revision
+		case nativeTombstoneSink:
+			return current.Action == nativeTombstonePut && current.Sink != nil && current.Sink.Revision == revision
 		case nativeTombstoneNRPT:
 			// Both an indeterminate Put and an indeterminate Remove can change
 			// effective DNS after the caller regains control. Preserve routes and
@@ -1446,10 +1627,23 @@ func containsProtectiveMutationTombstone(values []nativeMutationTombstone, revis
 }
 
 func nativeRegistryDigest(registry nativeOwnershipRegistry) string {
-	payload := nativeOwnershipPayload{Version: registry.Version, Routes: registry.Routes, Firewall: registry.Firewall, NRPT: registry.NRPT, Tombstones: registry.Tombstones}
+	payload := nativeOwnershipPayload{Version: registry.Version, Routes: registry.Routes, Sinks: registry.Sinks, Firewall: registry.Firewall, NRPT: registry.NRPT, Tombstones: registry.Tombstones}
 	data, _ := json.Marshal(payload)
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:])
+}
+
+func cloneNativeSinks(values map[string]SinkState) map[string]SinkState {
+	if len(values) == 0 {
+		return map[string]SinkState{}
+	}
+	result := make(map[string]SinkState, len(values))
+	for key, value := range values {
+		value.PersistentPresent = false
+		value.ActivePresent = false
+		result[key] = value
+	}
+	return result
 }
 
 func upsertNativeRoute(routes []RouteState, state RouteState) []RouteState {
@@ -1485,6 +1679,18 @@ func containsNativeRoute(routes []RouteState, state RouteState) bool {
 		}
 	}
 	return false
+}
+
+func containsNativeSink(values map[string]SinkState, state SinkState) bool {
+	if values == nil {
+		return false
+	}
+	current, exists := values[sinkTupleKey(state.Route)]
+	current.PersistentPresent = false
+	current.ActivePresent = false
+	state.PersistentPresent = false
+	state.ActivePresent = false
+	return exists && current == state
 }
 
 func upsertNativeFirewall(values []nativeFirewallOwnership, ownership nativeFirewallOwnership) ([]nativeFirewallOwnership, error) {
@@ -1723,6 +1929,42 @@ func validateNativeRouteState(state RouteState) error {
 	return nil
 }
 
+func validateNativeSinkState(state SinkState) error {
+	route := state.Route
+	prefix, prefixErr := parseExplicitPrefix(route.Family, route.Destination)
+	nextHop, nextHopErr := netip.ParseAddr(route.NextHop)
+	if state.Owner != ArtifactOwner || !validRevision(state.Revision) || prefixErr != nil || prefix.String() != route.Destination || prefix.Bits() != prefix.Addr().BitLen() || nextHopErr != nil || nextHop.Zone() != "" || nextHop.Is4In6() || addressFamily(nextHop) != route.Family || !nextHop.IsUnspecified() || nextHop.String() != route.NextHop || route.InterfaceIndex != LoopbackInterfaceIndex || route.Metric != ReservedSinkMetric || route.PolicyStore != SinkPolicyStore || route.Protocol != RouteProtocol || !route.JournalOwned {
+		return errors.New("structured native Windows sink route is invalid or unowned")
+	}
+	return nil
+}
+
+func validateNativeRouteResolveRequest(request nativeRouteResolveRequest) error {
+	prefix, err := parseExplicitPrefix(request.Family, request.Destination)
+	if err != nil || prefix.String() != request.Destination || prefix.Bits() == 0 {
+		return errors.New("structured native Windows route resolution request is invalid")
+	}
+	return nil
+}
+
+func validateNativeResolvedRoute(request nativeRouteResolveRequest, resolved ResolvedRoute) error {
+	if resolved.Family != request.Family || resolved.Destination != request.Destination {
+		return errors.New("trusted native Windows route resolution response is invalid")
+	}
+	if resolved.NoRoute {
+		if resolved.InterfaceGUID != "" || resolved.InterfaceIndex != 0 || resolved.NextHop != "" || resolved.RouteMetric != 0 {
+			return errors.New("trusted native Windows no-route response is invalid")
+		}
+		return nil
+	}
+	nextHop, nextHopErr := netip.ParseAddr(resolved.NextHop)
+	guid, guidErr := canonicalGUID(resolved.InterfaceGUID)
+	if nextHopErr != nil || nextHop.Zone() != "" || nextHop.Is4In6() || addressFamily(nextHop) != resolved.Family || nextHop.String() != resolved.NextHop || guidErr != nil || guid != resolved.InterfaceGUID || resolved.InterfaceIndex <= 0 || uint64(resolved.RouteMetric) > maxWindowsMetric {
+		return errors.New("trusted native Windows route resolution response is invalid")
+	}
+	return nil
+}
+
 func validateNativeFirewallState(state FirewallState) error {
 	rule := state.Rule
 	prefix, prefixErr := parseExplicitPrefix(rule.Family, rule.RemoteCIDR)
@@ -1784,6 +2026,7 @@ type rawNativeMutationSnapshot struct {
 	Adapters                *[]rawAdapterRecord           `json:"adapters"`
 	Compartments            *[]rawCompartmentRecord       `json:"compartments"`
 	Routes                  *[]rawNativeRouteRecord       `json:"routes"`
+	Sinks                   *[]rawNativeSinkRecord        `json:"sinks,omitempty"`
 	Firewall                *[]rawNativeFirewallRecord    `json:"firewall"`
 	FirewallEffective       *[]rawNativeEffectiveFirewall `json:"firewallEffective"`
 	FirewallProfiles        *[]rawNativeFirewallProfile   `json:"firewallProfiles"`
@@ -1804,6 +2047,8 @@ type rawNativeRouteRecord struct {
 	Protocol       *string `json:"protocol"`
 	State          *int    `json:"state"`
 }
+
+type rawNativeSinkRecord rawNativeRouteRecord
 
 type rawNativeEffectiveFirewall struct {
 	Name  *string `json:"name"`
@@ -1842,7 +2087,11 @@ type rawNativeEffectiveNRPT struct {
 }
 
 func parseNativeMutationSnapshot(raw rawNativeMutationSnapshot, registry nativeOwnershipRegistry) (MutationSnapshot, nativeOwnershipRegistry, error) {
-	if raw.Adapters == nil || raw.Compartments == nil || raw.Routes == nil || raw.Firewall == nil || raw.FirewallEffective == nil || raw.FirewallProfiles == nil || raw.FirewallBypassAbsent == nil || raw.FirewallServicesRunning == nil || raw.NRPT == nil || raw.NRPTEffective == nil || len(*raw.Adapters) == 0 || len(*raw.Adapters) > maxAdapters || len(*raw.Compartments) == 0 || len(*raw.Compartments) > maxCompartments || len(*raw.Routes) > maxRoutes || len(*raw.Firewall) > maxNativeFirewallRecords || len(*raw.FirewallEffective) > maxFirewallRules || len(*raw.FirewallProfiles) > 3 || len(*raw.NRPT) > maxNRPTRules || len(*raw.NRPTEffective) > maxNRPTRules {
+	if raw.Sinks == nil {
+		empty := []rawNativeSinkRecord{}
+		raw.Sinks = &empty
+	}
+	if raw.Adapters == nil || raw.Compartments == nil || raw.Routes == nil || raw.Firewall == nil || raw.FirewallEffective == nil || raw.FirewallProfiles == nil || raw.FirewallBypassAbsent == nil || raw.FirewallServicesRunning == nil || raw.NRPT == nil || raw.NRPTEffective == nil || len(*raw.Adapters) == 0 || len(*raw.Adapters) > maxAdapters || len(*raw.Compartments) == 0 || len(*raw.Compartments) > maxCompartments || len(*raw.Routes) > maxRoutes || len(*raw.Sinks) > maxRoutes || len(*raw.Firewall) > maxNativeFirewallRecords || len(*raw.FirewallEffective) > maxFirewallRules || len(*raw.FirewallProfiles) > 3 || len(*raw.NRPT) > maxNRPTRules || len(*raw.NRPTEffective) > maxNRPTRules {
 		return MutationSnapshot{}, nativeOwnershipRegistry{}, errors.New("native Windows mutation snapshot count is invalid")
 	}
 	if err := validateDefaultNetworkCompartment(*raw.Compartments); err != nil {
@@ -1866,7 +2115,11 @@ func parseNativeMutationSnapshot(raw rawNativeMutationSnapshot, registry nativeO
 	if err != nil {
 		return MutationSnapshot{}, nativeOwnershipRegistry{}, err
 	}
-	snapshot := MutationSnapshot{Adapters: adapters, Routes: make([]RouteState, 0, len(*raw.Routes)), Firewall: make([]FirewallState, 0, len(*raw.Firewall)), FirewallEnforced: firewallEnforced && *raw.FirewallBypassAbsent && *raw.FirewallServicesRunning, NRPT: make([]NRPTState, 0, len(*raw.NRPT))}
+	sinks, err := parseNativeSinkRecords(*raw.Sinks, registry.Sinks)
+	if err != nil {
+		return MutationSnapshot{}, nativeOwnershipRegistry{}, err
+	}
+	snapshot := MutationSnapshot{Adapters: adapters, Routes: make([]RouteState, 0, len(*raw.Routes)), Sinks: sinks, Firewall: make([]FirewallState, 0, len(*raw.Firewall)), FirewallEnforced: firewallEnforced && *raw.FirewallBypassAbsent && *raw.FirewallServicesRunning, NRPT: make([]NRPTState, 0, len(*raw.NRPT))}
 	for _, record := range *raw.Routes {
 		state, err := parseNativeRouteRecord(record, adaptersByIndex, registry.Routes)
 		if err != nil {
@@ -1889,6 +2142,7 @@ func parseNativeMutationSnapshot(raw rawNativeMutationSnapshot, registry nativeO
 		snapshot.NRPT = append(snapshot.NRPT, state)
 	}
 	sort.Slice(snapshot.Routes, func(left, right int) bool { return jsonKey(snapshot.Routes[left]) < jsonKey(snapshot.Routes[right]) })
+	sort.Slice(snapshot.Sinks, func(left, right int) bool { return jsonKey(snapshot.Sinks[left]) < jsonKey(snapshot.Sinks[right]) })
 	sort.Slice(snapshot.Firewall, func(left, right int) bool {
 		return jsonKey(snapshot.Firewall[left]) < jsonKey(snapshot.Firewall[right])
 	})
@@ -1937,6 +2191,66 @@ func nativeObservedRouteEqual(observed, registered ManagedRoute) bool {
 	// and registry retain the plan-time value, while stable GUID plus the exact
 	// route tuple authorizes rebinding after disable/enable or restart.
 	return observed.Family == registered.Family && observed.Destination == registered.Destination && observed.NextHop == registered.NextHop && observed.InterfaceGUID == registered.InterfaceGUID && observed.Metric == registered.Metric && observed.PolicyStore == registered.PolicyStore && observed.Protocol == registered.Protocol
+}
+
+func parseNativeSinkRecords(records []rawNativeSinkRecord, owned map[string]SinkState) ([]SinkState, error) {
+	type presence struct {
+		route      SinkRoute
+		persistent bool
+		active     bool
+	}
+	joined := make(map[string]presence, len(records))
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		route, store, err := parseNativeSinkRecord(record)
+		if err != nil {
+			return nil, err
+		}
+		storeKey := sinkTupleKey(route) + "\x00" + store
+		if _, duplicate := seen[storeKey]; duplicate {
+			return nil, errors.New("native Windows sink snapshot contains duplicate store records")
+		}
+		seen[storeKey] = struct{}{}
+		key := sinkTupleKey(route)
+		current := joined[key]
+		current.route = route
+		switch store {
+		case SinkPolicyStore:
+			current.persistent = true
+		case RoutePolicyStore:
+			current.active = true
+		default:
+			return nil, errors.New("native Windows sink snapshot store is invalid")
+		}
+		joined[key] = current
+	}
+	result := make([]SinkState, 0, len(joined))
+	for key, current := range joined {
+		state := SinkState{Route: current.route, PersistentPresent: current.persistent, ActivePresent: current.active}
+		if ownership, exists := owned[key]; exists {
+			ownership.PersistentPresent = current.persistent
+			ownership.ActivePresent = current.active
+			state = ownership
+		}
+		result = append(result, state)
+	}
+	return result, nil
+}
+
+func parseNativeSinkRecord(record rawNativeSinkRecord) (SinkRoute, string, error) {
+	routeRecord := rawNativeRouteRecord(record)
+	if routeRecord.InterfaceIndex == nil || routeRecord.CompartmentID == nil || routeRecord.AddressFamily == nil || routeRecord.Destination == nil || routeRecord.NextHop == nil || routeRecord.RouteMetric == nil || routeRecord.PolicyStore == nil || routeRecord.Protocol == nil || routeRecord.State == nil {
+		return SinkRoute{}, "", errors.New("native Windows sink snapshot is incomplete")
+	}
+	family, _, familyErr := parseNumericFamily(*routeRecord.AddressFamily)
+	prefix, prefixErr := netip.ParsePrefix(strings.TrimSpace(*routeRecord.Destination))
+	nextHop, nextHopErr := netip.ParseAddr(strings.TrimSpace(*routeRecord.NextHop))
+	store := strings.TrimSpace(*routeRecord.PolicyStore)
+	route := SinkRoute{Family: family, Destination: prefix.Masked().String(), NextHop: nextHop.Unmap().String(), InterfaceIndex: *routeRecord.InterfaceIndex, Metric: uint32(*routeRecord.RouteMetric), PolicyStore: SinkPolicyStore, Protocol: strings.TrimSpace(*routeRecord.Protocol), JournalOwned: true}
+	if familyErr != nil || prefixErr != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() || addressFamily(prefix.Addr()) != family || prefix.Bits() != prefix.Addr().BitLen() || nextHopErr != nil || nextHop.Zone() != "" || nextHop.Is4In6() || addressFamily(nextHop) != family || !nextHop.IsUnspecified() || route.InterfaceIndex != LoopbackInterfaceIndex || *routeRecord.CompartmentID != 1 || route.Metric != ReservedSinkMetric || route.Protocol != RouteProtocol || *routeRecord.State < routeStateAlive || *routeRecord.State > 2 || store != SinkPolicyStore && store != RoutePolicyStore {
+		return SinkRoute{}, "", errors.New("native Windows sink snapshot value is invalid")
+	}
+	return route, store, nil
 }
 
 func parseNativeFirewallRecord(record rawNativeFirewallRecord, adapters map[string]*Adapter, owned []nativeFirewallOwnership, effective map[string]bool) (FirewallState, error) {
@@ -2124,6 +2438,17 @@ func reconcileNativeRegistry(raw rawNativeMutationSnapshot, snapshot MutationSna
 			reconciled.Routes = append(reconciled.Routes, ownership)
 		}
 	}
+	for key, ownership := range current.Sinks {
+		ownership.PersistentPresent = false
+		ownership.ActivePresent = false
+		present := slices.ContainsFunc(snapshot.Sinks, func(observed SinkState) bool {
+			return observed.Owner == ArtifactOwner && observed.Revision == ownership.Revision && observed.Route == ownership.Route
+		})
+		tombstone := nativeMutationTombstone{Kind: nativeTombstoneSink, Sink: &ownership}
+		if present || containsNativeMutationTombstone(current.Tombstones, tombstone) {
+			reconciled.Sinks[key] = ownership
+		}
+	}
 	for _, ownership := range current.Firewall {
 		present := slices.ContainsFunc(*raw.Firewall, func(observed rawNativeFirewallRecord) bool {
 			return observed.Name != nil && observed.DisplayName != nil && observed.Description != nil && observed.Group != nil && observed.Enabled != nil && observed.Direction != nil && observed.Action != nil && observed.RemoteAddresses != nil && observed.InterfaceAliases != nil && nativeFirewallRecordMatches(observed, ownership)
@@ -2213,6 +2538,18 @@ func snapshotContainsPendingNativeMutation(snapshot MutationSnapshot, raw rawNat
 				}
 				store := strings.TrimSpace(*record.PolicyStore)
 				return strings.TrimSpace(*record.Destination) == tombstone.Route.Destination && strings.TrimSpace(*record.NextHop) == tombstone.Route.NextHop && *record.RouteMetric == uint64(tombstone.Route.Metric) && store == tombstone.Route.PolicyStore && strings.TrimSpace(*record.Protocol) == tombstone.Route.Protocol
+			}) {
+				return true
+			}
+		case nativeTombstoneSink:
+			if tombstone.Sink != nil && slices.ContainsFunc(snapshot.Sinks, func(state SinkState) bool {
+				return state.Route == tombstone.Sink.Route
+			}) {
+				return true
+			}
+			if tombstone.Sink != nil && raw.Sinks != nil && slices.ContainsFunc(*raw.Sinks, func(record rawNativeSinkRecord) bool {
+				observed, _, err := parseNativeSinkRecord(record)
+				return err == nil && observed == tombstone.Sink.Route
 			}) {
 				return true
 			}
@@ -2323,6 +2660,40 @@ function Test-ExactRoute([object]$route, [object]$state) {
 	return (Test-OwnedRouteIdentity $route $state) -and [int]$route.State -eq 0
 }
 
+function Get-ExactSinkRoute([object]$state, [string]$store) {
+	return @(NetTCPIP\Get-NetRoute -PolicyStore $store -IncludeAllCompartments -ErrorAction Stop | Where-Object {
+		[string]$_.DestinationPrefix -ceq [string]$state.route.destination -and
+		[int]$_.InterfaceIndex -eq [int]$state.route.interface_index -and
+		[string]$_.NextHop -ceq [string]$state.route.next_hop -and
+		[uint64]$_.RouteMetric -eq [uint64]$state.route.metric -and
+		[string]$_.Protocol -ceq [string]$state.route.protocol
+	})
+}
+
+function Test-ExactSinkRoute([object]$route, [object]$state, [string]$store) {
+	$currentStore = [string]$route.Store
+	if ([string]::IsNullOrEmpty($currentStore)) { $currentStore = [string]$route.PolicyStore }
+	return [int]$route.State -ge 0 -and [int]$route.State -le 2 -and
+		[string]$route.DestinationPrefix -ceq [string]$state.route.destination -and
+		[int]$route.InterfaceIndex -eq [int]$state.route.interface_index -and
+		[string]$route.NextHop -ceq [string]$state.route.next_hop -and
+		[uint64]$route.RouteMetric -eq [uint64]$state.route.metric -and
+		[string]$route.Protocol -ceq [string]$state.route.protocol -and
+		$currentStore -ceq $store
+}
+
+function Test-NoRoute1231([object]$errorRecord) {
+	$message = [string]$errorRecord.Exception.Message
+	if ($message -match '\b1231\b') { return $true }
+	$current = $errorRecord.Exception
+	while ($null -ne $current) {
+		if ($current.PSObject.Properties.Name -contains 'NativeErrorCode' -and [int]$current.NativeErrorCode -eq 1231) { return $true }
+		if ($current.PSObject.Properties.Name -contains 'ErrorCode' -and [int]$current.ErrorCode -eq 1231) { return $true }
+		$current = $current.InnerException
+	}
+	return $false
+}
+
 function Test-ExactFirewall([object]$current, [object]$state, [string]$interfaceAlias, [bool]$effective) {
     $addresses = @(NetSecurity\Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $current -ErrorAction Stop)
     $interfaces = @(NetSecurity\Get-NetFirewallInterfaceFilter -AssociatedNetFirewallRule $current -ErrorAction Stop)
@@ -2411,9 +2782,10 @@ switch ([string]$request.operation) {
 			$null = $compartmentRows.Add([pscustomobject][ordered]@{ compartmentId = [int]$compartment.CompartmentId })
 		}
 
-        $routeRows = [System.Collections.Generic.List[object]]::new()
+		$routeRows = [System.Collections.Generic.List[object]]::new()
 		foreach ($route in @(NetTCPIP\Get-NetRoute -PolicyStore ActiveStore -IncludeAllCompartments -ErrorAction Stop)) {
             if ($routeRows.Count -ge 20000) { throw 'route inventory limit exceeded' }
+			if ([int]$route.InterfaceIndex -eq 1 -and [uint64]$route.RouteMetric -eq 65535 -and [string]$route.Protocol -ceq 'NetMgmt') { continue }
             $store = [string]$route.Store
             if ([string]::IsNullOrEmpty($store)) { $store = [string]$route.PolicyStore }
             $null = $routeRows.Add([pscustomobject][ordered]@{
@@ -2428,6 +2800,26 @@ switch ([string]$request.operation) {
                 state = [int]$route.State
             })
         }
+
+		$sinkRows = [System.Collections.Generic.List[object]]::new()
+		foreach ($storeName in @('PersistentStore', 'ActiveStore')) {
+			foreach ($route in @(NetTCPIP\Get-NetRoute -PolicyStore $storeName -IncludeAllCompartments -ErrorAction Stop | Where-Object {
+				[int]$_.InterfaceIndex -eq 1 -and [uint64]$_.RouteMetric -eq 65535 -and [string]$_.Protocol -ceq 'NetMgmt'
+			})) {
+				if ($sinkRows.Count -ge 20000) { throw 'sink inventory limit exceeded' }
+				$null = $sinkRows.Add([pscustomobject][ordered]@{
+					interfaceIndex = [int]$route.InterfaceIndex
+					compartmentId = [int]$route.CompartmentId
+					addressFamily = [int]$route.AddressFamily
+					destinationPrefix = [string]$route.DestinationPrefix
+					nextHop = [string]$route.NextHop
+					routeMetric = [uint64]$route.RouteMetric
+					policyStore = $storeName
+					protocol = [string]$route.Protocol
+					state = [int]$route.State
+				})
+			}
+		}
 
 		$effectiveRules = @(NetSecurity\Get-NetFirewallRule -PolicyStore ActiveStore -TracePolicyStore -ErrorAction Stop)
 		$firewallBypassAbsent = $true
@@ -2519,6 +2911,7 @@ switch ([string]$request.operation) {
             adapters = @($adapterRows.ToArray())
 			compartments = @($compartmentRows.ToArray())
             routes = @($routeRows.ToArray())
+			sinks = @($sinkRows.ToArray())
             firewall = @($firewallRows.ToArray())
 			firewallEffective = @($effectiveFirewallRows.ToArray())
 			firewallProfiles = @($firewallProfileRows.ToArray())
@@ -2564,6 +2957,61 @@ switch ([string]$request.operation) {
 		}
 		if (@(Get-ExactRoute $request.route $currentIndex).Count -ne 0) { throw 'route removal post-check failed' }
     }
+	'put_sink' {
+		$family = if ([string]$request.sink.route.family -ceq 'ipv4') { 'IPv4' } else { 'IPv6' }
+		if ([int]$request.sink.route.interface_index -ne 1 -or [uint64]$request.sink.route.metric -ne 65535 -or [string]$request.sink.route.policy_store -cne 'PersistentStore' -or [string]$request.sink.route.protocol -cne 'NetMgmt') { throw 'sink route identity is invalid' }
+		$persistent = @(Get-ExactSinkRoute $request.sink 'PersistentStore')
+		$active = @(Get-ExactSinkRoute $request.sink 'ActiveStore')
+		if ($persistent.Count -gt 1 -or $active.Count -gt 1) { throw 'sink route identity is ambiguous' }
+		if ($persistent.Count -eq 1 -and -not (Test-ExactSinkRoute $persistent[0] $request.sink 'PersistentStore')) { throw 'sink persistent route collision' }
+		if ($active.Count -eq 1 -and -not (Test-ExactSinkRoute $active[0] $request.sink 'ActiveStore')) { throw 'sink active route collision' }
+		if ($persistent.Count -eq 0) {
+			$null = NetTCPIP\New-NetRoute -AddressFamily $family -DestinationPrefix ([string]$request.sink.route.destination) -InterfaceIndex 1 -NextHop ([string]$request.sink.route.next_hop) -RouteMetric 65535 -Protocol NetMgmt -Confirm:$false -ErrorAction Stop
+		}
+		$persistent = @(Get-ExactSinkRoute $request.sink 'PersistentStore')
+		$active = @(Get-ExactSinkRoute $request.sink 'ActiveStore')
+		if ($persistent.Count -ne 1 -or $active.Count -ne 1 -or -not (Test-ExactSinkRoute $persistent[0] $request.sink 'PersistentStore') -or -not (Test-ExactSinkRoute $active[0] $request.sink 'ActiveStore')) { throw 'sink route post-check failed' }
+	}
+	'remove_sink' {
+		$persistent = @(Get-ExactSinkRoute $request.sink 'PersistentStore')
+		if ($persistent.Count -gt 1) { throw 'sink persistent route identity is ambiguous' }
+		if ($persistent.Count -eq 1) {
+			if (-not (Test-ExactSinkRoute $persistent[0] $request.sink 'PersistentStore')) { throw 'sink persistent route ownership collision' }
+			$null = NetTCPIP\Remove-NetRoute -InputObject $persistent[0] -Confirm:$false -ErrorAction Stop
+		}
+		$active = @(Get-ExactSinkRoute $request.sink 'ActiveStore')
+		if ($active.Count -gt 1) { throw 'sink active route identity is ambiguous' }
+		if ($active.Count -eq 1) {
+			if (-not (Test-ExactSinkRoute $active[0] $request.sink 'ActiveStore')) { throw 'sink active route ownership collision' }
+			$null = NetTCPIP\Remove-NetRoute -InputObject $active[0] -Confirm:$false -ErrorAction Stop
+		}
+		if (@(Get-ExactSinkRoute $request.sink 'PersistentStore').Count -ne 0 -or @(Get-ExactSinkRoute $request.sink 'ActiveStore').Count -ne 0) { throw 'sink route removal post-check failed' }
+	}
+	'resolve_route' {
+		$remote = ([string]$request.resolve_route.destination).Split('/')[0]
+		$family = if ([string]$request.resolve_route.family -ceq 'ipv4') { 'IPv4' } else { 'IPv6' }
+		try {
+			$selected = @(NetTCPIP\Find-NetRoute -RemoteIPAddress $remote -AddressFamily $family -ErrorAction Stop)
+		} catch {
+			if (Test-NoRoute1231 $_) {
+				$response.resolved_route = [ordered]@{ family = [string]$request.resolve_route.family; destination = [string]$request.resolve_route.destination; no_route = $true }
+				break
+			}
+			throw
+		}
+		if ($selected.Count -ne 1) { throw 'effective route identity is ambiguous' }
+		$route = $selected[0]
+		$adapters = @(NetAdapter\Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { [int]$_.ifIndex -eq [int]$route.InterfaceIndex })
+		if ($adapters.Count -ne 1) { throw 'effective route adapter is absent or ambiguous' }
+		$response.resolved_route = [ordered]@{
+			family = [string]$request.resolve_route.family
+			destination = [string]$request.resolve_route.destination
+			interface_guid = ([guid]$adapters[0].InterfaceGuid).ToString('D').ToLowerInvariant()
+			interface_index = [int]$route.InterfaceIndex
+			next_hop = [string]$route.NextHop
+			route_metric = [uint32]$route.RouteMetric
+		}
+	}
     'resolve_firewall_interface' {
         $adapter = Get-VerifiedAdapter $request.firewall.rule
         $response.interface_alias = [string]$adapter.Name
@@ -2679,6 +3127,7 @@ switch ([string]$request.operation) {
 		$seenNames = @{}
 		$plannedFirewall = [System.Collections.Generic.List[object]]::new()
 		$plannedRoutes = [System.Collections.Generic.List[object]]::new()
+		$plannedSinks = [System.Collections.Generic.List[object]]::new()
 		$plannedNrpt = [System.Collections.Generic.List[object]]::new()
 		foreach ($binding in $bindings) {
 			$state = $binding.state
@@ -2711,6 +3160,17 @@ switch ([string]$request.operation) {
 						$null = $plannedRoutes.Add($existing[0])
 					}
 				}
+				'sink' {
+					$state = $tombstone.sink
+					foreach ($storeName in @('PersistentStore', 'ActiveStore')) {
+						$existing = @(Get-ExactSinkRoute $state $storeName)
+						if ($existing.Count -gt 1) { throw 'sink cleanup identity is ambiguous' }
+						if ($existing.Count -eq 1) {
+							if (-not (Test-ExactSinkRoute $existing[0] $state $storeName)) { throw 'sink cleanup ownership collision' }
+							$null = $plannedSinks.Add($existing[0])
+						}
+					}
+				}
 				'nrpt' {
 					$state = $tombstone.nrpt
 					if ([string]::IsNullOrEmpty([string]$state.rule.name)) {
@@ -2733,6 +3193,9 @@ switch ([string]$request.operation) {
 		foreach ($item in $plannedRoutes) {
 			$null = NetTCPIP\Remove-NetRoute -InputObject $item -Confirm:$false -ErrorAction Stop
 		}
+		foreach ($item in $plannedSinks) {
+			$null = NetTCPIP\Remove-NetRoute -InputObject $item -Confirm:$false -ErrorAction Stop
+		}
 		foreach ($current in $plannedNrpt) {
 			$null = DnsClient\Remove-DnsClientNrptRule -Name ([string]$current.Name) -Force -Confirm:$false -ErrorAction Stop
 		}
@@ -2746,6 +3209,9 @@ switch ([string]$request.operation) {
 			if ([string]$tombstone.kind -ceq 'route') {
 				$state = $tombstone.route
 				if (@(Get-TombstonedRoute $state).Count -ne 0) { throw 'route cleanup delayed negative verification failed' }
+			} elseif ([string]$tombstone.kind -ceq 'sink') {
+				$state = $tombstone.sink
+				if (@(Get-ExactSinkRoute $state 'PersistentStore').Count -ne 0 -or @(Get-ExactSinkRoute $state 'ActiveStore').Count -ne 0) { throw 'sink cleanup delayed negative verification failed' }
 			} elseif ([string]$tombstone.kind -ceq 'nrpt') {
 				$state = $tombstone.nrpt
 				if ([string]::IsNullOrEmpty([string]$state.rule.name)) {

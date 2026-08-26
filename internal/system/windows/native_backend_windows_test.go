@@ -23,6 +23,7 @@ const nativeJobHelperMode = "HG_NATIVE_JOB_HELPER"
 const (
 	testNativeBootID     = "10000000-0000-4000-8000-000000000001"
 	testNativeNextBootID = "20000000-0000-4000-8000-000000000002"
+	testLoopbackGUID     = "01010101-0101-4101-8101-010101010101"
 )
 
 func TestNativeJobParentHelper(t *testing.T) {
@@ -281,6 +282,99 @@ func TestNativeMutationBackendPersistsInvocationBoundRouteIndexAcrossReindex(t *
 	}
 	if len(registry.Routes) != 1 || registry.Routes[0].InterfaceIndex != state.InterfaceIndex || len(registry.Tombstones) != 0 {
 		t.Fatalf("route reindex changed immutable ownership or retained intent: %#v", registry)
+	}
+}
+
+func TestNativeMutationBackendJournalsPersistentSinkIntentAndStructuredRequest(t *testing.T) {
+	runner := &fakeNativeMutationRunner{response: []byte(`{"version":1,"ok":true}`)}
+	backend := newTestNativeMutationBackend(t, runner)
+	state := nativeTestSink("r1")
+	intentObserved := false
+	runner.beforeRun = func(command nativeMutationCommand) {
+		var request nativeMutationRequest
+		if err := json.Unmarshal(command.Input, &request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Operation != "put_sink" || request.Sink == nil || request.Sink.Route.InterfaceIndex != LoopbackInterfaceIndex || request.Sink.Route.PolicyStore != SinkPolicyStore || *request.Sink != state {
+			t.Fatalf("structured sink request = %#v", request)
+		}
+		registry, err := backend.readRegistryLocked()
+		if err != nil {
+			t.Fatal(err)
+		}
+		registered, exists := registry.Sinks[sinkTupleKey(state.Route)]
+		intentObserved = exists && registered.Owner == state.Owner && registered.Revision == state.Revision && !registered.PersistentPresent && !registered.ActivePresent && len(registry.Tombstones) == 1 && registry.Tombstones[0].Sink != nil && registry.Tombstones[0].Sink.Route == state.Route && registry.Tombstones[0].BootID == testNativeBootID
+	}
+	if err := backend.PutSink(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if !intentObserved {
+		t.Fatal("sink ownership intent was not committed before native mutation")
+	}
+	registry, err := backend.readRegistryLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, exists := registry.Sinks[sinkTupleKey(state.Route)]; !exists || got.Owner != state.Owner || got.Revision != state.Revision || len(registry.Tombstones) != 0 {
+		t.Fatalf("final sink registry = %#v", registry)
+	}
+}
+
+func TestNativeMutationBackendSinkFailureRetainsPreMutationTombstone(t *testing.T) {
+	runner := &fakeNativeMutationRunner{
+		response: []byte(`{"version":1,"ok":true}`),
+		errors:   map[string]error{"put_sink": errors.New("post-check failed")},
+	}
+	backend := newTestNativeMutationBackend(t, runner)
+	state := nativeTestSink("r1")
+	if err := backend.PutSink(context.Background(), state); err == nil || strings.Contains(err.Error(), "post-check failed") {
+		t.Fatalf("sink put failure was not redacted: %v", err)
+	}
+	registry, err := backend.readRegistryLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := registry.Sinks[sinkTupleKey(state.Route)]; !exists || len(registry.Tombstones) != 1 || registry.Tombstones[0].Sink == nil || registry.Tombstones[0].Phase != nativeFirewallPhaseWatch {
+		t.Fatalf("sink failure did not retain exact cleanup intent: %#v", registry)
+	}
+	delete(runner.errors, "put_sink")
+	if err := backend.PutSink(context.Background(), state); err == nil || !strings.Contains(err.Error(), "quarantined") {
+		t.Fatalf("sink retry was not quarantined by retained tombstone: %v", err)
+	}
+	got := nativeOperations(t, runner.calls)
+	if len(got) != nativeFirewallCleanupChecks+2 || got[0] != "put_sink" || slices.ContainsFunc(got[1:], func(operation string) bool { return operation != "cleanup_native_tombstones" }) {
+		t.Fatalf("sink failure operation sequence = %v", got)
+	}
+}
+
+func TestNativeMutationBackendRemovesExactPersistentAndActiveSink(t *testing.T) {
+	runner := &fakeNativeMutationRunner{response: []byte(`{"version":1,"ok":true}`)}
+	backend := newTestNativeMutationBackend(t, runner)
+	state := nativeTestSink("r1")
+	registry := emptyNativeOwnershipRegistry()
+	registry.Sinks[sinkTupleKey(state.Route)] = state
+	if err := backend.writeRegistryLocked(registry); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.RemoveSink(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("native calls = %d", len(runner.calls))
+	}
+	var request nativeMutationRequest
+	if err := json.Unmarshal(runner.calls[0].Input, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Operation != "remove_sink" || request.Sink == nil || *request.Sink != state {
+		t.Fatalf("sink removal request = %#v", request)
+	}
+	registry, err := backend.readRegistryLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registry.Sinks) != 0 || len(registry.Tombstones) != 0 {
+		t.Fatalf("sink ownership remained after exact dual-store removal: %#v", registry)
 	}
 }
 
@@ -1456,10 +1550,12 @@ func TestNativeMutationBackendSnapshotUsesExactRegistryAndOSMarkers(t *testing.T
 	runner := &fakeNativeMutationRunner{}
 	backend := newTestNativeMutationBackend(t, runner)
 	route := nativeTestRoute("r1")
+	sink := nativeTestSink("r1")
 	firewall := nativeTestFirewall("r1")
 	nrpt := nativeTestNRPT("r1")
 	registry := emptyNativeOwnershipRegistry()
 	registry.Routes = []RouteState{route}
+	registry.Sinks[sinkTupleKey(sink.Route)] = sink
 	registry.Firewall = []nativeFirewallOwnership{{State: firewall, InterfaceAlias: "Ethernet", InterfacePattern: "Ethernet", Committed: true}}
 	registry.NRPT = []NRPTState{nrpt}
 	if err := backend.writeRegistryLocked(registry); err != nil {
@@ -1477,6 +1573,11 @@ func TestNativeMutationBackendSnapshotUsesExactRegistryAndOSMarkers(t *testing.T
 			"routes": []any{
 				map[string]any{"interfaceIndex": 12, "compartmentId": 1, "addressFamily": 2, "destinationPrefix": route.Destination, "nextHop": route.NextHop, "routeMetric": route.Metric, "policyStore": RoutePolicyStore, "protocol": RouteProtocol, "state": 0},
 				map[string]any{"interfaceIndex": 31, "compartmentId": 1, "addressFamily": 2, "destinationPrefix": "0.0.0.0/0", "nextHop": "0.0.0.0", "routeMetric": 1, "policyStore": RoutePolicyStore, "protocol": RouteProtocol, "state": 2},
+			},
+			"sinks": []any{
+				nativeSinkRecord(sink.Route, SinkPolicyStore),
+				nativeSinkRecord(sink.Route, RoutePolicyStore),
+				nativeSinkRecord(sinkForVPNRoute(ManagedRoute{Family: FamilyIPv4, Destination: "198.51.100.99/32"}), SinkPolicyStore),
 			},
 			"firewall": []any{
 				map[string]any{"name": firewall.Rule.Name, "displayName": firewall.Rule.Name, "description": firewall.Rule.Description, "group": firewall.Rule.Group, "enabled": "True", "direction": "Outbound", "action": "Block", "remoteAddresses": []string{firewall.Rule.RemoteCIDR}, "interfaceAliases": []string{"Ethernet"}},
@@ -1504,6 +1605,16 @@ func TestNativeMutationBackendSnapshotUsesExactRegistryAndOSMarkers(t *testing.T
 	if len(snapshot.Routes) != 2 || snapshot.Routes[0].Owner != ArtifactOwner && snapshot.Routes[1].Owner != ArtifactOwner {
 		t.Fatalf("route ownership = %#v", snapshot.Routes)
 	}
+	if !slices.ContainsFunc(snapshot.Sinks, func(state SinkState) bool {
+		return state.Owner == ArtifactOwner && state.Revision == "r1" && state.PersistentPresent && state.ActivePresent && state.Route == sink.Route
+	}) {
+		t.Fatalf("owned persistent sink was not joined with its active copy: %#v", snapshot.Sinks)
+	}
+	if !slices.ContainsFunc(snapshot.Sinks, func(state SinkState) bool {
+		return state.Owner == "" && state.Route.Destination == "198.51.100.99/32" && state.PersistentPresent && !state.ActivePresent
+	}) {
+		t.Fatalf("unowned persistent sink collision was not preserved: %#v", snapshot.Sinks)
+	}
 	if !slices.ContainsFunc(snapshot.Routes, func(state RouteState) bool {
 		return state.Owner == "" && state.Protected && state.InterfaceGUID == testCiscoGUID && state.Destination == "0.0.0.0/0" && state.State == 2
 	}) {
@@ -1516,6 +1627,139 @@ func TestNativeMutationBackendSnapshotUsesExactRegistryAndOSMarkers(t *testing.T
 	}
 	if len(snapshot.NRPT) != 1 || snapshot.NRPT[0].Owner != ArtifactOwner || snapshot.NRPT[0].Revision != "r1" || snapshot.NRPT[0].Rule.Name != "{11111111-2222-3333-4444-555555555555}" || snapshot.NRPT[0].Rule.LogicalID != nrpt.Rule.LogicalID || !snapshot.NRPT[0].Effective {
 		t.Fatalf("NRPT classification = %#v", snapshot.NRPT)
+	}
+}
+
+func TestNativeMutationBackendRejectsDuplicateSinkStoreRecords(t *testing.T) {
+	runner := &fakeNativeMutationRunner{}
+	backend := newTestNativeMutationBackend(t, runner)
+	sink := nativeTestSink("r1")
+	registry := emptyNativeOwnershipRegistry()
+	registry.Sinks[sinkTupleKey(sink.Route)] = sink
+	if err := backend.writeRegistryLocked(registry); err != nil {
+		t.Fatal(err)
+	}
+	runner.response = nativeSnapshotOnlySinksJSON(t,
+		[]any{map[string]any{"name": "Loopback", "description": "Software Loopback Interface", "interfaceIndex": 1, "interfaceGuid": testLoopbackGUID, "hardwareInterface": false, "adminStatus": 1, "operationalStatus": 1}},
+		[]any{nativeSinkRecord(sink.Route, SinkPolicyStore), nativeSinkRecord(sink.Route, SinkPolicyStore)},
+	)
+	if _, err := backend.Snapshot(context.Background()); err == nil || !strings.Contains(err.Error(), "sink") {
+		t.Fatalf("duplicate sink store record error = %v", err)
+	}
+}
+
+func TestNativeMutationBackendFinalizesRebootedSinkPutAndStaleIntent(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		records   []any
+		wantOwned bool
+	}{
+		{name: "completed", records: []any{nativeSinkRecord(nativeTestSink("r1").Route, SinkPolicyStore), nativeSinkRecord(nativeTestSink("r1").Route, RoutePolicyStore)}, wantOwned: true},
+		{name: "stale-intent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			sink := nativeTestSink("r1")
+			tombstone := nativeMutationTombstone{Kind: nativeTombstoneSink, Action: nativeTombstonePut, Phase: nativeFirewallPhaseWatch, BootID: testNativeBootID, Sink: &sink}
+			runner := &fakeNativeMutationRunner{responses: map[string][]byte{
+				"snapshot": nativeSnapshotOnlySinksJSON(t,
+					[]any{map[string]any{"name": "Loopback", "description": "Software Loopback Interface", "interfaceIndex": 1, "interfaceGuid": testLoopbackGUID, "hardwareInterface": false, "adminStatus": 1, "operationalStatus": 1}},
+					test.records,
+				),
+			}}
+			backend := newTestNativeMutationBackend(t, runner)
+			backend.bootID = func() (string, error) { return testNativeNextBootID, nil }
+			registry := emptyNativeOwnershipRegistry()
+			registry.Sinks[sinkTupleKey(sink.Route)] = sink
+			registry.Tombstones = []nativeMutationTombstone{tombstone}
+			if err := backend.writeRegistryLocked(registry); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := backend.Snapshot(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			registry, err = backend.readRegistryLocked()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantOwned {
+				if len(snapshot.Sinks) != 1 || snapshot.Sinks[0].Owner != ArtifactOwner || len(registry.Sinks) != 1 || len(registry.Tombstones) != 0 {
+					t.Fatalf("completed rebooted sink put was not finalized: snapshot=%#v registry=%#v", snapshot.Sinks, registry)
+				}
+			} else if len(snapshot.Sinks) != 0 || len(registry.Sinks) != 0 || len(registry.Tombstones) != 0 {
+				t.Fatalf("stale rebooted sink intent was retained: snapshot=%#v registry=%#v", snapshot.Sinks, registry)
+			}
+		})
+	}
+}
+
+func TestNativeMutationBackendResolvesEffectiveRouteFixtures(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		family      AddressFamily
+		destination string
+		response    []byte
+		want        ResolvedRoute
+		wantErr     string
+	}{
+		{
+			name:        "redshield",
+			family:      FamilyIPv4,
+			destination: "198.51.100.53/32",
+			response: mustNativeJSON(t, map[string]any{"version": 1, "ok": true, "resolved_route": map[string]any{
+				"family": FamilyIPv4, "destination": "198.51.100.53/32", "interface_guid": testRedShieldGUID, "interface_index": 21, "next_hop": "10.20.30.1", "route_metric": ReservedRouteMetric,
+			}}),
+			want: ResolvedRoute{Family: FamilyIPv4, Destination: "198.51.100.53/32", InterfaceGUID: testRedShieldGUID, InterfaceIndex: 21, NextHop: "10.20.30.1", RouteMetric: ReservedRouteMetric},
+		},
+		{
+			name:        "loopback",
+			family:      FamilyIPv4,
+			destination: "198.51.100.53/32",
+			response: mustNativeJSON(t, map[string]any{"version": 1, "ok": true, "resolved_route": map[string]any{
+				"family": FamilyIPv4, "destination": "198.51.100.53/32", "interface_guid": testLoopbackGUID, "interface_index": LoopbackInterfaceIndex, "next_hop": "0.0.0.0", "route_metric": ReservedSinkMetric,
+			}}),
+			want: ResolvedRoute{Family: FamilyIPv4, Destination: "198.51.100.53/32", InterfaceGUID: testLoopbackGUID, InterfaceIndex: LoopbackInterfaceIndex, NextHop: "0.0.0.0", RouteMetric: ReservedSinkMetric},
+		},
+		{
+			name:        "windows-1231-no-route",
+			family:      FamilyIPv6,
+			destination: "2001:db8:100::53/128",
+			response: mustNativeJSON(t, map[string]any{"version": 1, "ok": true, "resolved_route": map[string]any{
+				"family": FamilyIPv6, "destination": "2001:db8:100::53/128", "no_route": true,
+			}}),
+			want: ResolvedRoute{Family: FamilyIPv6, Destination: "2001:db8:100::53/128", NoRoute: true},
+		},
+		{name: "ambiguous-output", family: FamilyIPv4, destination: "198.51.100.53/32", response: mustNativeJSON(t, map[string]any{"version": 1, "ok": true, "resolved_route": map[string]any{"family": FamilyIPv4, "destination": "198.51.100.53/32", "interface_index": 21, "next_hop": "10.20.30.1", "route_metric": 1}}), wantErr: "invalid"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &fakeNativeMutationRunner{response: test.response}
+			backend := newTestNativeMutationBackend(t, runner)
+			got, err := backend.ResolveRoute(context.Background(), test.family, test.destination)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("ResolveRoute() error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("ResolveRoute() = %#v, %v; want %#v", got, err, test.want)
+			}
+			var request nativeMutationRequest
+			if err := json.Unmarshal(runner.calls[0].Input, &request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Operation != "resolve_route" || request.ResolveRoute == nil || request.ResolveRoute.Family != test.family || request.ResolveRoute.Destination != test.destination {
+				t.Fatalf("resolve route request = %#v", request)
+			}
+		})
+	}
+}
+
+func TestNativeMutationBackendResolveRouteFailsClosedOnNativeError(t *testing.T) {
+	runner := &fakeNativeMutationRunner{err: errors.New("non-1231 CIM failure")}
+	backend := newTestNativeMutationBackend(t, runner)
+	if _, err := backend.ResolveRoute(context.Background(), FamilyIPv4, "198.51.100.53/32"); err == nil || strings.Contains(err.Error(), "non-1231") {
+		t.Fatalf("non-1231 native error was not fail-closed and redacted: %v", err)
 	}
 }
 
@@ -1945,6 +2189,10 @@ func nativeTestRoute(revision string) RouteState {
 	}, Owner: ArtifactOwner, Revision: revision}
 }
 
+func nativeTestSink(revision string) SinkState {
+	return SinkState{Route: sinkForVPNRoute(ManagedRoute{Family: FamilyIPv4, Destination: "198.51.100.53/32"}), Owner: ArtifactOwner, Revision: revision}
+}
+
 func nativeTestFirewall(revision string) FirewallState {
 	rule := FirewallRule{Family: FamilyIPv4, RemoteCIDR: "198.51.100.0/24", Action: "block", Direction: "outbound", InterfaceGUID: testPhysicalGUID, InterfaceIndex: 12, PolicyStore: FirewallPolicyStore, Group: ownershipGroup(revision), Description: ownershipDescription(revision)}
 	rule.Name = FirewallRuleName(revision, rule.Family, rule.RemoteCIDR, rule.InterfaceGUID)
@@ -2081,6 +2329,16 @@ func mustNativeJSON(t *testing.T, value any) []byte {
 
 func nativeSnapshotJSON(t *testing.T, adapters, routes, firewall, nrpt, effective, effectiveFirewall []any) []byte {
 	t.Helper()
+	return nativeSnapshotWithSinksJSON(t, adapters, routes, []any{}, firewall, nrpt, effective, effectiveFirewall)
+}
+
+func nativeSnapshotOnlySinksJSON(t *testing.T, adapters, sinks []any) []byte {
+	t.Helper()
+	return nativeSnapshotWithSinksJSON(t, adapters, []any{}, sinks, []any{}, []any{}, []any{}, []any{})
+}
+
+func nativeSnapshotWithSinksJSON(t *testing.T, adapters, routes, sinks, firewall, nrpt, effective, effectiveFirewall []any) []byte {
+	t.Helper()
 	for _, value := range routes {
 		if record, ok := value.(map[string]any); ok {
 			record["compartmentId"] = 1
@@ -2093,6 +2351,7 @@ func nativeSnapshotJSON(t *testing.T, adapters, routes, firewall, nrpt, effectiv
 			"adapters":                adapters,
 			"compartments":            []any{map[string]any{"compartmentId": 1}},
 			"routes":                  routes,
+			"sinks":                   sinks,
 			"firewall":                firewall,
 			"firewallEffective":       effectiveFirewall,
 			"firewallProfiles":        defaultNativeFirewallProfiles(),
@@ -2102,6 +2361,24 @@ func nativeSnapshotJSON(t *testing.T, adapters, routes, firewall, nrpt, effectiv
 			"nrptEffective":           effective,
 		},
 	})
+}
+
+func nativeSinkRecord(route SinkRoute, store string) map[string]any {
+	family := 2
+	if route.Family == FamilyIPv6 {
+		family = 23
+	}
+	return map[string]any{
+		"interfaceIndex":    route.InterfaceIndex,
+		"compartmentId":     1,
+		"addressFamily":     family,
+		"destinationPrefix": route.Destination,
+		"nextHop":           route.NextHop,
+		"routeMetric":       route.Metric,
+		"policyStore":       store,
+		"protocol":          route.Protocol,
+		"state":             0,
+	}
 }
 
 func defaultNativeFirewallProfiles() []any {

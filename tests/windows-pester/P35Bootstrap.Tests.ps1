@@ -131,7 +131,6 @@ try {
         $parseErrors | Should -BeNullOrEmpty
         $text | Should -Match 'ExpectedPayloadSHA256'
         $text | Should -Match 'ExpectedDriverSHA256'
-        $text | Should -Match 'Read-PinnedPayload'
         $text | Should -Match "System32', 'WindowsPowerShell', 'v1\.0', 'powershell\.exe'"
         $text | Should -Match 'Start-Process.*-Verb RunAs'
         $text | Should -Match "'-EncodedCommand'"
@@ -190,6 +189,106 @@ try {
                 -ExpectedLauncherSHA256 ('0' * 64) -ExpectedHgctlSHA256 ('0' * 64) `
                 -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' -PayloadPath $payload -LauncherPath $launcher -HgctlPath $hgctl -WhatIf
         } | Should -Throw '*local absolute path*'
+    }
+
+    It 'launches a short pinned loader that exclusively reads and executes the approved payload' {
+        $config = Join-Path $TestDrive 'provider.conf'
+        $payload = Join-Path $TestDrive 'payload.ps1'
+        $launcher = Join-Path $TestDrive 'launcher.ps1'
+        $hgctl = Join-Path $TestDrive 'hgctl.exe'
+        $marker = Join-Path $TestDrive 'payload-marker.txt'
+        [IO.File]::WriteAllText($config, '[redacted-test-placeholder]', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($launcher, "'launcher'", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($hgctl, 'binary-placeholder', [Text.UTF8Encoding]::new($false))
+        $markerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($marker))
+        $payloadText = @"
+`$markerPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$markerBase64'))
+[IO.File]::WriteAllText(`$markerPath, 'executed-approved-payload', [Text.UTF8Encoding]::new(`$false))
+"@
+        while ([Text.Encoding]::UTF8.GetByteCount($payloadText) -lt 30236) {
+            $payloadText += "# deterministic padding for encoded-command regression`r`n"
+        }
+        [IO.File]::WriteAllText($payload, $payloadText, [Text.UTF8Encoding]::new($false))
+        $driverSHA256 = (Get-FileHash -LiteralPath $script:Driver -Algorithm SHA256).Hash.ToLowerInvariant()
+        $payloadSHA256 = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+        $global:P35CapturedStartProcess = $null
+
+        function global:Start-Process {
+            param(
+                [Parameter(Mandatory = $true)][string]$FilePath,
+                [string[]]$ArgumentList,
+                [string]$Verb,
+                [string]$WindowStyle,
+                [switch]$Wait,
+                [switch]$PassThru
+            )
+            $global:P35CapturedStartProcess = [pscustomobject][ordered]@{
+                FilePath = $FilePath
+                Verb = $Verb
+                ArgumentList = @($ArgumentList)
+                WindowStyle = $WindowStyle
+                Wait = [bool]$Wait
+                PassThru = [bool]$PassThru
+                RequestBase64 = $env:HG_P35_BOOTSTRAP_REQUEST_B64
+            }
+            return [pscustomobject]@{ ExitCode = 0 }
+        }
+        try {
+            $driverText = [IO.File]::ReadAllText($script:Driver, [Text.UTF8Encoding]::new($false, $true))
+            $driverBlock = [ScriptBlock]::Create($driverText)
+            & $driverBlock -Action Install -ConfigPath $config -DriverPath $script:Driver `
+                -ExpectedConfigSHA256 (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -ExpectedDriverSHA256 $driverSHA256 `
+                -ExpectedPayloadSHA256 $payloadSHA256 `
+                -ExpectedLauncherSHA256 (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -ExpectedHgctlSHA256 (Get-FileHash -LiteralPath $hgctl -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' -PayloadPath $payload -LauncherPath $launcher -HgctlPath $hgctl -Confirm:$false
+        } finally {
+            Remove-Item -LiteralPath Function:\global:Start-Process -ErrorAction SilentlyContinue
+        }
+
+        $capturedStartProcess = $global:P35CapturedStartProcess
+        $global:P35CapturedStartProcess = $null
+        $capturedStartProcess | Should -Not -BeNullOrEmpty
+        $encodedIndex = [Array]::IndexOf($capturedStartProcess.ArgumentList, '-EncodedCommand')
+        $encodedIndex | Should -BeGreaterOrEqual 0
+        $encodedCommand = $capturedStartProcess.ArgumentList[$encodedIndex + 1]
+        $encodedCommand.Length | Should -BeLessThan 32767
+        $constructedCommandLength = $capturedStartProcess.FilePath.Length + 1 + (($capturedStartProcess.ArgumentList | ForEach-Object { [string]$_ }) -join ' ').Length
+        $constructedCommandLength | Should -BeLessThan 32767
+        $capturedStartProcess.Verb | Should -Be 'RunAs'
+        $capturedStartProcess.RequestBase64 | Should -Not -BeNullOrEmpty
+
+        $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        $windowsPowerShell = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $previousRequest = $env:HG_P35_BOOTSTRAP_REQUEST_B64
+        try {
+            [IO.File]::WriteAllText($payload, "$payloadText`r`n# tampered", [Text.UTF8Encoding]::new($false))
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $capturedStartProcess.RequestBase64
+            $tamperedOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+            $LASTEXITCODE | Should -Not -Be 0
+            ($tamperedOutput | Out-String) | Should -Match 'payload SHA-256 differs'
+            Test-Path -LiteralPath $marker | Should -BeFalse
+
+            [IO.File]::WriteAllText($payload, $payloadText, [Text.UTF8Encoding]::new($false))
+            $held = [IO.File]::Open($payload, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+            try {
+                $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $capturedStartProcess.RequestBase64
+                $heldOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+                $LASTEXITCODE | Should -Not -Be 0
+                Test-Path -LiteralPath $marker | Should -BeFalse
+            } finally {
+                $held.Dispose()
+            }
+
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $capturedStartProcess.RequestBase64
+            $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+            $LASTEXITCODE | Should -Be 0
+            ($output | Out-String) | Should -BeNullOrEmpty
+            Get-Content -LiteralPath $marker -Raw | Should -Be 'executed-approved-payload'
+        } finally {
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $previousRequest
+        }
     }
 
     It 'rejects direct driver execution before evaluating any requested path' {

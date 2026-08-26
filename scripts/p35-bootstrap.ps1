@@ -62,23 +62,44 @@ function Assert-FileSHA256([string]$Path, [string]$Expected, [string]$Label) {
     if ($actual -cne $Expected) { throw "$Label SHA-256 differs from the approved value" }
 }
 
-function Read-PinnedPayload([string]$Path, [string]$Expected) {
-    $stream = Open-RegularExclusive -Path $Path -Label 'bootstrap payload'
-    try {
-        if ($stream.Length -le 0 -or $stream.Length -gt 1048576) { throw 'bootstrap payload length differs' }
-        $actual = Get-StreamSHA256 -Stream $stream
-        if ($actual -cne $Expected) { throw 'bootstrap payload SHA-256 differs from the approved value' }
-        $stream.Position = 0
-        $bytes = [byte[]]::new([int]$stream.Length)
-        $offset = 0
-        while ($offset -lt $bytes.Length) {
-            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
-            if ($read -eq 0) { throw 'bootstrap payload is truncated' }
-            $offset += $read
-        }
-    } finally { $stream.Dispose() }
-    $encoding = [Text.UTF8Encoding]::new($false, $true)
-    return $encoding.GetString($bytes)
+function New-PinnedPayloadLoader([string]$Path, [string]$Expected) {
+    Assert-SHA256 -Value $Expected -Label 'payload hash'
+    $pathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Path))
+    $loader = @"
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = 'Stop'
+`$ProgressPreference = 'SilentlyContinue'
+if (-not [string]::IsNullOrEmpty(`$PSCommandPath)) { throw 'P3.5 bootstrap loader must execute only as an EncodedCommand payload' }
+function Get-StreamSHA256([IO.Stream]`$Stream) {
+    `$sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString(`$sha.ComputeHash(`$Stream))).Replace('-', '').ToLowerInvariant() } finally { `$sha.Dispose() }
+}
+`$payloadPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$pathBase64'))
+`$expectedPayloadSHA256 = '$Expected'
+if (`$expectedPayloadSHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'bootstrap payload hash must be one lowercase SHA-256 value' }
+`$stream = [IO.File]::Open(`$payloadPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    if (`$stream.Length -le 0 -or `$stream.Length -gt 1048576) { throw 'bootstrap payload length differs' }
+    `$actual = Get-StreamSHA256 -Stream `$stream
+    if (`$actual -cne `$expectedPayloadSHA256) { throw 'bootstrap payload SHA-256 differs from the approved value' }
+    `$stream.Position = 0
+    `$bytes = [byte[]]::new([int]`$stream.Length)
+    `$offset = 0
+    while (`$offset -lt `$bytes.Length) {
+        `$read = `$stream.Read(`$bytes, `$offset, `$bytes.Length - `$offset)
+        if (`$read -eq 0) { throw 'bootstrap payload is truncated' }
+        `$offset += `$read
+    }
+} finally {
+    `$stream.Dispose()
+}
+`$encoding = [Text.UTF8Encoding]::new(`$false, `$true)
+`$payloadText = `$encoding.GetString(`$bytes)
+[ScriptBlock]::Create(`$payloadText).Invoke()
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
+    if ($encoded.Length -ge 32767) { throw 'P3.5 bootstrap loader exceeds CreateProcess command length budget' }
+    return $encoded
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -106,7 +127,7 @@ $resolvedPayload = Resolve-LocalCleanPath -Path $PayloadPath -Label 'bootstrap p
 
 Assert-FileSHA256 -Path $resolvedConfig -Expected $ExpectedConfigSHA256 -Label 'RedShield config source'
 Assert-FileSHA256 -Path $resolvedDriver -Expected $ExpectedDriverSHA256 -Label 'bootstrap driver'
-$payloadText = Read-PinnedPayload -Path $resolvedPayload -Expected $ExpectedPayloadSHA256
+$payloadCommandBase64 = New-PinnedPayloadLoader -Path $resolvedPayload -Expected $ExpectedPayloadSHA256
 
 if ($Action -ceq 'Install') {
     if ([string]::IsNullOrWhiteSpace($LauncherPath)) { $LauncherPath = Join-Path $PSScriptRoot 'p35-canary.ps1' }
@@ -140,7 +161,6 @@ if ($Action -ceq 'Install') {
 $requestBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject $request))
 if ($requestBytes.Length -gt 65536) { throw 'P3.5 bootstrap request exceeds its limit' }
 $requestBase64 = [Convert]::ToBase64String($requestBytes)
-$payloadBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payloadText))
 
 $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $trustedPowerShell = [IO.Path]::Combine($windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -153,7 +173,7 @@ $previousRequest = $env:HG_P35_BOOTSTRAP_REQUEST_B64
 try {
     $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $requestBase64
     $process = Start-Process -FilePath $trustedPowerShell -Verb RunAs -ArgumentList @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $payloadBase64
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $payloadCommandBase64
     ) -WindowStyle Hidden -Wait -PassThru
 } finally {
     $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $previousRequest

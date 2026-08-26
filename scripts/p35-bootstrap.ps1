@@ -62,8 +62,11 @@ function Assert-FileSHA256([string]$Path, [string]$Expected, [string]$Label) {
     if ($actual -cne $Expected) { throw "$Label SHA-256 differs from the approved value" }
 }
 
-function New-PinnedPayloadLoader([string]$Path, [string]$Expected) {
+function New-PinnedPayloadLoader([string]$Path, [string]$Expected, [string]$RequestBase64) {
     Assert-SHA256 -Value $Expected -Label 'payload hash'
+    try { $requestBytes = [Convert]::FromBase64String($RequestBase64) } catch { throw 'bootstrap request must be valid Base64' }
+    if ($requestBytes.Length -le 0 -or $requestBytes.Length -gt 65536) { throw 'P3.5 bootstrap request exceeds its limit' }
+    $requestBase64Literal = [Convert]::ToBase64String($requestBytes)
     $pathBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Path))
     $loader = @"
 Set-StrictMode -Version Latest
@@ -95,7 +98,13 @@ try {
 }
 `$encoding = [Text.UTF8Encoding]::new(`$false, `$true)
 `$payloadText = `$encoding.GetString(`$bytes)
-[ScriptBlock]::Create(`$payloadText).Invoke()
+`$previousRequest = `$env:HG_P35_BOOTSTRAP_REQUEST_B64
+try {
+    `$env:HG_P35_BOOTSTRAP_REQUEST_B64 = '$requestBase64Literal'
+    [ScriptBlock]::Create(`$payloadText).Invoke()
+} finally {
+    `$env:HG_P35_BOOTSTRAP_REQUEST_B64 = `$previousRequest
+}
 "@
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($loader))
     if ($encoded.Length -ge 32767) { throw 'P3.5 bootstrap loader exceeds CreateProcess command length budget' }
@@ -127,7 +136,6 @@ $resolvedPayload = Resolve-LocalCleanPath -Path $PayloadPath -Label 'bootstrap p
 
 Assert-FileSHA256 -Path $resolvedConfig -Expected $ExpectedConfigSHA256 -Label 'RedShield config source'
 Assert-FileSHA256 -Path $resolvedDriver -Expected $ExpectedDriverSHA256 -Label 'bootstrap driver'
-$payloadCommandBase64 = New-PinnedPayloadLoader -Path $resolvedPayload -Expected $ExpectedPayloadSHA256
 
 if ($Action -ceq 'Install') {
     if ([string]::IsNullOrWhiteSpace($LauncherPath)) { $LauncherPath = Join-Path $PSScriptRoot 'p35-canary.ps1' }
@@ -161,6 +169,7 @@ if ($Action -ceq 'Install') {
 $requestBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject $request))
 if ($requestBytes.Length -gt 65536) { throw 'P3.5 bootstrap request exceeds its limit' }
 $requestBase64 = [Convert]::ToBase64String($requestBytes)
+$payloadCommandBase64 = New-PinnedPayloadLoader -Path $resolvedPayload -Expected $ExpectedPayloadSHA256 -RequestBase64 $requestBase64
 
 $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $trustedPowerShell = [IO.Path]::Combine($windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
@@ -169,15 +178,10 @@ Assert-FileSHA256 -Path $resolvedPayload -Expected $ExpectedPayloadSHA256 -Label
 Assert-FileSHA256 -Path $resolvedDriver -Expected $ExpectedDriverSHA256 -Label 'bootstrap driver'
 if (-not $PSCmdlet.ShouldProcess('protected P3.5 filesystem state and the selected config ACL', "$Action via pinned elevated EncodedCommand")) { return }
 
-$previousRequest = $env:HG_P35_BOOTSTRAP_REQUEST_B64
-try {
-    $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $requestBase64
-    $process = Start-Process -FilePath $trustedPowerShell -Verb RunAs -ArgumentList @(
-        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $payloadCommandBase64
-    ) -WindowStyle Hidden -Wait -PassThru
-} finally {
-    $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $previousRequest
-}
+$arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $payloadCommandBase64)
+$commandLength = $trustedPowerShell.Length + 1 + (($arguments | ForEach-Object { [string]$_ }) -join ' ').Length
+if ($commandLength -ge 32767) { throw 'P3.5 bootstrap command exceeds CreateProcess command length budget' }
+$process = Start-Process -FilePath $trustedPowerShell -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
 if ($null -eq $process -or $process.ExitCode -ne 0) { throw "P3.5 elevated bootstrap failed with exit code $($process.ExitCode)" }
 [Console]::Out.WriteLine((ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{
     version = 1

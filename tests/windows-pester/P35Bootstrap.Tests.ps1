@@ -136,7 +136,6 @@ try {
         $text | Should -Match "'-EncodedCommand'"
         $text | Should -Match '-WindowStyle Hidden'
         $text | Should -Match 'SupportsShouldProcess\s*=\s*\$true'
-        $text | Should -Match 'HG_P35_BOOTSTRAP_REQUEST_B64 = \$previousRequest'
         $text | Should -Not -Match 'Invoke-Expression|Get-Content|ReadAllText|ReadAllBytes'
 
         $config = Join-Path $TestDrive 'provider.conf'
@@ -200,9 +199,29 @@ try {
         [IO.File]::WriteAllText($config, '[redacted-test-placeholder]', [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($launcher, "'launcher'", [Text.UTF8Encoding]::new($false))
         [IO.File]::WriteAllText($hgctl, 'binary-placeholder', [Text.UTF8Encoding]::new($false))
+        $configSHA256 = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+        $launcherSHA256 = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+        $hgctlSHA256 = (Get-FileHash -LiteralPath $hgctl -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expectedRequest = [pscustomobject][ordered]@{
+            version = 1
+            action = 'install'
+            confirmation = 'P35-BOOTSTRAP-FILESYSTEM-V1'
+            caller_sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            config_path = [IO.Path]::GetFullPath($config)
+            config_sha256 = $configSHA256
+            launcher_path = [IO.Path]::GetFullPath($launcher)
+            launcher_sha256 = $launcherSHA256
+            hgctl_path = [IO.Path]::GetFullPath($hgctl)
+            hgctl_sha256 = $hgctlSHA256
+        }
+        $expectedRequestText = ConvertTo-Json -Compress -InputObject $expectedRequest
+        $expectedRequestBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($expectedRequestText))
         $markerBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($marker))
         $payloadText = @"
 `$markerPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$markerBase64'))
+`$expectedRequestBase64 = '$expectedRequestBase64'
+`$requestBase64 = [string]`$env:HG_P35_BOOTSTRAP_REQUEST_B64
+if ([string]::IsNullOrWhiteSpace(`$requestBase64) -or `$requestBase64 -cne `$expectedRequestBase64) { throw 'bootstrap request was not delivered exactly to the child payload' }
 [IO.File]::WriteAllText(`$markerPath, 'executed-approved-payload', [Text.UTF8Encoding]::new(`$false))
 "@
         while ([Text.Encoding]::UTF8.GetByteCount($payloadText) -lt 30236) {
@@ -233,18 +252,22 @@ try {
             }
             return [pscustomobject]@{ ExitCode = 0 }
         }
+        $previousRequest = $env:HG_P35_BOOTSTRAP_REQUEST_B64
         try {
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = 'parent-sentinel'
             $driverText = [IO.File]::ReadAllText($script:Driver, [Text.UTF8Encoding]::new($false, $true))
             $driverBlock = [ScriptBlock]::Create($driverText)
             & $driverBlock -Action Install -ConfigPath $config -DriverPath $script:Driver `
-                -ExpectedConfigSHA256 (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -ExpectedConfigSHA256 $configSHA256 `
                 -ExpectedDriverSHA256 $driverSHA256 `
                 -ExpectedPayloadSHA256 $payloadSHA256 `
-                -ExpectedLauncherSHA256 (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant() `
-                -ExpectedHgctlSHA256 (Get-FileHash -LiteralPath $hgctl -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -ExpectedLauncherSHA256 $launcherSHA256 `
+                -ExpectedHgctlSHA256 $hgctlSHA256 `
                 -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' -PayloadPath $payload -LauncherPath $launcher -HgctlPath $hgctl -Confirm:$false
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 | Should -Be 'parent-sentinel'
         } finally {
             Remove-Item -LiteralPath Function:\global:Start-Process -ErrorAction SilentlyContinue
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $previousRequest
         }
 
         $capturedStartProcess = $global:P35CapturedStartProcess
@@ -257,14 +280,13 @@ try {
         $constructedCommandLength = $capturedStartProcess.FilePath.Length + 1 + (($capturedStartProcess.ArgumentList | ForEach-Object { [string]$_ }) -join ' ').Length
         $constructedCommandLength | Should -BeLessThan 32767
         $capturedStartProcess.Verb | Should -Be 'RunAs'
-        $capturedStartProcess.RequestBase64 | Should -Not -BeNullOrEmpty
 
         $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
         $windowsPowerShell = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
         $previousRequest = $env:HG_P35_BOOTSTRAP_REQUEST_B64
         try {
             [IO.File]::WriteAllText($payload, "$payloadText`r`n# tampered", [Text.UTF8Encoding]::new($false))
-            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $capturedStartProcess.RequestBase64
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $null
             $tamperedOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
             $LASTEXITCODE | Should -Not -Be 0
             ($tamperedOutput | Out-String) | Should -Match 'payload SHA-256 differs'
@@ -273,7 +295,7 @@ try {
             [IO.File]::WriteAllText($payload, $payloadText, [Text.UTF8Encoding]::new($false))
             $held = [IO.File]::Open($payload, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
             try {
-                $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $capturedStartProcess.RequestBase64
+                $env:HG_P35_BOOTSTRAP_REQUEST_B64 = 'parent-sentinel'
                 $heldOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
                 $LASTEXITCODE | Should -Not -Be 0
                 Test-Path -LiteralPath $marker | Should -BeFalse
@@ -281,11 +303,13 @@ try {
                 $held.Dispose()
             }
 
-            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $capturedStartProcess.RequestBase64
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 = 'parent-sentinel'
             $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "child payload failed: $(($output | Out-String).Trim())" }
             $LASTEXITCODE | Should -Be 0
             ($output | Out-String) | Should -BeNullOrEmpty
             Get-Content -LiteralPath $marker -Raw | Should -Be 'executed-approved-payload'
+            $env:HG_P35_BOOTSTRAP_REQUEST_B64 | Should -Be 'parent-sentinel'
         } finally {
             $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $previousRequest
         }

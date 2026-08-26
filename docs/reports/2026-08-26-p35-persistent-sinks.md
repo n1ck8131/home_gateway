@@ -65,6 +65,23 @@ Rollback for this scanner ruling: delete `.gitleaksignore`, remove the same-line
 - `dd03945be6f4` — `fix: embed P3.5 bootstrap request`
 - `7bfa7708f211` — `fix: accept canonical config ACL rights`
 
+## DNS and Cisco overlap diagnostic follow-up
+
+The offline diagnostic implementation classifies `imported_dns` and `explicit_target` targets against `cisco_prefix` and `provider_endpoint` protected classes using redacted counts only. It returns one typed Plan JSON document with exit code `3`, no challenge fields, and no provider, network, adapter, config, or target values.
+
+| Command | Exit | Material result |
+|---|---:|---|
+| `& .\.tools\go\bin\go.exe test ./internal/system/windows -run 'Test(BuildCanaryPlan\|CanaryIsolationError)' -count=1` | 0 | Task 1 focused planner PASS; all selected tests passed |
+| `& .\.tools\go\bin\go.exe test ./internal/hgctlcmd -run 'Test(RunWindowsCanaryPlan\|CanaryBlockedPlanOutput\|RunCanaryLiveRejectsIsolation)' -count=1` | 0 | Task 2 focused CLI/live-boundary PASS; all selected tests passed |
+| `& .\.tools\go\bin\go.exe test ./internal/system/windows ./internal/hgctlcmd -count=1` | 0 | Final focused packages PASS: `internal/system/windows` 4.279s, `internal/hgctlcmd` 0.750s |
+| `powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\scripts\dev.ps1 -Command pester` | 0 | Windows PowerShell 5.1 Pester PASS: 70 passed, 0 failed, 0 skipped |
+| `pwsh.exe -NoLogo -NoProfile -NonInteractive -File .\scripts\dev.ps1 -Command pester` | 0 | PowerShell 7 Pester PASS: 70 passed, 0 failed, 0 skipped |
+| `pwsh.exe -NoLogo -NoProfile -NonInteractive -File .\scripts\dev.ps1 -Command verify` | 0 | Full repository gate PASS: all Go tests, Pester 70/0, `gosec` 0 issues, `govulncheck` no vulnerabilities, `gitleaks` no leaks, governance, smoke, and toolchain-lock gates |
+| `git diff --check` | 0 | No whitespace errors |
+| `ruff check .` / `ruff format --check .` | N/A | `RUFF_NOT_APPLICABLE_NO_PYTHON` |
+
+No live Apply, Confirm, recovery, network mutation, or current-profile retry was performed.
+
 ## Remaining live-field gates
 
 P3.5 is offline implementation complete only. The live safety matrix is now blocked by the imported-DNS/Cisco protected-prefix conflict and must not bypass that guard. A new approved prerequisite resolution and live envelope are required. `pc-core-ready` remains pending until direct/RedShield/Cisco, DNS, IPv4/IPv6, MTU, TCP/UDP/QUIC, tunnel-down, adapter-loss, process-crash, reboot/reconcile, emergency-disable and final journaled full-restore field evidence pass on the current Windows PC.

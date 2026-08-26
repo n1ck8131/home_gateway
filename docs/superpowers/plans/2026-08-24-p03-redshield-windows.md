@@ -1,6 +1,6 @@
 # P3 RedShield-backed Windows pilot implementation plan
 
-Status: Active — P3.1 through P3.5 complete for their offline/software scope; the authorized P3.5 live sub-batch is safely blocked at exact Plan by imported-DNS/Cisco-prefix isolation, and `pc-core-ready` remains open
+Status: Active — P3.1 through P3.5 complete for their offline/software scope; the P3.5 imported-DNS/Cisco overlap diagnostic gap is implemented offline, the authorized live sub-batch remains safely blocked at exact Plan pending its imported-DNS/Cisco prerequisite, and `pc-core-ready` remains open
 
 ## Goal
 
@@ -63,7 +63,7 @@ Exit: offline mutation tests and rollback fault injection pass. A live canary st
 
 ### P3.5 Current-PC safety matrix
 
-Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 Pester contracts, direct gitleaks and the full `verify` gate. The separately authorized bounded live sub-batch passed the fresh elevated sink preflight and protected bootstrap, then exact Plan failed closed before candidate/challenge creation because the imported DNS target overlaps a Cisco protected prefix. Apply/Confirm and recovery mutation were not invoked. Product `RestoreConfigAcl` passed, and terminal inventory/preflight proved no journal, lock, ownership registry, revision or owned network artifacts; RedShield and Cisco remained Up.
+Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 Pester contracts, direct gitleaks and the full `verify` gate. The imported-DNS/Cisco overlap diagnostic gap is now implemented offline with bounded redacted block classification; the imported-DNS/Cisco prerequisite and `pc-core-ready` remain open. The separately authorized bounded live sub-batch passed the fresh elevated sink preflight and protected bootstrap, then exact Plan failed closed before candidate/challenge creation because the imported DNS target overlaps a Cisco protected prefix. Apply/Confirm and recovery mutation were not invoked. Product `RestoreConfigAcl` passed, and terminal inventory/preflight proved no journal, lock, ownership registry, revision or owned network artifacts; RedShield and Cisco remained Up.
 
 - Run a bounded live canary, then direct/RedShield/Cisco, DNS, IPv4/IPv6, MTU, TCP/UDP/QUIC and tunnel-down assertions.
 - Test adapter loss, daemon crash, OS restart, recovery and emergency disable.

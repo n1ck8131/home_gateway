@@ -392,7 +392,13 @@ if ([string]::IsNullOrWhiteSpace(`$requestBase64) -or `$requestBase64 -cne `$exp
         try {
             [IO.File]::WriteAllText($payload, "$payloadText`r`n# tampered", [Text.UTF8Encoding]::new($false))
             $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $null
-            $tamperedOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+            $previousErrorActionPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $tamperedOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+            }
             $LASTEXITCODE | Should -Not -Be 0
             ($tamperedOutput | Out-String) | Should -Match 'payload SHA-256 differs'
             Test-Path -LiteralPath $marker | Should -BeFalse
@@ -401,7 +407,13 @@ if ([string]::IsNullOrWhiteSpace(`$requestBase64) -or `$requestBase64 -cne `$exp
             $held = [IO.File]::Open($payload, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
             try {
                 $env:HG_P35_BOOTSTRAP_REQUEST_B64 = 'parent-sentinel'
-                $heldOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+                $previousErrorActionPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    $heldOutput = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encodedCommand 2>&1
+                } finally {
+                    $ErrorActionPreference = $previousErrorActionPreference
+                }
                 $LASTEXITCODE | Should -Not -Be 0
                 Test-Path -LiteralPath $marker | Should -BeFalse
             } finally {
@@ -423,10 +435,16 @@ if ([string]::IsNullOrWhiteSpace(`$requestBase64) -or `$requestBase64 -cne `$exp
     It 'rejects direct driver execution before evaluating any requested path' {
         $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
         $windowsPowerShell = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:Driver `
-            -Action Install -ConfigPath 'C:\does-not-exist.conf' -ExpectedConfigSHA256 ('0' * 64) `
-            -ExpectedDriverSHA256 ('0' * 64) -ExpectedPayloadSHA256 ('0' * 64) `
-            -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' 2>&1
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:Driver `
+                -Action Install -ConfigPath 'C:\does-not-exist.conf' -ExpectedConfigSHA256 ('0' * 64) `
+                -ExpectedDriverSHA256 ('0' * 64) -ExpectedPayloadSHA256 ('0' * 64) `
+                -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' 2>&1
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
 
         $LASTEXITCODE | Should -Not -Be 0
         ($output | Out-String) | Should -Match 'independently pinned in-memory ScriptBlock'
@@ -436,7 +454,13 @@ if ([string]::IsNullOrWhiteSpace(`$requestBase64) -or `$requestBase64 -cne `$exp
         $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
         $windowsPowerShell = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
-        $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:Bootstrap 2>&1
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:Bootstrap 2>&1
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
 
         $LASTEXITCODE | Should -Not -Be 0
         ($output | Out-String) | Should -Match 'pinned EncodedCommand payload'

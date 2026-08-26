@@ -1,6 +1,6 @@
 # P3 RedShield-backed Windows pilot implementation plan
 
-Status: Active — P3.1 through P3.4 complete for their software scope; P3.5 next
+Status: Active — P3.1 through P3.5 complete for their offline/software scope; P3.5 live safety matrix and `pc-core-ready` pending separate authorization
 
 ## Goal
 
@@ -63,13 +63,13 @@ Exit: offline mutation tests and rollback fault injection pass. A live canary st
 
 ### P3.5 Current-PC safety matrix
 
-Status: next; every native mutation and the bounded live canary require separate confirmation.
+Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 read-only Pester contracts, direct gitleaks and the full `verify` gate. The safe read-only preflight shape is `ready=true`, `exit_code=0`, PktMon stopped/no filters, zero exact Active/Persistent collisions, qualified IPv4 default, qualified IPv6 no-route and both loopbacks ready. No live mutation or field acceptance was run.
 
 - Run a bounded live canary, then direct/RedShield/Cisco, DNS, IPv4/IPv6, MTU, TCP/UDP/QUIC and tunnel-down assertions.
 - Test adapter loss, daemon crash, OS restart, recovery and emergency disable.
 - Verify complete removal restores the pre-install network state.
 
-Exit: `pc-core-ready`; own VPS and Flint 2 are not required.
+Exit: `pc-core-ready`; own VPS and Flint 2 are not required. This exit remains open until the separately authorized live matrix and terminal `FullRestore` field evidence pass.
 
 ### P3.6 Minimal operator flow
 
@@ -78,4 +78,4 @@ Exit: `pc-core-ready`; own VPS and Flint 2 are not required.
 
 ## Validation batch
 
-Focused Go tests run during implementation. P3.4 closes with `scripts/dev.ps1 -Command verify` and offline P2/transaction regressions. Windows install/remove smoke and the live safety matrix belong to separately approved P3.5/P3.6 work. Real config contents must never appear in test or support artifacts.
+Focused Go tests run during implementation. P3.5 offline persistent-sink work closed with focused Go integration, exact Windows PowerShell 5.1 and PowerShell 7 Pester contracts, direct gitleaks and `scripts/dev.ps1 -Command verify`. Windows live canary, install/remove smoke and the live safety matrix belong to separately approved follow-up work. Real config contents must never appear in test or support artifacts. `RUFF_NOT_APPLICABLE_NO_PYTHON`.

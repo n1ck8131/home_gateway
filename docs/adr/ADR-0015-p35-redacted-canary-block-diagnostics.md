@@ -1,4 +1,4 @@
-# ADR-0014: P3.5 redacted canary block diagnostics
+# ADR-0015: P3.5 redacted canary block diagnostics
 
 Status: Accepted
 

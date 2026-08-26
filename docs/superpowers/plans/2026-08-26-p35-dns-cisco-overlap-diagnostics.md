@@ -584,7 +584,7 @@ git commit -m "fix: preserve P3.5 plan block exit code"
 ### Task 4: Architecture evidence and final repository gate
 
 **Files:**
-- Create: `docs/adr/ADR-0014-p35-redacted-canary-block-diagnostics.md`
+- Create: `docs/adr/ADR-0015-p35-redacted-canary-block-diagnostics.md`
 - Modify: `docs/ACCEPTANCE_MATRIX.md:48-50`
 - Modify: `docs/reports/2026-08-26-p35-persistent-sinks.md`
 - Modify: `docs/superpowers/plans/2026-08-24-p03-redshield-windows.md:3-81`
@@ -596,10 +596,10 @@ git commit -m "fix: preserve P3.5 plan block exit code"
 
 - [ ] **Step 1: Write the architecture record**
 
-Create ADR-0014 with this structure and exact safety conclusion:
+Create ADR-0015 with this structure and exact safety conclusion:
 
 ```markdown
-# ADR-0014: P3.5 redacted canary block diagnostics
+# ADR-0015: P3.5 redacted canary block diagnostics
 
 Status: Accepted
 
@@ -676,7 +676,7 @@ Expected: only explicit Task 4 documentation paths plus the known untracked `.p3
 - [ ] **Step 5: Commit Task 4**
 
 ```powershell
-git add -- docs/adr/ADR-0014-p35-redacted-canary-block-diagnostics.md docs/ACCEPTANCE_MATRIX.md docs/reports/2026-08-26-p35-persistent-sinks.md docs/superpowers/plans/2026-08-24-p03-redshield-windows.md
+git add -- docs/adr/ADR-0015-p35-redacted-canary-block-diagnostics.md docs/ACCEPTANCE_MATRIX.md docs/reports/2026-08-26-p35-persistent-sinks.md docs/superpowers/plans/2026-08-24-p03-redshield-windows.md
 git commit -m "docs: record P3.5 overlap diagnostic gate"
 ```
 

@@ -334,6 +334,14 @@ function Invoke-CheckedHgctl {
     if ($LASTEXITCODE -ne 0) { throw "hgctl failed with exit code $LASTEXITCODE" }
 }
 
+function Invoke-HgctlPlan {
+    param([Parameter(Mandatory = $true)][string]$Executable, [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments)
+    & $Executable @Arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 3) { exit 3 }
+    if ($exitCode -ne 0) { throw "hgctl failed with exit code $exitCode" }
+}
+
 if ([string]::IsNullOrWhiteSpace($StateRoot)) { $StateRoot = Get-ProductionStateRoot }
 $resolvedStateRoot = Resolve-CleanAbsolutePath -Path $StateRoot -Label 'state root'
 
@@ -349,7 +357,7 @@ if ($Action -eq 'Plan') {
     $arguments = @('windows', 'canary', 'plan', '--config', $resolvedConfig, '--config-sha256', $ExpectedConfigSHA256, '--state-root', $resolvedStateRoot, '--revision', $Revision)
     foreach ($address in @($Target)) { $arguments += @('--target', $address) }
     $arguments += @('--dns-namespace', $DnsNamespace, '--json')
-    Invoke-CheckedHgctl -Executable $resolvedHgctl -Arguments $arguments
+    Invoke-HgctlPlan -Executable $resolvedHgctl -Arguments $arguments
     return
 }
 

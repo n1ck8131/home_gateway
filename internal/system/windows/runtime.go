@@ -964,14 +964,14 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 			return errors.New("VPN-class route does not use one active stable RedShield adapter")
 		}
 		if redShieldGUID != "" && redShieldGUID != guid {
-			return errors.New("VPN-class routes span multiple RedShield adapters")
+			return errors.New("vpn-class routes span multiple RedShield adapters")
 		}
 		redShieldGUID = guid
 	}
 	failClosedAdapters := make(map[string]Adapter)
 	for guid, adapter := range adapters {
 		if _, err := canonicalGUID(guid); err != nil || adapter.Index <= 0 {
-			return errors.New("Windows adapter snapshot contains an unstable identity")
+			return errors.New("windows adapter snapshot contains an unstable identity")
 		}
 		switch adapter.Kind {
 		case AdapterRedShield:
@@ -985,7 +985,7 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 		}
 	}
 	if len(failClosedAdapters) == 0 || len(failClosedAdapters) > maxCanaryFallbackAdapters {
-		return errors.New("Windows fail-closed adapter set is empty or exceeds the bounded limit")
+		return errors.New("windows fail-closed adapter set is empty or exceeds the bounded limit")
 	}
 	protected, err := protectedPrefixes(snapshot, adapters)
 	if err != nil {

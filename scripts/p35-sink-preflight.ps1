@@ -191,7 +191,12 @@ function Get-PktmonComponentState {
     if ($null -eq $parsed) {
         return [ordered]@{ recognized = $false; monitorable_count = 0 }
     }
-    $roots = if ($parsed -is [Array]) { @($parsed) } else { @($parsed) }
+    $roots = @()
+    if ($parsed -is [Array]) {
+        $roots = @($parsed)
+    } else {
+        $roots = @($parsed)
+    }
     if ($roots.Count -eq 0 -or $roots.Count -gt 1024) {
         return [ordered]@{ recognized = $false; monitorable_count = 0 }
     }

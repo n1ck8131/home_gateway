@@ -1425,18 +1425,6 @@ func cloneMutationSnapshot(snapshot MutationSnapshot) MutationSnapshot {
 	return clone
 }
 
-func assertOrdered(t *testing.T, calls []string, want ...string) {
-	t.Helper()
-	position := -1
-	for _, call := range want {
-		next := slices.Index(calls[position+1:], call)
-		if next < 0 {
-			t.Fatalf("missing ordered call %q in %v", call, calls)
-		}
-		position += next + 1
-	}
-}
-
 func assertOrderedClasses(t *testing.T, calls []string, want ...string) {
 	t.Helper()
 	classes := make([]string, 0, len(calls))

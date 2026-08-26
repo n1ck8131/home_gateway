@@ -121,25 +121,25 @@ func collectCanaryPlan(ctx context.Context, command canaryPlanCommand, dependenc
 	}
 	if validator != nil {
 		if err := validator(command.stateRoot); err != nil {
-			return windowssystem.CanaryPlan{}, 3, fmt.Errorf("Windows canary state root blocked: %w", err)
+			return windowssystem.CanaryPlan{}, 3, fmt.Errorf("windows canary state root blocked: %w", err)
 		}
 	}
 	if dependencies.validateConfigSource != nil {
 		if err := dependencies.validateConfigSource(command.configPath); err != nil {
-			return windowssystem.CanaryPlan{}, 3, fmt.Errorf("RedShield config source blocked: %w", err)
+			return windowssystem.CanaryPlan{}, 3, fmt.Errorf("redshield config source blocked: %w", err)
 		}
 	}
 	inspection, err := dependencies.backend.Inspect(ctx, tunnel.ConfigSource{Path: command.configPath, SHA256: command.configSHA256})
 	if err != nil {
-		return windowssystem.CanaryPlan{}, 1, fmt.Errorf("RedShield config inspection failed: %w", err)
+		return windowssystem.CanaryPlan{}, 1, fmt.Errorf("redshield config inspection failed: %w", err)
 	}
 	inventory, err := dependencies.collect.Collect(ctx)
 	if err != nil {
-		return windowssystem.CanaryPlan{}, 1, fmt.Errorf("Windows inventory failed: %w", err)
+		return windowssystem.CanaryPlan{}, 1, fmt.Errorf("windows inventory failed: %w", err)
 	}
 	resolved, err := dependencies.resolve(ctx, inspection.Metadata.Endpoint.Host)
 	if err != nil {
-		return windowssystem.CanaryPlan{}, 1, errors.New("RedShield endpoint qualification failed")
+		return windowssystem.CanaryPlan{}, 1, errors.New("redshield endpoint qualification failed")
 	}
 	inventory.EndpointAddresses = resolved
 	plan, err := windowssystem.BuildCanaryPlan(inventory, inspection, windowssystem.CanaryRequest{
@@ -148,7 +148,7 @@ func collectCanaryPlan(ctx context.Context, command canaryPlanCommand, dependenc
 		DNSNamespace:    command.dnsNamespace,
 	})
 	if err != nil {
-		return windowssystem.CanaryPlan{}, 3, fmt.Errorf("Windows canary plan blocked: %w", err)
+		return windowssystem.CanaryPlan{}, 3, fmt.Errorf("windows canary plan blocked: %w", err)
 	}
 	plan.ConfigSHA256 = command.configSHA256
 	return plan, 0, nil

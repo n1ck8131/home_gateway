@@ -136,6 +136,7 @@ func readNativeBootIdentifier() (string, error) {
 	var returned uint32
 	if err := xwindows.NtQuerySystemInformation(
 		int32(xwindows.SystemBootEnvironmentInformation),
+		// #nosec G103 -- fixed Windows API output buffer for boot environment metadata.
 		unsafe.Pointer(&information),
 		uint32(unsafe.Sizeof(information)),
 		&returned,
@@ -265,6 +266,7 @@ func validateNativePrivilegedDACL(dacl *xwindows.ACL) error {
 	if dacl == nil {
 		return errors.New("protected Windows mutation directory has no restrictive DACL")
 	}
+	// #nosec G103 -- DACL memory is returned by the Windows security descriptor API and size-checked before iteration.
 	header := (*nativeACLHeader)(unsafe.Pointer(dacl))
 	if header.ACECount > 4096 || header.Size < uint16(unsafe.Sizeof(nativeACLHeader{})) {
 		return errors.New("protected Windows mutation directory DACL is invalid")
@@ -281,6 +283,7 @@ func validateNativePrivilegedDACL(dacl *xwindows.ACL) error {
 		default:
 			return errors.New("protected Windows mutation directory DACL uses an unsupported ACE type")
 		}
+		// #nosec G103 -- ACE SID pointer is provided by GetAce and validated before use.
 		sid := (*xwindows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !sid.IsValid() {
 			return errors.New("protected Windows mutation directory DACL contains an invalid SID")
@@ -348,7 +351,14 @@ func (nativeExecMutationRunner) Run(ctx context.Context, spec nativeMutationComm
 		_ = command.Wait()
 		return nil, errors.New("assign trusted native Windows mutation job")
 	}
-	if err := resumeSuspendedProcess(uint32(command.Process.Pid)); err != nil {
+	pid := command.Process.Pid
+	if pid <= 0 || uint64(pid) > maxWindowsMetric {
+		_ = xwindows.TerminateJobObject(job, 1)
+		_ = command.Wait()
+		return nil, errors.New("trusted native Windows mutation command has an invalid process identifier")
+	}
+	// #nosec G115 -- pid is checked to be positive and within uint32 range before conversion.
+	if err := resumeSuspendedProcess(uint32(pid)); err != nil {
 		_ = xwindows.TerminateJobObject(job, 1)
 		_ = command.Wait()
 		return nil, errors.New("resume trusted native Windows mutation command")
@@ -372,6 +382,7 @@ func newKillOnCloseJob() (xwindows.Handle, error) {
 	if _, err := xwindows.SetInformationJobObject(
 		job,
 		xwindows.JobObjectExtendedLimitInformation,
+		// #nosec G103 -- fixed Windows API input buffer for kill-on-close job limits.
 		uintptr(unsafe.Pointer(&information)),
 		uint32(unsafe.Sizeof(information)),
 	); err != nil {
@@ -1335,6 +1346,7 @@ func replaceNativeRegistryFile(path string, data []byte) error {
 	if err := os.Remove(temporary); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	// #nosec G304 -- temporary registry path is derived from the validated protected native registry path and opened O_EXCL.
 	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
@@ -2246,7 +2258,12 @@ func parseNativeSinkRecord(record rawNativeSinkRecord) (SinkRoute, string, error
 	prefix, prefixErr := netip.ParsePrefix(strings.TrimSpace(*routeRecord.Destination))
 	nextHop, nextHopErr := netip.ParseAddr(strings.TrimSpace(*routeRecord.NextHop))
 	store := strings.TrimSpace(*routeRecord.PolicyStore)
-	route := SinkRoute{Family: family, Destination: prefix.Masked().String(), NextHop: nextHop.Unmap().String(), InterfaceIndex: *routeRecord.InterfaceIndex, Metric: uint32(*routeRecord.RouteMetric), PolicyStore: SinkPolicyStore, Protocol: strings.TrimSpace(*routeRecord.Protocol), JournalOwned: true}
+	if *routeRecord.RouteMetric > maxWindowsMetric {
+		return SinkRoute{}, "", errors.New("native Windows sink snapshot value is invalid")
+	}
+	// #nosec G115 -- route metric is range-checked against maxWindowsMetric before conversion.
+	routeMetric := uint32(*routeRecord.RouteMetric)
+	route := SinkRoute{Family: family, Destination: prefix.Masked().String(), NextHop: nextHop.Unmap().String(), InterfaceIndex: *routeRecord.InterfaceIndex, Metric: routeMetric, PolicyStore: SinkPolicyStore, Protocol: strings.TrimSpace(*routeRecord.Protocol), JournalOwned: true}
 	if familyErr != nil || prefixErr != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() || addressFamily(prefix.Addr()) != family || prefix.Bits() != prefix.Addr().BitLen() || nextHopErr != nil || nextHop.Zone() != "" || nextHop.Is4In6() || addressFamily(nextHop) != family || !nextHop.IsUnspecified() || route.InterfaceIndex != LoopbackInterfaceIndex || *routeRecord.CompartmentID != 1 || route.Metric != ReservedSinkMetric || route.Protocol != RouteProtocol || *routeRecord.State < routeStateAlive || *routeRecord.State > 2 || store != SinkPolicyStore && store != RoutePolicyStore {
 		return SinkRoute{}, "", errors.New("native Windows sink snapshot value is invalid")
 	}

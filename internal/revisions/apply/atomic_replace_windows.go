@@ -72,8 +72,11 @@ func atomicReplaceFile(source, destination string) error {
 		return err
 	}
 	result, _, callErr := replaceFileW.Call(
+		// #nosec G103 -- UTF-16 pointers are allocated by x/sys/windows and kept alive after the syscall.
 		uintptr(unsafe.Pointer(replaced)),
+		// #nosec G103 -- UTF-16 pointers are allocated by x/sys/windows and kept alive after the syscall.
 		uintptr(unsafe.Pointer(replacement)),
+		// #nosec G103 -- UTF-16 pointers are allocated by x/sys/windows and kept alive after the syscall.
 		uintptr(unsafe.Pointer(backupPath)),
 		0,
 		0,

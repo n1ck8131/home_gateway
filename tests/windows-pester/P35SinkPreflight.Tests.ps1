@@ -1,6 +1,40 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if ((Get-Module Pester).Version -lt [version]'4.0.0') {
+    function Should {
+        param(
+            [Parameter(ValueFromPipeline = $true)]$ActualValue,
+            [Parameter(ValueFromRemainingArguments = $true)][object[]]$Assertion
+        )
+
+        process {
+            if ($Assertion.Count -eq 0) { throw 'missing assertion operator' }
+            if ($Assertion[0] -ceq '-Be') {
+                if ($ActualValue -ne $Assertion[1]) { throw "Expected <$($Assertion[1])> but got <$ActualValue>" }
+                return
+            }
+            if ($Assertion[0] -ceq '-BeTrue') {
+                if (-not [bool]$ActualValue) { throw "Expected <true> but got <$ActualValue>" }
+                return
+            }
+            if ($Assertion[0] -ceq '-BeFalse') {
+                if ([bool]$ActualValue) { throw "Expected <false> but got <$ActualValue>" }
+                return
+            }
+            if ($Assertion[0] -ceq '-Match') {
+                if ([string]$ActualValue -notmatch [string]$Assertion[1]) { throw "Expected value to match <$($Assertion[1])>" }
+                return
+            }
+            if ($Assertion.Count -ge 2 -and $Assertion[0] -ceq '-Not' -and $Assertion[1] -ceq '-Match') {
+                if ([string]$ActualValue -match [string]$Assertion[2]) { throw "Expected value not to match <$($Assertion[2])>" }
+                return
+            }
+            throw "unsupported assertion operator '$($Assertion -join ' ')'"
+        }
+    }
+}
+
 Describe 'P3.5 sink qualification preflight' {
     BeforeAll {
         $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path

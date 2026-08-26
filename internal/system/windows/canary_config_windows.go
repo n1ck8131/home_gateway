@@ -46,6 +46,7 @@ func ValidateProductionCanaryInstalledConfigSource(path, expectedSHA256 string) 
 	if err := validateInstalledCanaryConfigSecurityDescriptor(descriptor); err != nil {
 		return errors.New("installed P3.5 config pin ACL differs")
 	}
+	// #nosec G304 -- pin path is derived from the validated production canary state root and fixed filename.
 	data, err := os.ReadFile(pin)
 	if err != nil || len(data) != 64 || subtle.ConstantTimeCompare(data, []byte(expectedSHA256)) != 1 {
 		return errors.New("installed P3.5 config pin differs")
@@ -97,6 +98,7 @@ func validateInstalledCanaryConfigSecurityDescriptor(descriptor *xwindows.SECURI
 	if err != nil || dacl == nil {
 		return errors.New("installed P3.5 config has no restrictive DACL")
 	}
+	// #nosec G103 -- DACL memory is returned by the Windows security descriptor API and size-checked before iteration.
 	header := (*nativeACLHeader)(unsafe.Pointer(dacl))
 	if header.ACECount > 4096 || header.Size < uint16(unsafe.Sizeof(nativeACLHeader{})) {
 		return errors.New("installed P3.5 config DACL is invalid")
@@ -114,6 +116,7 @@ func validateInstalledCanaryConfigSecurityDescriptor(descriptor *xwindows.SECURI
 		default:
 			return errors.New("installed P3.5 config DACL uses an unsupported ACE type")
 		}
+		// #nosec G103 -- ACE SID pointer is provided by GetAce and validated before use.
 		sid := (*xwindows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !sid.IsValid() || !nativePrivilegedSID(sid) {
 			return errors.New("installed P3.5 config grants non-privileged access")
@@ -144,6 +147,7 @@ func validateCanaryConfigSecurityDescriptor(descriptor *xwindows.SECURITY_DESCRI
 	if err != nil || dacl == nil {
 		return errors.New("P3.5 config source has no restrictive DACL")
 	}
+	// #nosec G103 -- DACL memory is returned by the Windows security descriptor API and size-checked before iteration.
 	header := (*nativeACLHeader)(unsafe.Pointer(dacl))
 	if header.ACECount > 4096 || header.Size < uint16(unsafe.Sizeof(nativeACLHeader{})) {
 		return errors.New("P3.5 config source DACL is invalid")
@@ -161,6 +165,7 @@ func validateCanaryConfigSecurityDescriptor(descriptor *xwindows.SECURITY_DESCRI
 		default:
 			return errors.New("P3.5 config source DACL uses an unsupported ACE type")
 		}
+		// #nosec G103 -- ACE SID pointer is provided by GetAce and validated before use.
 		sid := (*xwindows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !sid.IsValid() || !canaryConfigSIDAllowed(sid, currentSID) {
 			return errors.New("P3.5 config source grants an unauthorized principal")

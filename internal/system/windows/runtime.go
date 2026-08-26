@@ -580,7 +580,7 @@ func (runtime *Runtime) EmergencyDisable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !foreignStateEqual(snapshot, after) || countOwnedRoutes(after.Routes, RouteRoleVPNClass) != 0 || countOwnedFirewall(after.Firewall) != 0 || countOwnedNRPT(after.NRPT) != 0 || !slices.Equal(ownedRouteKeys(snapshot.Routes, RouteRoleEndpointDirect), ownedRouteKeys(after.Routes, RouteRoleEndpointDirect)) {
+	if !foreignStateEqual(snapshot, after) || countOwnedRoutes(after.Routes, RouteRoleVPNClass) != 0 || countOwnedFirewall(after.Firewall) != 0 || countOwnedNRPT(after.NRPT) != 0 || !slices.Equal(ownedRouteKeys(snapshot.Routes, RouteRoleEndpointDirect), ownedRouteKeys(after.Routes, RouteRoleEndpointDirect)) || !slices.Equal(ownedSinkStateKeys(snapshot.Sinks), ownedSinkStateKeys(after.Sinks)) {
 		return errors.New("emergency disable post-check failed")
 	}
 	return nil
@@ -1876,6 +1876,17 @@ func ownedRouteKeys(values []RouteState, role string) []string {
 	keys := make([]string, 0)
 	for _, value := range values {
 		if value.Owner == ArtifactOwner && value.Role == role {
+			keys = append(keys, jsonKey(value))
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func ownedSinkStateKeys(values []SinkState) []string {
+	keys := make([]string, 0, len(values))
+	for _, value := range values {
+		if value.Owner == ArtifactOwner {
 			keys = append(keys, jsonKey(value))
 		}
 	}

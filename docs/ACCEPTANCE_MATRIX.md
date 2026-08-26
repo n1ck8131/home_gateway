@@ -45,7 +45,7 @@ P2 is complete for its software and emulated OpenWrt scope at commit `150ffffb13
 | Provider handshake and egress health | field-not-run | P3.5 live-canary gate; an interface being present is not treated as provider or handshake proof |
 | Offline Windows route/firewall/DNS mutation, commit-confirm and recovery | automated-passed | P3.4 strict artifacts and exact ownership passed activation/reload/post-check/prune fault injection, timeout/crash rollback, missing-manifest recovery, durable disable/restore retry and full `verify` on 2026-08-25 |
 | Persistent fail-closed sink routes and redacted recovery evidence | offline-implemented | P3.5 native sink route artifacts/backend and CLI/watchdog behavior are implemented with fake-runner tests only: plan/status expose sink counts and readiness booleans, recovery exposes retain/remove counts, emergency disable retains sinks and full restore removes them last |
-| Native Windows apply and bounded live canary | field-not-run | P3.5/P3.6 gates; production `MutationBackend` and operator integration are absent, and any live mutation requires separate confirmation |
+| Native Windows apply and bounded live canary | field-not-run | P3.5/P3.6 field gates remain separate authorization: native backend, CLI dispatch and watchdog contracts are offline-implemented, but live mutation, provider handshake/egress matrix and `pc-core-ready` have not run |
 
 P3.1 through P3.4 are complete for their software scope, and the P3.5 persistent-sink offline/native implementation boundary is implemented. The fresh combined preflight with the prior external config is not run because that file is currently absent; no live Windows apply, field acceptance or `pc-core-ready` claim is made.
 

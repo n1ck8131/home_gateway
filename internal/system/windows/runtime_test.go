@@ -1186,6 +1186,47 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 	assertManagedEmpty(t, backend.state)
 }
 
+func TestWindowsEmergencyDisableFailsWhenRetainedSinkDisappears(t *testing.T) {
+	backend := newSafeBackend()
+	root := filepath.Join(t.TempDir(), "runtime")
+	tx := transactionForRoot(root, backend, &mutableClock{now: time.Unix(100, 0).UTC()})
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	retained := cloneMutationSnapshot(backend.state).Sinks
+	backend.calls = nil
+	removedDuringPostCheck := false
+	backend.snapshotHook = func(backend *fakeMutationBackend, _ int) {
+		if removedDuringPostCheck || !slices.Contains(backend.calls, "reload") {
+			return
+		}
+		removedDuringPostCheck = true
+		backend.state.Sinks = slices.DeleteFunc(backend.state.Sinks, func(value SinkState) bool {
+			return value.Owner == ArtifactOwner
+		})
+	}
+	if err := tx.EmergencyDisable(context.Background()); err == nil {
+		t.Fatal("emergency disable succeeded after a retained owned sink disappeared")
+	}
+	journal, err := tx.Journal.Load()
+	if err != nil || journal.State != apply.StateDisabling {
+		t.Fatalf("disable intent after retained sink loss = %#v, %v", journal, err)
+	}
+	backend.snapshotHook = nil
+	backend.state.Sinks = retained
+	restarted := transactionForRoot(root, backend, &mutableClock{now: time.Unix(101, 0).UTC()})
+	if err := restarted.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	journal, _ = restarted.Journal.Load()
+	if journal.State != apply.StateDisabled {
+		t.Fatalf("retry after retained sink restore state = %#v", journal)
+	}
+}
+
 func TestWindowsFullRestoreRemovesSinksAfterAllPolicyState(t *testing.T) {
 	backend := newSafeBackend()
 	root := filepath.Join(t.TempDir(), "runtime")

@@ -119,19 +119,26 @@ func TestCanaryIsolationErrorValidatesRedactedBlocks(t *testing.T) {
 		t.Fatalf("canonical blocks = %#v, valid = %v", got, ok)
 	}
 
-	invalid := [][]CanaryIsolationBlock{
-		nil,
-		append(append([]CanaryIsolationBlock(nil), wantOrder...), wantOrder[0]),
-		{{TargetSource: "unknown", ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 1}},
-		{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 0}},
-		{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: maxManagedRoutes + 1}},
-		{wantOrder[1], wantOrder[0]},
-		{wantOrder[0], wantOrder[0]},
+	invalid := []struct {
+		name   string
+		blocks []CanaryIsolationBlock
+	}{
+		{name: "empty", blocks: nil},
+		{name: "too many buckets", blocks: append(append([]CanaryIsolationBlock(nil), wantOrder...), wantOrder[0])},
+		{name: "unknown target source", blocks: []CanaryIsolationBlock{{TargetSource: "unknown", ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 1}}},
+		{name: "unknown protected class", blocks: []CanaryIsolationBlock{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: "unknown", Family: FamilyIPv4, AffectedTargetCount: 1}}},
+		{name: "unknown family", blocks: []CanaryIsolationBlock{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: "unknown", AffectedTargetCount: 1}}},
+		{name: "zero count", blocks: []CanaryIsolationBlock{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 0}}},
+		{name: "count exceeds limit", blocks: []CanaryIsolationBlock{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: maxManagedRoutes + 1}}},
+		{name: "non-canonical order", blocks: []CanaryIsolationBlock{wantOrder[1], wantOrder[0]}},
+		{name: "duplicate rank", blocks: []CanaryIsolationBlock{wantOrder[0], wantOrder[0]}},
 	}
-	for _, blocks := range invalid {
-		if got, ok := (&CanaryIsolationError{Blocks: blocks}).RedactedBlocks(); ok || got != nil {
-			t.Fatalf("invalid blocks = %#v, valid = %v", got, ok)
-		}
+	for _, test := range invalid {
+		t.Run(test.name, func(t *testing.T) {
+			if got, ok := (&CanaryIsolationError{Blocks: test.blocks}).RedactedBlocks(); ok || got != nil {
+				t.Fatalf("invalid blocks = %#v, valid = %v", got, ok)
+			}
+		})
 	}
 }
 

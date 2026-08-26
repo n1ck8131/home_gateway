@@ -376,12 +376,26 @@ func TestRunWindowsCanaryPlanReturnsRedactedIsolationJSON(t *testing.T) {
 		TargetSource: windowssystem.CanaryTargetSourceImportedDNS, ProtectedClass: windowssystem.CanaryProtectedClassCiscoPrefix,
 		Family: windowssystem.FamilyIPv4, AffectedTargetCount: 1,
 	}}
-	if output.ReadyForLiveGate || output.LiveMutationPerformed || output.RouteCount != 0 || output.SinkCount != 0 || output.FirewallRuleCount != 0 || output.DNSRuleCount != 0 || output.BlockCode != windowssystem.CanaryIsolationBlockCode || !slices.Equal(output.BlockDetails, wantBlocks) {
+	if output.ReadyForLiveGate || output.LiveMutationPerformed || output.RouteCount != 0 || output.SinkCount != 0 || output.PersistentSinkReady || output.FirewallRuleCount != 0 || output.DNSRuleCount != 0 || output.BlockCode != windowssystem.CanaryIsolationBlockCode || !slices.Equal(output.BlockDetails, wantBlocks) {
 		t.Fatalf("blocked plan output = %#v", output)
 	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
 		t.Fatal(err)
+	}
+	wantBlockedKeys := []string{
+		"mode", "revision", "ready_for_live_gate", "live_mutation_performed",
+		"route_count", "sink_count", "persistent_sink_ready", "firewall_rule_count",
+		"dns_rule_count", "block_code", "block_details",
+	}
+	gotBlockedKeys := make([]string, 0, len(fields))
+	for key := range fields {
+		gotBlockedKeys = append(gotBlockedKeys, key)
+	}
+	sort.Strings(gotBlockedKeys)
+	sort.Strings(wantBlockedKeys)
+	if !slices.Equal(gotBlockedKeys, wantBlockedKeys) {
+		t.Fatalf("blocked output keys = %v, want %v", gotBlockedKeys, wantBlockedKeys)
 	}
 	for _, key := range []string{"confirmation_challenge", "confirm_timeout_seconds"} {
 		if _, found := fields[key]; found {

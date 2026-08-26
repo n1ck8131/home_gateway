@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	recoveryRollbackToken = "P35-ROLLBACK"
-	recoveryRecoverToken  = "P35-RECOVER"
-	recoveryDisableToken  = "P35-EMERGENCY-DISABLE"
-	recoveryRestoreToken  = "P35-FULL-RESTORE"
-	recoveryExpireToken   = "P35-EXPIRE"
+	recoveryRollbackToken = "P35-ROLLBACK"          // #nosec G101 -- stable operator confirmation token, not a credential.
+	recoveryRecoverToken  = "P35-RECOVER"           // #nosec G101 -- stable operator confirmation token, not a credential.
+	recoveryDisableToken  = "P35-EMERGENCY-DISABLE" // #nosec G101 -- stable operator confirmation token, not a credential; gitleaks:allow public operator confirmation token, not a credential.
+	recoveryRestoreToken  = "P35-FULL-RESTORE"      // #nosec G101 -- stable operator confirmation token, not a credential.
+	recoveryExpireToken   = "P35-EXPIRE"            // #nosec G101 -- stable operator confirmation token, not a credential.
 )
 
 type canaryLiveCommand struct {

@@ -1,8 +1,8 @@
 # Diagnose P3.5 DNS and Cisco overlap without bypassing protection
 
-Status: Draft for owner review
+Status: Approved for implementation
 
-Decision authority: the owner approved the hard-rejection plus redacted-diagnostics direction on 2026-08-26. Implementation still requires approval of this written specification.
+Decision authority: the owner approved the hard-rejection plus redacted-diagnostics direction and this written specification on 2026-08-26.
 
 Content type: Conceptual design
 

@@ -2,6 +2,7 @@ package windows
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,129 @@ import (
 
 	"github.com/vsevo/home-gateway/internal/tunnel"
 )
+
+func TestBuildCanaryPlanClassifiesIsolationBlocks(t *testing.T) {
+	tests := []struct {
+		name    string
+		request CanaryRequest
+		mutate  func(*Inventory, *tunnel.Inspection)
+		want    []CanaryIsolationBlock
+	}{
+		{
+			name:    "explicit provider ipv4",
+			request: CanaryRequest{Revision: "p35-canary-isolation", TargetAddresses: []string{"203.0.113.5"}, DNSNamespace: CanaryDNSNamespace},
+			want: []CanaryIsolationBlock{{
+				TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 1,
+			}},
+		},
+		{
+			name:    "imported DNS provider ipv6",
+			request: CanaryRequest{Revision: "p35-canary-isolation", TargetAddresses: []string{"198.51.100.10"}, DNSNamespace: CanaryDNSNamespace},
+			mutate: func(_ *Inventory, inspection *tunnel.Inspection) {
+				inspection.Metadata.DNS = []string{"2001:db8:ffff::5"}
+			},
+			want: []CanaryIsolationBlock{{
+				TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv6, AffectedTargetCount: 1,
+			}},
+		},
+		{
+			name:    "explicit Cisco ipv6",
+			request: CanaryRequest{Revision: "p35-canary-isolation", TargetAddresses: []string{"2001:db8:abcd::53"}, DNSNamespace: CanaryDNSNamespace},
+			mutate: func(inventory *Inventory, _ *tunnel.Inspection) {
+				inventory.Routes = append(inventory.Routes, Route{Family: FamilyIPv6, Destination: "2001:db8:abcd::/48", NextHop: "::", InterfaceIndex: 31, InterfaceGUID: testCiscoGUID, Metric: 1})
+			},
+			want: []CanaryIsolationBlock{{
+				TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv6, AffectedTargetCount: 1,
+			}},
+		},
+		{
+			name:    "imported DNS Cisco ipv4",
+			request: CanaryRequest{Revision: "p35-canary-isolation", TargetAddresses: []string{"198.51.100.10"}, DNSNamespace: CanaryDNSNamespace},
+			mutate: func(_ *Inventory, inspection *tunnel.Inspection) {
+				inspection.Metadata.DNS = []string{"10.50.0.53"}
+			},
+			want: []CanaryIsolationBlock{{
+				TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv4, AffectedTargetCount: 1,
+			}},
+		},
+		{
+			name:    "same target from both sources",
+			request: CanaryRequest{Revision: "p35-canary-isolation", TargetAddresses: []string{"198.51.100.10"}, DNSNamespace: CanaryDNSNamespace},
+			mutate: func(inventory *Inventory, inspection *tunnel.Inspection) {
+				inventory.Routes = append(inventory.Routes, Route{Family: FamilyIPv4, Destination: "198.51.100.0/24", NextHop: "0.0.0.0", InterfaceIndex: 31, InterfaceGUID: testCiscoGUID, Metric: 1})
+				inspection.Metadata.DNS = []string{"198.51.100.10"}
+			},
+			want: []CanaryIsolationBlock{
+				{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv4, AffectedTargetCount: 1},
+				{TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv4, AffectedTargetCount: 1},
+			},
+		},
+		{
+			name:    "multiple Cisco routes count one target",
+			request: CanaryRequest{Revision: "p35-canary-isolation", TargetAddresses: []string{"198.51.100.10"}, DNSNamespace: CanaryDNSNamespace},
+			mutate: func(inventory *Inventory, _ *tunnel.Inspection) {
+				inventory.Routes = append(inventory.Routes,
+					Route{Family: FamilyIPv4, Destination: "198.51.100.0/24", NextHop: "0.0.0.0", InterfaceIndex: 31, InterfaceGUID: testCiscoGUID, Metric: 1},
+					Route{Family: FamilyIPv4, Destination: "198.51.100.10/32", NextHop: "0.0.0.0", InterfaceIndex: 31, InterfaceGUID: testCiscoGUID, Metric: 1},
+				)
+			},
+			want: []CanaryIsolationBlock{{
+				TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv4, AffectedTargetCount: 1,
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inventory, inspection := qualifiedCanaryInput()
+			if test.mutate != nil {
+				test.mutate(&inventory, &inspection)
+			}
+			_, err := BuildCanaryPlan(inventory, inspection, test.request)
+			var blocked *CanaryIsolationError
+			if !errors.As(err, &blocked) {
+				t.Fatalf("error type = %T, want *CanaryIsolationError", err)
+			}
+			blocks, ok := blocked.RedactedBlocks()
+			if !ok || !slices.Equal(blocks, test.want) {
+				t.Fatalf("blocks = %#v, valid = %v", blocks, ok)
+			}
+			if blocked.Error() != "canary target isolation failed" {
+				t.Fatalf("unsafe error text = %q", blocked.Error())
+			}
+		})
+	}
+}
+
+func TestCanaryIsolationErrorValidatesRedactedBlocks(t *testing.T) {
+	wantOrder := []CanaryIsolationBlock{
+		{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv6, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv4, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv6, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv6, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv4, AffectedTargetCount: 1},
+		{TargetSource: CanaryTargetSourceImportedDNS, ProtectedClass: CanaryProtectedClassCiscoPrefix, Family: FamilyIPv6, AffectedTargetCount: 1},
+	}
+	if got, ok := (&CanaryIsolationError{Blocks: wantOrder}).RedactedBlocks(); !ok || !slices.Equal(got, wantOrder) {
+		t.Fatalf("canonical blocks = %#v, valid = %v", got, ok)
+	}
+
+	invalid := [][]CanaryIsolationBlock{
+		nil,
+		append(append([]CanaryIsolationBlock(nil), wantOrder...), wantOrder[0]),
+		{{TargetSource: "unknown", ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 1}},
+		{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: 0}},
+		{{TargetSource: CanaryTargetSourceExplicit, ProtectedClass: CanaryProtectedClassProviderEndpoint, Family: FamilyIPv4, AffectedTargetCount: maxManagedRoutes + 1}},
+		{wantOrder[1], wantOrder[0]},
+		{wantOrder[0], wantOrder[0]},
+	}
+	for _, blocks := range invalid {
+		if got, ok := (&CanaryIsolationError{Blocks: blocks}).RedactedBlocks(); ok || got != nil {
+			t.Fatalf("invalid blocks = %#v, valid = %v", got, ok)
+		}
+	}
+}
 
 func TestBuildCanaryPlanProducesBoundedDualStackArtifacts(t *testing.T) {
 	inventory, inspection := qualifiedCanaryInput()

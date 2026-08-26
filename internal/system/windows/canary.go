@@ -18,7 +18,87 @@ const (
 	maxCanaryTargets          = 8
 	maxCanaryFallbackAdapters = maxAdapters
 	CanaryDNSNamespace        = ".one.one.one.one"
+	CanaryIsolationBlockCode  = "canary_target_isolation"
 )
+
+type CanaryTargetSource string
+
+const (
+	CanaryTargetSourceExplicit    CanaryTargetSource = "explicit_target"
+	CanaryTargetSourceImportedDNS CanaryTargetSource = "imported_dns"
+)
+
+type CanaryProtectedClass string
+
+const (
+	CanaryProtectedClassProviderEndpoint CanaryProtectedClass = "provider_endpoint"
+	CanaryProtectedClassCiscoPrefix      CanaryProtectedClass = "cisco_prefix"
+)
+
+type CanaryIsolationBlock struct {
+	TargetSource        CanaryTargetSource   `json:"target_source"`
+	ProtectedClass      CanaryProtectedClass `json:"protected_class"`
+	Family              AddressFamily        `json:"family"`
+	AffectedTargetCount int                  `json:"affected_target_count"`
+}
+
+type CanaryIsolationError struct {
+	Blocks []CanaryIsolationBlock
+}
+
+func (*CanaryIsolationError) Error() string {
+	return "canary target isolation failed"
+}
+
+func (err *CanaryIsolationError) RedactedBlocks() ([]CanaryIsolationBlock, bool) {
+	if err == nil || len(err.Blocks) == 0 || len(err.Blocks) > maxCanaryTargets {
+		return nil, false
+	}
+	previousRank := -1
+	for _, block := range err.Blocks {
+		rank, ok := canaryIsolationBlockRank(block)
+		if !ok || block.AffectedTargetCount < 1 || block.AffectedTargetCount > maxManagedRoutes || rank <= previousRank {
+			return nil, false
+		}
+		previousRank = rank
+	}
+	return append([]CanaryIsolationBlock(nil), err.Blocks...), true
+}
+
+func canaryIsolationBlockRank(block CanaryIsolationBlock) (int, bool) {
+	var sourceRank, protectedRank, familyRank int
+	switch block.TargetSource {
+	case CanaryTargetSourceExplicit:
+		sourceRank = 0
+	case CanaryTargetSourceImportedDNS:
+		sourceRank = 1
+	default:
+		return 0, false
+	}
+	switch block.ProtectedClass {
+	case CanaryProtectedClassProviderEndpoint:
+		protectedRank = 0
+	case CanaryProtectedClassCiscoPrefix:
+		protectedRank = 1
+	default:
+		return 0, false
+	}
+	switch block.Family {
+	case FamilyIPv4:
+		familyRank = 0
+	case FamilyIPv6:
+		familyRank = 1
+	default:
+		return 0, false
+	}
+	return sourceRank*4 + protectedRank*2 + familyRank, true
+}
+
+type canaryTarget struct {
+	prefix      netip.Prefix
+	explicit    bool
+	importedDNS bool
+}
 
 // CanaryRequest describes a deliberately narrow P3.5 field candidate. Target
 // addresses are restricted to exact public host routes so a diagnostic canary
@@ -115,7 +195,8 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 		return CanaryPlan{}, errors.New("canary fail-closed rule set exceeds the bounded limit")
 	}
 	firewall := make([]FirewallRule, 0, len(targets)*len(failClosedAdapters))
-	for _, prefix := range targets {
+	for _, target := range targets {
+		prefix := target.prefix
 		family := addressFamily(prefix.Addr())
 		nextHop := "0.0.0.0"
 		if family == FamilyIPv6 {
@@ -206,7 +287,7 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 	}
 	targetStrings := make([]string, 0, len(targets))
 	for _, target := range targets {
-		targetStrings = append(targetStrings, target.String())
+		targetStrings = append(targetStrings, target.prefix.String())
 	}
 	return CanaryPlan{
 		Candidate: apply.Candidate{
@@ -225,15 +306,16 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 	}, nil
 }
 
-func validateCanaryTargetIsolation(targets []netip.Prefix, assertions []DirectRouteAssertion, inventory Inventory) error {
-	protected := make([]netip.Prefix, 0, len(assertions)+len(inventory.Routes))
+func validateCanaryTargetIsolation(targets []canaryTarget, assertions []DirectRouteAssertion, inventory Inventory) error {
+	providerProtected := make([]netip.Prefix, 0, len(assertions))
 	for _, assertion := range assertions {
 		prefix, err := netip.ParsePrefix(assertion.Destination)
 		if err != nil {
 			return errors.New("canary provider endpoint assertion is invalid")
 		}
-		protected = append(protected, prefix)
+		providerProtected = append(providerProtected, prefix)
 	}
+	ciscoProtected := make([]netip.Prefix, 0, len(inventory.Routes))
 	adapters := normalizedAdapters(inventory.Adapters)
 	for _, route := range inventory.Routes {
 		prefix, err := netip.ParsePrefix(route.Destination)
@@ -241,12 +323,46 @@ func validateCanaryTargetIsolation(targets []netip.Prefix, assertions []DirectRo
 		if err != nil || prefix.Bits() == 0 || !found || adapter.Kind != AdapterCisco {
 			continue
 		}
-		protected = append(protected, prefix)
+		ciscoProtected = append(ciscoProtected, prefix)
 	}
+	type bucketKey struct {
+		source    CanaryTargetSource
+		protected CanaryProtectedClass
+		family    AddressFamily
+	}
+	counts := make(map[bucketKey]int)
 	for _, target := range targets {
-		if overlapsAny(target, protected) {
-			return errors.New("canary target overlaps a provider endpoint or Cisco protected prefix")
+		family := addressFamily(target.prefix.Addr())
+		for _, match := range []struct {
+			class   CanaryProtectedClass
+			matches bool
+		}{
+			{class: CanaryProtectedClassProviderEndpoint, matches: overlapsAny(target.prefix, providerProtected)},
+			{class: CanaryProtectedClassCiscoPrefix, matches: overlapsAny(target.prefix, ciscoProtected)},
+		} {
+			if !match.matches {
+				continue
+			}
+			if target.explicit {
+				counts[bucketKey{source: CanaryTargetSourceExplicit, protected: match.class, family: family}]++
+			}
+			if target.importedDNS {
+				counts[bucketKey{source: CanaryTargetSourceImportedDNS, protected: match.class, family: family}]++
+			}
 		}
+	}
+	blocks := make([]CanaryIsolationBlock, 0, len(counts))
+	for _, source := range []CanaryTargetSource{CanaryTargetSourceExplicit, CanaryTargetSourceImportedDNS} {
+		for _, protected := range []CanaryProtectedClass{CanaryProtectedClassProviderEndpoint, CanaryProtectedClassCiscoPrefix} {
+			for _, family := range []AddressFamily{FamilyIPv4, FamilyIPv6} {
+				if count := counts[bucketKey{source: source, protected: protected, family: family}]; count > 0 {
+					blocks = append(blocks, CanaryIsolationBlock{TargetSource: source, ProtectedClass: protected, Family: family, AffectedTargetCount: count})
+				}
+			}
+		}
+	}
+	if len(blocks) > 0 {
+		return &CanaryIsolationError{Blocks: blocks}
 	}
 	return nil
 }
@@ -358,9 +474,9 @@ func canaryEndpointAssertions(inventory Inventory, inspection tunnel.Inspection)
 	return assertions, qualified, nil
 }
 
-func canaryTargetPrefixes(values []string, metadata tunnel.Metadata) ([]netip.Prefix, error) {
+func canaryTargetPrefixes(values []string, metadata tunnel.Metadata) ([]canaryTarget, error) {
 	seen := make(map[netip.Prefix]struct{}, len(values))
-	targets := make([]netip.Prefix, 0, len(values))
+	targets := make([]canaryTarget, 0, len(values))
 	for _, value := range values {
 		address, err := netip.ParseAddr(value)
 		if err != nil || address.Zone() != "" || address.Is4In6() {
@@ -378,16 +494,18 @@ func canaryTargetPrefixes(values []string, metadata tunnel.Metadata) ([]netip.Pr
 			return nil, errors.New("canary target addresses contain a duplicate")
 		}
 		seen[prefix] = struct{}{}
-		targets = append(targets, prefix)
+		targets = append(targets, canaryTarget{prefix: prefix, explicit: true})
 	}
-	sort.Slice(targets, func(left, right int) bool { return targets[left].Addr().Compare(targets[right].Addr()) < 0 })
+	sort.Slice(targets, func(left, right int) bool {
+		return targets[left].prefix.Addr().Compare(targets[right].prefix.Addr()) < 0
+	})
 	return targets, nil
 }
 
-func addCanaryDNSTargets(targets []netip.Prefix, metadata tunnel.Metadata) ([]netip.Prefix, []string, error) {
-	seen := make(map[netip.Prefix]struct{}, len(targets)+len(metadata.DNS))
-	for _, target := range targets {
-		seen[target] = struct{}{}
+func addCanaryDNSTargets(targets []canaryTarget, metadata tunnel.Metadata) ([]canaryTarget, []string, error) {
+	seen := make(map[netip.Prefix]int, len(targets)+len(metadata.DNS))
+	for index, target := range targets {
+		seen[target.prefix] = index
 	}
 	servers := make([]string, 0, len(metadata.DNS))
 	for _, value := range metadata.DNS {
@@ -403,13 +521,20 @@ func addCanaryDNSTargets(targets []netip.Prefix, metadata tunnel.Metadata) ([]ne
 			return nil, nil, errors.New("imported DNS server family is not covered by the config")
 		}
 		prefix := netip.PrefixFrom(address, address.BitLen())
-		if _, duplicate := seen[prefix]; !duplicate {
-			seen[prefix] = struct{}{}
-			targets = append(targets, prefix)
+		if index, duplicate := seen[prefix]; duplicate {
+			targets[index].importedDNS = true
+		} else {
+			seen[prefix] = len(targets)
+			targets = append(targets, canaryTarget{prefix: prefix, importedDNS: true})
 		}
 		servers = append(servers, address.String())
 	}
-	sort.Slice(targets, func(left, right int) bool { return targets[left].Addr().Compare(targets[right].Addr()) < 0 })
+	if len(targets) > maxManagedRoutes {
+		return nil, nil, errors.New("canary target set exceeds the bounded route limit")
+	}
+	sort.Slice(targets, func(left, right int) bool {
+		return targets[left].prefix.Addr().Compare(targets[right].prefix.Addr()) < 0
+	})
 	sort.Strings(servers)
 	servers = slices.Compact(servers)
 	return targets, servers, nil

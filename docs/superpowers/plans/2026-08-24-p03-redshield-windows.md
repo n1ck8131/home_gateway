@@ -1,6 +1,6 @@
 # P3 RedShield-backed Windows pilot implementation plan
 
-Status: Active — P3.1 through P3.5 complete for their offline/software scope; P3.5 live safety matrix and `pc-core-ready` pending separate authorization
+Status: Active — P3.1 through P3.5 complete for their offline/software scope; the authorized P3.5 live sub-batch is safely blocked at exact Plan by imported-DNS/Cisco-prefix isolation, and `pc-core-ready` remains open
 
 ## Goal
 
@@ -63,13 +63,13 @@ Exit: offline mutation tests and rollback fault injection pass. A live canary st
 
 ### P3.5 Current-PC safety matrix
 
-Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 read-only Pester contracts, direct gitleaks and the full `verify` gate. The safe read-only preflight shape is `ready=true`, `exit_code=0`, PktMon stopped/no filters, zero exact Active/Persistent collisions, qualified IPv4 default, qualified IPv6 no-route and both loopbacks ready. No live mutation or field acceptance was run.
+Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 Pester contracts, direct gitleaks and the full `verify` gate. The separately authorized bounded live sub-batch passed the fresh elevated sink preflight and protected bootstrap, then exact Plan failed closed before candidate/challenge creation because the imported DNS target overlaps a Cisco protected prefix. Apply/Confirm and recovery mutation were not invoked. Product `RestoreConfigAcl` passed, and terminal inventory/preflight proved no journal, lock, ownership registry, revision or owned network artifacts; RedShield and Cisco remained Up.
 
 - Run a bounded live canary, then direct/RedShield/Cisco, DNS, IPv4/IPv6, MTU, TCP/UDP/QUIC and tunnel-down assertions.
 - Test adapter loss, daemon crash, OS restart, recovery and emergency disable.
 - Verify complete removal restores the pre-install network state.
 
-Exit: `pc-core-ready`; own VPS and Flint 2 are not required. This exit remains open until the separately authorized live matrix and terminal `FullRestore` field evidence pass.
+Exit: `pc-core-ready`; own VPS and Flint 2 are not required. This exit remains open until the DNS/Cisco isolation prerequisite is resolved under a new approved envelope, the live matrix runs, and terminal `FullRestore` field evidence passes after an actual journaled canary.
 
 ### P3.6 Minimal operator flow
 
@@ -78,4 +78,4 @@ Exit: `pc-core-ready`; own VPS and Flint 2 are not required. This exit remains o
 
 ## Validation batch
 
-Focused Go tests run during implementation. P3.5 offline persistent-sink work closed with focused Go integration, exact Windows PowerShell 5.1 and PowerShell 7 Pester contracts, direct gitleaks and `scripts/dev.ps1 -Command verify`. Windows live canary, install/remove smoke and the live safety matrix belong to separately approved follow-up work. Real config contents must never appear in test or support artifacts. `RUFF_NOT_APPLICABLE_NO_PYTHON`.
+Focused Go tests run during implementation. P3.5 offline persistent-sink work closed with focused Go integration, exact Windows PowerShell 5.1 and PowerShell 7 Pester contracts, direct gitleaks and `scripts/dev.ps1 -Command verify`. The bounded live precheck/bootstrap attempt is recorded as a safe pre-mutation block, not live acceptance. The remaining matrix requires a separately approved resolution that does not bypass Cisco protection. Real config contents must never appear in test or support artifacts. `RUFF_NOT_APPLICABLE_NO_PYTHON`.

@@ -24,17 +24,38 @@ type canaryPlanCommand struct {
 var lowercaseSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type canaryPlanOutput struct {
-	Mode                  string `json:"mode"`
-	Revision              string `json:"revision"`
-	ReadyForLiveGate      bool   `json:"ready_for_live_gate"`
-	LiveMutationPerformed bool   `json:"live_mutation_performed"`
-	RouteCount            int    `json:"route_count"`
-	SinkCount             int    `json:"sink_count"`
-	PersistentSinkReady   bool   `json:"persistent_sink_ready"`
-	FirewallRuleCount     int    `json:"firewall_rule_count"`
-	DNSRuleCount          int    `json:"dns_rule_count"`
-	ConfirmationChallenge string `json:"confirmation_challenge"`
-	ConfirmTimeoutSeconds int    `json:"confirm_timeout_seconds"`
+	Mode                  string                               `json:"mode"`
+	Revision              string                               `json:"revision"`
+	ReadyForLiveGate      bool                                 `json:"ready_for_live_gate"`
+	LiveMutationPerformed bool                                 `json:"live_mutation_performed"`
+	RouteCount            int                                  `json:"route_count"`
+	SinkCount             int                                  `json:"sink_count"`
+	PersistentSinkReady   bool                                 `json:"persistent_sink_ready"`
+	FirewallRuleCount     int                                  `json:"firewall_rule_count"`
+	DNSRuleCount          int                                  `json:"dns_rule_count"`
+	ConfirmationChallenge string                               `json:"confirmation_challenge,omitempty"`
+	ConfirmTimeoutSeconds int                                  `json:"confirm_timeout_seconds,omitempty"`
+	BlockCode             string                               `json:"block_code,omitempty"`
+	BlockDetails          []windowssystem.CanaryIsolationBlock `json:"block_details,omitempty"`
+}
+
+func canaryBlockedPlanOutput(command canaryPlanCommand, err error) (canaryPlanOutput, bool) {
+	var blocked *windowssystem.CanaryIsolationError
+	if !errors.As(err, &blocked) {
+		return canaryPlanOutput{}, false
+	}
+	details, ok := blocked.RedactedBlocks()
+	if !ok {
+		return canaryPlanOutput{}, false
+	}
+	return canaryPlanOutput{
+		Mode:                  "plan",
+		Revision:              command.revision,
+		ReadyForLiveGate:      false,
+		LiveMutationPerformed: false,
+		BlockCode:             windowssystem.CanaryIsolationBlockCode,
+		BlockDetails:          details,
+	}, true
 }
 
 func parseCanaryPlanCommand(args []string) (canaryPlanCommand, bool) {
@@ -94,6 +115,12 @@ func runCanaryPlan(command canaryPlanCommand, stdout, stderr io.Writer, dependen
 	defer cancel()
 	plan, errorCode, err := collectCanaryPlan(ctx, command, dependencies)
 	if err != nil {
+		if output, ok := canaryBlockedPlanOutput(command, err); ok {
+			if code := encodeJSON(stdout, stderr, output); code != 0 {
+				return code
+			}
+			return 3
+		}
 		fmt.Fprintln(stderr, err)
 		return errorCode
 	}

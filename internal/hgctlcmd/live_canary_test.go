@@ -184,6 +184,68 @@ func (backend *commandMutationBackend) RemoveNRPT(_ context.Context, state windo
 
 func (*commandMutationBackend) Reload(context.Context) error { return nil }
 
+func TestRunCanaryLiveRejectsIsolationBeforeMutation(t *testing.T) {
+	inspection, inventory := commandCanaryInputs()
+	inventory.Adapters = append(inventory.Adapters, windowssystem.Adapter{
+		Name: "Cisco", Index: 31, InterfaceGUID: commandCiscoGUID,
+		Kind: windowssystem.AdapterCisco, Up: true,
+	})
+	inventory.Routes = append(inventory.Routes, windowssystem.Route{
+		Family: windowssystem.FamilyIPv4, Destination: "10.20.30.0/24",
+		NextHop: "0.0.0.0", InterfaceIndex: 31,
+		InterfaceGUID: commandCiscoGUID, Metric: 1,
+	})
+	for _, action := range []string{"apply", "confirm"} {
+		t.Run(action, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "state")
+			mutationCalls := 0
+			deps := dependencies{
+				backend: staticInspectionBackend{inspection: inspection},
+				collect: staticCollector{inventory: inventory},
+				resolve: func(context.Context, string) ([]string, error) {
+					return []string{"203.0.113.5"}, nil
+				},
+				validateStateRoot:    func(string) error { return nil },
+				validateConfigSource: func(string) error { return nil },
+				newMutation: func(string) (windowssystem.MutationBackend, error) {
+					mutationCalls++
+					return nil, errors.New("must not construct mutation backend")
+				},
+			}
+			command := canaryLiveCommand{
+				action: action,
+				plan: canaryPlanCommand{
+					configPath:   `C:\private-provider-source.conf`,
+					configSHA256: strings.Repeat("a", 64),
+					stateRoot:    root,
+					revision:     "p35-canary-blocked",
+					targets:      []string{"198.51.100.10"},
+					dnsNamespace: windowssystem.CanaryDNSNamespace,
+				},
+				liveConfirm: "P35-APPLY-DOES-NOT-EXIST",
+			}
+			var stdout, stderr bytes.Buffer
+			if code := runCanaryLive(command, &stdout, &stderr, deps); code != 3 {
+				t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+			}
+			if mutationCalls != 0 || stdout.Len() != 0 {
+				t.Fatalf("mutation calls = %d, stdout = %q", mutationCalls, stdout.String())
+			}
+			if stderr.String() != "windows canary plan blocked: canary target isolation failed\n" {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatalf("blocked live command created state root: %v", err)
+			}
+			for _, forbidden := range []string{command.plan.configPath, command.plan.configSHA256, root, "10.20.30.1", "10.20.30.0/24", "203.0.113.5", "198.51.100.10", "Cisco", commandCiscoGUID} {
+				if strings.Contains(stderr.String(), forbidden) {
+					t.Fatalf("blocked live stderr leaked %q", forbidden)
+				}
+			}
+		})
+	}
+}
+
 func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state")
 	inspection, inventory := commandCanaryInputs()

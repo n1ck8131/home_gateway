@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -33,6 +35,7 @@ type staticInspectionBackend struct {
 const (
 	commandPhysicalGUID  = "11111111-1111-4111-8111-111111111111"
 	commandRedShieldGUID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+	commandCiscoGUID     = "22222222-2222-4222-8222-222222222222"
 )
 
 func (backend staticInspectionBackend) Inspect(context.Context, tunnel.ConfigSource) (tunnel.Inspection, error) {
@@ -278,6 +281,28 @@ func TestRunWindowsCanaryPlanIsReadOnlyRedactedAndChallengeBound(t *testing.T) {
 	if !output.ReadyForLiveGate || output.LiveMutationPerformed || output.RouteCount != 2 || output.FirewallRuleCount != 2 || output.DNSRuleCount != 1 || !strings.HasPrefix(output.ConfirmationChallenge, "P35-APPLY-") {
 		t.Fatalf("unexpected canary plan output: %#v", output)
 	}
+	var successFields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &successFields); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := []string{
+		"mode", "revision", "ready_for_live_gate",
+		"live_mutation_performed", "route_count", "sink_count",
+		"persistent_sink_ready", "firewall_rule_count", "dns_rule_count",
+		"confirmation_challenge", "confirm_timeout_seconds",
+	}
+	gotKeys := make([]string, 0, len(successFields))
+	for key := range successFields {
+		gotKeys = append(gotKeys, key)
+	}
+	sort.Strings(gotKeys)
+	sort.Strings(wantKeys)
+	if !slices.Equal(gotKeys, wantKeys) {
+		t.Fatalf("success output keys = %v, want %v", gotKeys, wantKeys)
+	}
+	if output.BlockCode != "" || output.BlockDetails != nil {
+		t.Fatalf("success output contains block data: %#v", output)
+	}
 
 	args[8] = filepath.Join(t.TempDir(), "other-state")
 	stdout.Reset()
@@ -305,6 +330,86 @@ func TestRunWindowsCanaryPlanIsReadOnlyRedactedAndChallengeBound(t *testing.T) {
 	}
 	if digestRebound.ConfirmationChallenge == output.ConfirmationChallenge {
 		t.Fatal("confirmation challenge was not rebound to the config SHA-256")
+	}
+}
+
+func TestRunWindowsCanaryPlanReturnsRedactedIsolationJSON(t *testing.T) {
+	inspection, inventory := commandCanaryInputs()
+	inventory.Adapters = append(inventory.Adapters, windowssystem.Adapter{
+		Name: "Cisco", Index: 31, InterfaceGUID: commandCiscoGUID,
+		Kind: windowssystem.AdapterCisco, Up: true,
+	})
+	inventory.Routes = append(inventory.Routes, windowssystem.Route{
+		Family: windowssystem.FamilyIPv4, Destination: "10.20.30.0/24",
+		NextHop: "0.0.0.0", InterfaceIndex: 31,
+		InterfaceGUID: commandCiscoGUID, Metric: 1,
+	})
+	configPath := `C:\private-provider-source.conf`
+	stateRoot := filepath.Join(t.TempDir(), "state")
+	configSHA256 := strings.Repeat("a", 64)
+	command := canaryPlanCommand{
+		configPath: configPath, configSHA256: configSHA256, stateRoot: stateRoot,
+		revision: "p35-canary-blocked", targets: []string{"198.51.100.10"},
+		dnsNamespace: windowssystem.CanaryDNSNamespace,
+	}
+	deps := dependencies{
+		backend: staticInspectionBackend{inspection: inspection},
+		collect: staticCollector{inventory: inventory},
+		resolve: func(context.Context, string) ([]string, error) {
+			return []string{"203.0.113.5"}, nil
+		},
+		validateStateRoot:    func(string) error { return nil },
+		validateConfigSource: func(string) error { return nil },
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runCanaryPlan(command, &stdout, &stderr, deps); code != 3 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	var output canaryPlanOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		t.Fatal(err)
+	}
+	wantBlocks := []windowssystem.CanaryIsolationBlock{{
+		TargetSource: windowssystem.CanaryTargetSourceImportedDNS, ProtectedClass: windowssystem.CanaryProtectedClassCiscoPrefix,
+		Family: windowssystem.FamilyIPv4, AffectedTargetCount: 1,
+	}}
+	if output.ReadyForLiveGate || output.LiveMutationPerformed || output.RouteCount != 0 || output.SinkCount != 0 || output.FirewallRuleCount != 0 || output.DNSRuleCount != 0 || output.BlockCode != windowssystem.CanaryIsolationBlockCode || !slices.Equal(output.BlockDetails, wantBlocks) {
+		t.Fatalf("blocked plan output = %#v", output)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stdout.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"confirmation_challenge", "confirm_timeout_seconds"} {
+		if _, found := fields[key]; found {
+			t.Fatalf("blocked plan unexpectedly includes %q", key)
+		}
+	}
+	for _, forbidden := range []string{configPath, stateRoot, configSHA256, "10.20.30.1", "10.20.30.0/24", "203.0.113.5", "198.51.100.10", "Cisco", commandCiscoGUID} {
+		if strings.Contains(stdout.String(), forbidden) || strings.Contains(stderr.String(), forbidden) {
+			t.Fatalf("blocked plan leaked %q", forbidden)
+		}
+	}
+}
+
+func TestCanaryBlockedPlanOutputRejectsInvalidTypedData(t *testing.T) {
+	command := canaryPlanCommand{revision: "p35-canary-blocked"}
+	for _, blocked := range []*windowssystem.CanaryIsolationError{
+		{Blocks: []windowssystem.CanaryIsolationBlock{{
+			TargetSource: "unknown", ProtectedClass: windowssystem.CanaryProtectedClassCiscoPrefix,
+			Family: windowssystem.FamilyIPv4, AffectedTargetCount: 1,
+		}}},
+		{Blocks: []windowssystem.CanaryIsolationBlock{{
+			TargetSource: windowssystem.CanaryTargetSourceImportedDNS, ProtectedClass: windowssystem.CanaryProtectedClassCiscoPrefix,
+			Family: windowssystem.FamilyIPv4, AffectedTargetCount: 0,
+		}}},
+	} {
+		if _, ok := canaryBlockedPlanOutput(command, fmt.Errorf("wrapped: %w", blocked)); ok {
+			t.Fatal("invalid typed block unexpectedly serialized")
+		}
 	}
 }
 

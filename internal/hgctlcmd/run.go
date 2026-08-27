@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/vsevo/home-gateway/internal/providers/redshield"
 	"github.com/vsevo/home-gateway/internal/providers/selfhosted"
 	"github.com/vsevo/home-gateway/internal/revisions/apply"
 	windowssystem "github.com/vsevo/home-gateway/internal/system/windows"
@@ -60,7 +61,11 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	}
 
 	ctx := context.Background()
-	inspection, err := dependencies.backend.Inspect(ctx, tunnel.ConfigSource{Path: configPath})
+	backend := dependencies.backend
+	if command == "redshield-inspect" {
+		backend = redshield.Backend{}
+	}
+	inspection, err := backend.Inspect(ctx, tunnel.ConfigSource{Path: configPath})
 	if err != nil {
 		fmt.Fprintln(stderr, "Tunnel config inspection failed:", err)
 		return 1

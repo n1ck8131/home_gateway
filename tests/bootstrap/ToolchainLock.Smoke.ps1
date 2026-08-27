@@ -5,12 +5,13 @@ if (-not (Test-Path -LiteralPath $lockPath)) {
     throw 'versions lock missing'
 }
 $raw = Get-Content -LiteralPath $lockPath -Raw
-if ($raw -match '(?i)latest') {
-    throw 'versions lock contains latest'
-}
 $lock = $raw | ConvertFrom-Json
 if ($lock.schema_version -ne 1) {
     throw 'unexpected lock schema'
+}
+$latestCount = ([regex]::Matches($raw, '(?i)latest')).Count
+if ($lock.amnezia_self_hosted_p3.server_image_pin_state -ne 'observed-after-install' -or $lock.amnezia_self_hosted_p3.server_image_note -notmatch 'amneziavpn/amneziawg-go:latest' -or $latestCount -ne 1) {
+    throw 'versions lock contains an unapproved mutable image reference'
 }
 $requiredArtifacts = @(
     'go_windows_amd64', 'go_linux_amd64',
@@ -60,6 +61,12 @@ foreach ($property in $lock.artifacts.PSObject.Properties) {
     }
     $expectedChecksums += "$($artifact.sha256)  $filename"
 }
+$client = $lock.amnezia_self_hosted_p3.client
+if ($client.sha256 -notmatch '^[0-9a-f]{64}$' -or $client.windows_x64_url -notmatch '^https://') {
+    throw 'invalid self-hosted P3 client artifact'
+}
+$clientFilename = ([Uri]$client.windows_x64_url).Segments[-1]
+$expectedChecksums += "$($client.sha256)  $clientFilename"
 $checksumPath = Join-Path $root 'manifest/checksums.lock'
 if (-not (Test-Path -LiteralPath $checksumPath)) {
     throw 'checksums lock missing'

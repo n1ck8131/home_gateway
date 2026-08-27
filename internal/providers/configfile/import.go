@@ -44,7 +44,7 @@ type keyMaterial struct {
 }
 
 func (keyMaterial) String() string   { return "[REDACTED]" }
-func (keyMaterial) GoString() string { return "redshield.keyMaterial{[REDACTED]}" }
+func (keyMaterial) GoString() string { return "configfile.keyMaterial{[REDACTED]}" }
 func (keyMaterial) Format(state fmt.State, _ rune) {
 	_, _ = io.WriteString(state, "[REDACTED]")
 }
@@ -400,7 +400,7 @@ func validateFields(fields parsedFields) (Config, error) {
 		if value == "" {
 			continue
 		}
-		parsed, parseErr := strconv.ParseUint(value, 10, 16)
+		parsed, parseErr := parseCanonicalUint(value, 16)
 		if parseErr != nil {
 			return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
 		}
@@ -433,6 +433,9 @@ func validateFields(fields parsedFields) (Config, error) {
 	for _, name := range []string{"RandomTrailers", "DisableCookies"} {
 		if value := fields.interfaceValues[name]; value != "" && value != "true" && value != "false" {
 			return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
+		}
+		if fields.interfaceValues[name] != "" {
+			awgParameters[name] = 1
 		}
 	}
 	if value := fields.interfaceValues["HeaderProtectionKey"]; value != "" {
@@ -579,7 +582,7 @@ func parseOptionalInteger(value string, minimum, maximum uint64) (uint16, error)
 	if value == "" {
 		return 0, nil
 	}
-	parsed, err := strconv.ParseUint(value, 10, 16)
+	parsed, err := parseCanonicalUint(value, 16)
 	if err != nil || parsed < minimum || parsed > maximum {
 		return 0, errors.New("integer out of range")
 	}
@@ -594,12 +597,12 @@ func parseOptionalRange(value string, minimum, maximum uint64) (uint16, error) {
 	if len(pieces) > 2 {
 		return 0, errors.New("invalid range")
 	}
-	first, err := strconv.ParseUint(pieces[0], 10, 16)
+	first, err := parseCanonicalUint(pieces[0], 16)
 	if err != nil || first < minimum || first > maximum {
 		return 0, errors.New("invalid range")
 	}
 	if len(pieces) == 2 {
-		last, err := strconv.ParseUint(pieces[1], 10, 16)
+		last, err := parseCanonicalUint(pieces[1], 16)
 		if err != nil || last < first || last > maximum {
 			return 0, errors.New("invalid range")
 		}
@@ -611,17 +614,29 @@ func parseOptionalRange32(value string) (uint32, error) {
 	if len(pieces) > 2 {
 		return 0, errors.New("invalid range")
 	}
-	first, err := strconv.ParseUint(pieces[0], 10, 32)
+	first, err := parseCanonicalUint(pieces[0], 32)
 	if err != nil {
 		return 0, err
 	}
 	if len(pieces) == 2 {
-		last, err := strconv.ParseUint(pieces[1], 10, 32)
+		last, err := parseCanonicalUint(pieces[1], 32)
 		if err != nil || last < first {
 			return 0, errors.New("invalid range")
 		}
 	}
 	return uint32(first), nil
+}
+
+func parseCanonicalUint(value string, bits int) (uint64, error) {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return 0, errors.New("non-canonical integer")
+	}
+	for index := 0; index < len(value); index++ {
+		if value[index] < '0' || value[index] > '9' {
+			return 0, errors.New("non-canonical integer")
+		}
+	}
+	return strconv.ParseUint(value, 10, bits)
 }
 func validTaggedJunk(value string) bool {
 	if len(value) == 0 || len(value) > 4096 {

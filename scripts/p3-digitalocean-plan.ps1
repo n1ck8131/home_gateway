@@ -4,7 +4,11 @@ param([Parameter(Mandatory)][string]$PublicKeyPath)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $root 'deploy/digitalocean/p3-droplet.v1.json'
-if (-not [IO.Path]::IsPathFullyQualified($PublicKeyPath) -or [IO.Path]::GetExtension($PublicKeyPath) -cne '.pub') { throw 'public key must be an absolute local .pub path' }
+function Test-LocalDriveAbsolutePath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path -notmatch '^[A-Za-z]:[\\/]' -or $Path.StartsWith('\\') -or $Path.StartsWith('//') -or $Path.StartsWith('\\?\') -or $Path.StartsWith('\\.\') -or $Path.StartsWith('\??\')) { return $false }
+    return $true
+}
+if (-not (Test-LocalDriveAbsolutePath $PublicKeyPath) -or [IO.Path]::GetExtension($PublicKeyPath) -cne '.pub') { throw 'public key must be an absolute local .pub path' }
 if (-not (Test-Path -LiteralPath $PublicKeyPath -PathType Leaf)) { throw 'public key file is unavailable' }
 $key = Get-Content -LiteralPath $PublicKeyPath -Raw -Encoding UTF8
 if ($key -match '(?i)BEGIN (OPENSSH|RSA|EC|PRIVATE) KEY|private|password|token') { throw 'private-key material is forbidden' }

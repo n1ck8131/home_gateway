@@ -49,6 +49,34 @@ func TestImportFileRejectsUnsafeOrInvalidAWG31Values(t *testing.T) {
 
 func TestConfigfileOwnsParserWithoutProviderDependency(t *testing.T) {
 	data, err := os.ReadFile("import.go")
-	if err != nil { t.Fatal(err) }
-	if strings.Contains(string(data), "providers/redshield") { t.Fatal("configfile parser depends on the compatibility provider") }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "providers/redshield") {
+		t.Fatal("configfile parser depends on the compatibility provider")
+	}
+}
+
+func TestCanonicalAWGIntegerRangesRejectAmbiguousSyntax(t *testing.T) {
+	for _, value := range []string{"+1", "01", "1-02", "1-", "-1", "2-1", "4294967296"} {
+		if _, err := parseOptionalRange(value, 0, 65535); err == nil {
+			t.Fatalf("16-bit value accepted: %q", value)
+		}
+		if _, err := parseOptionalRange32(value); err == nil {
+			t.Fatalf("32-bit value accepted: %q", value)
+		}
+	}
+	if _, err := parseOptionalRange("65536", 0, 65535); err == nil {
+		t.Fatal("16-bit overflow accepted")
+	}
+	for _, value := range []string{"0", "65535", "1-2"} {
+		if _, err := parseOptionalRange(value, 0, 65535); err != nil {
+			t.Fatalf("16-bit value rejected: %q: %v", value, err)
+		}
+	}
+	for _, value := range []string{"0", "4294967295", "1-2"} {
+		if _, err := parseOptionalRange32(value); err != nil {
+			t.Fatalf("32-bit value rejected: %q: %v", value, err)
+		}
+	}
 }

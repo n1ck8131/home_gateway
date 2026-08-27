@@ -60,9 +60,9 @@ type Config struct {
 	privateKey    keyMaterial
 	peerPublicKey keyMaterial
 	presharedKey  *keyMaterial
-	listenPort    uint16
-	keepalive     uint16
-	awgParameters map[string]uint32
+	listenPort    uint64
+	keepalive     uint64
+	awgParameters map[string]uint64
 }
 
 func (Config) String() string   { return "configfile.Config{key_material:[REDACTED]}" }
@@ -382,7 +382,7 @@ func validateFields(fields parsedFields) (Config, error) {
 		return Config{}, errors.New("config contains an invalid endpoint")
 	}
 
-	mtu, err := parseOptionalInteger(fields.interfaceValues["MTU"], 576, 65535)
+	mtu, err := parseOptionalMTU(fields.interfaceValues["MTU"])
 	if err != nil {
 		return Config{}, errors.New("config contains an invalid MTU")
 	}
@@ -395,7 +395,7 @@ func validateFields(fields parsedFields) (Config, error) {
 		return Config{}, errors.New("config contains an invalid keepalive")
 	}
 
-	awgParameters := make(map[string]uint32)
+	awgParameters := make(map[string]uint64)
 	for _, name := range []string{"Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4"} {
 		value := fields.interfaceValues[name]
 		if value == "" {
@@ -405,7 +405,7 @@ func validateFields(fields parsedFields) (Config, error) {
 		if parseErr != nil {
 			return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
 		}
-		awgParameters[name] = uint32(parsed)
+		awgParameters[name] = parsed
 	}
 	for _, name := range []string{"H1", "H2", "H3", "H4"} {
 		if value := fields.interfaceValues[name]; value != "" {
@@ -464,7 +464,7 @@ func validateFields(fields parsedFields) (Config, error) {
 			InterfaceAddresses: addresses,
 			AllowedIPs:         allowedIPs,
 			DNS:                dns,
-			MTU:                int(mtu),
+			MTU:                mtu,
 			IPv4FullTunnel:     ipv4Full,
 			IPv6FullTunnel:     ipv6Full,
 		},
@@ -579,7 +579,21 @@ func isAlphaNumeric(character byte) bool {
 	return character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
 }
 
-func parseOptionalInteger(value string, minimum, maximum uint64) (uint16, error) {
+func parseOptionalMTU(value string) (int, error) {
+	if value == "" {
+		return 0, nil
+	}
+	if !isCanonicalDecimal(value) {
+		return 0, errors.New("integer is not canonical")
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 576 || parsed > 65535 {
+		return 0, errors.New("integer out of range")
+	}
+	return parsed, nil
+}
+
+func parseOptionalInteger(value string, minimum, maximum uint64) (uint64, error) {
 	if value == "" {
 		return 0, nil
 	}
@@ -587,10 +601,10 @@ func parseOptionalInteger(value string, minimum, maximum uint64) (uint16, error)
 	if err != nil || parsed < minimum || parsed > maximum {
 		return 0, errors.New("integer out of range")
 	}
-	return uint16(parsed), nil
+	return parsed, nil
 }
 
-func parseOptionalRange(value string, minimum, maximum uint64) (uint16, error) {
+func parseOptionalRange(value string, minimum, maximum uint64) (uint64, error) {
 	if value == "" {
 		return 0, nil
 	}
@@ -608,9 +622,9 @@ func parseOptionalRange(value string, minimum, maximum uint64) (uint16, error) {
 			return 0, errors.New("invalid range")
 		}
 	}
-	return uint16(first), nil
+	return first, nil
 }
-func parseOptionalRange32(value string) (uint32, error) {
+func parseOptionalRange32(value string) (uint64, error) {
 	pieces := strings.Split(value, "-")
 	if len(pieces) > 2 {
 		return 0, errors.New("invalid range")
@@ -625,17 +639,24 @@ func parseOptionalRange32(value string) (uint32, error) {
 			return 0, errors.New("invalid range")
 		}
 	}
-	return uint32(first), nil
+	return first, nil
 }
 
-func parseCanonicalUint(value string, bits int) (uint64, error) {
+func isCanonicalDecimal(value string) bool {
 	if value == "" || (len(value) > 1 && value[0] == '0') {
-		return 0, errors.New("non-canonical integer")
+		return false
 	}
 	for index := 0; index < len(value); index++ {
 		if value[index] < '0' || value[index] > '9' {
-			return 0, errors.New("non-canonical integer")
+			return false
 		}
+	}
+	return true
+}
+
+func parseCanonicalUint(value string, bits int) (uint64, error) {
+	if !isCanonicalDecimal(value) {
+		return 0, errors.New("non-canonical integer")
 	}
 	return strconv.ParseUint(value, 10, bits)
 }

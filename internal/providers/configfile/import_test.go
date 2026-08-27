@@ -46,3 +46,9 @@ func TestImportFileRejectsUnsafeOrInvalidAWG31Values(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigfileOwnsParserWithoutProviderDependency(t *testing.T) {
+	data, err := os.ReadFile("import.go")
+	if err != nil { t.Fatal(err) }
+	if strings.Contains(string(data), "providers/redshield") { t.Fatal("configfile parser depends on the compatibility provider") }
+}

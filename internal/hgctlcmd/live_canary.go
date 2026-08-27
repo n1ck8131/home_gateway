@@ -170,12 +170,12 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 	defer cancel()
 	if command.action == "apply" || command.action == "confirm" {
 		if dependencies.validateConfigSource == nil {
-			fmt.Fprintln(stderr, "RedShield config source validator is unavailable")
+			fmt.Fprintln(stderr, "Tunnel config source validator is unavailable")
 			return 1
 		}
 		if dependencies.validateLiveConfig != nil {
 			if err := dependencies.validateLiveConfig(command.plan.configPath, command.plan.configSHA256); err != nil {
-				fmt.Fprintln(stderr, "installed RedShield config blocked:", err)
+				fmt.Fprintln(stderr, "installed Tunnel config blocked:", err)
 				return 3
 			}
 		}

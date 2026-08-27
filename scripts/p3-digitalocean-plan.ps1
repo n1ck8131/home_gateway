@@ -14,6 +14,11 @@ if (-not (Test-Path -LiteralPath $sshKeygen -PathType Leaf)) { throw 'trusted Sy
 & $sshKeygen -lf $PublicKeyPath | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'public key failed trusted OpenSSH validation' }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($manifest.provider -cne 'digitalocean' -or $manifest.regions.primary -cne 'ams3' -or $manifest.regions.fallback -cne 'fra1' -or $manifest.image -cne 'ubuntu-24-04-x64') { throw 'manifest provider, region, or image differs from the approved plan' }
+if ($manifest.size.family -cne 'Basic Regular' -or $manifest.size.vcpu -ne 1 -or $manifest.size.memory_gib -ne 1 -or $manifest.size.disk_gib -ne 25 -or $manifest.size.transfer_gib -ne 1000 -or $manifest.size.monthly_label -cne '$6') { throw 'manifest size baseline differs from the approved plan' }
+if (-not $manifest.ipv6 -or -not $manifest.monitoring -or $manifest.backups -or $manifest.volumes -or $manifest.marketplace_or_one_click -or $manifest.api_automation) { throw 'manifest safety switches differ from the approved plan' }
+if ($manifest.inbound.ssh.source_prefixes -cne 'pending-observation' -or -not $manifest.inbound.ssh.default_routes_forbidden -or $manifest.inbound.amneziawg_udp.observed_port -cne 'pending-observation' -or $manifest.inbound.amneziawg_udp.source_prefixes -cne 'pending-observation' -or $manifest.inbound.amneziawg_udp.count -ne 1) { throw 'manifest inbound rules differ from the approved plan' }
+if ((Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8) -match '(?i)(token|password|secret|private.?key)') { throw 'manifest contains forbidden credential-like fields' }
 $result = [ordered]@{
     version = 1; mode = 'plan-only'; billable_action_performed = $false
     provider = $manifest.provider; primary_region = $manifest.regions.primary; fallback_region = $manifest.regions.fallback

@@ -162,7 +162,7 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 	if !preflight.ReadOnlyQualified {
 		return CanaryPlan{}, errors.New("read-only Windows preflight is not qualified")
 	}
-	redShield, err := canaryRedShieldAdapter(inventory.Adapters, preflight.LocalTunnelStatus)
+	tunnel, err := canaryTunnelAdapter(inventory.Adapters, preflight.LocalTunnelStatus)
 	if err != nil {
 		return CanaryPlan{}, err
 	}
@@ -182,10 +182,10 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 		return CanaryPlan{}, err
 	}
 
-	if _, err := canaryFallbackDefaults(inventory, redShield); err != nil {
+	if _, err := canaryFallbackDefaults(inventory, tunnel); err != nil {
 		return CanaryPlan{}, err
 	}
-	failClosedAdapters, err := canaryFailClosedAdapters(inventory, redShield)
+	failClosedAdapters, err := canaryFailClosedAdapters(inventory, tunnel)
 	if err != nil {
 		return CanaryPlan{}, err
 	}
@@ -207,8 +207,8 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 			Family:         family,
 			Destination:    prefix.String(),
 			NextHop:        nextHop,
-			InterfaceGUID:  redShield.InterfaceGUID,
-			InterfaceIndex: redShield.Index,
+			InterfaceGUID:  tunnel.InterfaceGUID,
+			InterfaceIndex: tunnel.Index,
 			Metric:         ReservedRouteMetric,
 			PolicyStore:    RoutePolicyStore,
 			Protocol:       RouteProtocol,
@@ -433,16 +433,16 @@ func validCanaryRevision(revision string) bool {
 	return true
 }
 
-func canaryRedShieldAdapter(adapters []Adapter, status LocalTunnelStatus) (Adapter, error) {
+func canaryTunnelAdapter(adapters []Adapter, status LocalTunnelStatus) (Adapter, error) {
 	if !status.Observed || status.State != LocalTunnelUp || status.InterfaceGUID == "" {
-		return Adapter{}, errors.New("canary requires one qualified active RedShield adapter")
+		return Adapter{}, errors.New("canary requires one qualified active Tunnel adapter")
 	}
 	for _, adapter := range normalizedAdapters(adapters) {
-		if adapter.InterfaceGUID == status.InterfaceGUID && adapter.Index > 0 && adapter.Up && adapter.Kind == AdapterRedShield {
+		if adapter.InterfaceGUID == status.InterfaceGUID && adapter.Index > 0 && adapter.Up && adapter.Kind == AdapterTunnel {
 			return adapter, nil
 		}
 	}
-	return Adapter{}, errors.New("qualified RedShield adapter is absent from the inventory")
+	return Adapter{}, errors.New("qualified Tunnel adapter is absent from the inventory")
 }
 
 func canaryEndpointAssertions(inventory Inventory, inspection tunnel.Inspection) ([]DirectRouteAssertion, []string, error) {
@@ -541,12 +541,12 @@ func addCanaryDNSTargets(targets []canaryTarget, metadata tunnel.Metadata) ([]ca
 }
 
 // canaryFallbackDefaults returns every stable adapter that could become an
-// egress path for a canary target when RedShield is unavailable. Down and
+// egress path for a canary target when Tunnel is unavailable. Down and
 // currently-unreachable defaults are deliberately included: retaining a /0 is
 // enough for adapter reactivation to become a leak path inside the pending
 // window. Exact firewall rules can be installed against an existing down
 // adapter alias, so rejecting or covering it is safer than ignoring it.
-func canaryFallbackDefaults(inventory Inventory, redShield Adapter) (map[AddressFamily][]Adapter, error) {
+func canaryFallbackDefaults(inventory Inventory, tunnel Adapter) (map[AddressFamily][]Adapter, error) {
 	adapters := normalizedAdapters(inventory.Adapters)
 	result := make(map[AddressFamily][]Adapter)
 	seen := make(map[AddressFamily]map[string]struct{})
@@ -562,13 +562,13 @@ func canaryFallbackDefaults(inventory Inventory, redShield Adapter) (map[Address
 		if _, err := canonicalGUID(adapter.InterfaceGUID); err != nil || adapter.Index <= 0 {
 			return nil, errors.New("canary default route adapter identity is invalid")
 		}
-		if adapter.InterfaceGUID == redShield.InterfaceGUID {
-			if adapter.Index != redShield.Index || adapter.Kind != AdapterRedShield {
-				return nil, errors.New("qualified RedShield default route identity drifted")
+		if adapter.InterfaceGUID == tunnel.InterfaceGUID {
+			if adapter.Index != tunnel.Index || adapter.Kind != AdapterTunnel {
+				return nil, errors.New("qualified Tunnel default route identity drifted")
 			}
 			continue
 		}
-		if adapter.Kind == AdapterRedShield || adapter.Kind == AdapterLoopback {
+		if adapter.Kind == AdapterTunnel || adapter.Kind == AdapterLoopback {
 			return nil, errors.New("canary has an unsupported fallback default adapter")
 		}
 		if seen[route.Family] == nil {
@@ -599,8 +599,8 @@ func canaryFallbackDefaults(inventory Inventory, redShield Adapter) (map[Address
 // canaryFailClosedAdapters returns every stable adapter that could acquire a
 // route while a candidate is pending. Coverage is intentionally broader than
 // the current default-route set: a retained or newly activated more-specific
-// route must remain blocked when the RedShield route disappears.
-func canaryFailClosedAdapters(inventory Inventory, redShield Adapter) ([]Adapter, error) {
+// route must remain blocked when the Tunnel route disappears.
+func canaryFailClosedAdapters(inventory Inventory, tunnel Adapter) ([]Adapter, error) {
 	adapters := normalizedAdapters(inventory.Adapters)
 	result := make([]Adapter, 0, len(adapters))
 	seenGUID := make(map[string]struct{}, len(adapters))
@@ -618,14 +618,14 @@ func canaryFailClosedAdapters(inventory Inventory, redShield Adapter) ([]Adapter
 		}
 		seenGUID[guid] = struct{}{}
 		seenIndex[adapter.Index] = struct{}{}
-		if guid == redShield.InterfaceGUID {
-			if adapter.Index != redShield.Index || adapter.Kind != AdapterRedShield {
-				return nil, errors.New("qualified RedShield adapter identity drifted")
+		if guid == tunnel.InterfaceGUID {
+			if adapter.Index != tunnel.Index || adapter.Kind != AdapterTunnel {
+				return nil, errors.New("qualified Tunnel adapter identity drifted")
 			}
 			continue
 		}
-		if adapter.Kind == AdapterRedShield {
-			return nil, errors.New("unqualified RedShield adapter cannot be covered safely")
+		if adapter.Kind == AdapterTunnel {
+			return nil, errors.New("unqualified Tunnel adapter cannot be covered safely")
 		}
 		if adapter.Kind == AdapterLoopback {
 			continue

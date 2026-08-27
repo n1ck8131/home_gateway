@@ -703,7 +703,7 @@ func (runtime *Runtime) applyArtifacts(ctx context.Context, artifacts artifactSe
 			}
 		}
 	}
-	if err := runtime.requireRedShieldEffectiveRoutes(ctx, artifacts); err != nil {
+	if err := runtime.requireTunnelEffectiveRoutes(ctx, artifacts); err != nil {
 		return err
 	}
 	for _, rule := range artifacts.dns.Rules {
@@ -953,20 +953,20 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 	for _, value := range runtime.QualifiedEndpoints {
 		qualified[value] = 0
 	}
-	redShieldGUID := ""
+	tunnelGUID := ""
 	for _, route := range artifacts.routes.Routes {
 		if route.Role != RouteRoleVPNClass {
 			continue
 		}
 		guid := strings.ToLower(route.InterfaceGUID)
 		adapter, exists := adapters[guid]
-		if !exists || !adapter.Up || adapter.Kind != AdapterRedShield {
-			return errors.New("VPN-class route does not use one active stable RedShield adapter")
+		if !exists || !adapter.Up || adapter.Kind != AdapterTunnel {
+			return errors.New("VPN-class route does not use one active stable Tunnel adapter")
 		}
-		if redShieldGUID != "" && redShieldGUID != guid {
-			return errors.New("vpn-class routes span multiple RedShield adapters")
+		if tunnelGUID != "" && tunnelGUID != guid {
+			return errors.New("vpn-class routes span multiple Tunnel adapters")
 		}
-		redShieldGUID = guid
+		tunnelGUID = guid
 	}
 	failClosedAdapters := make(map[string]Adapter)
 	for guid, adapter := range adapters {
@@ -974,9 +974,9 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 			return errors.New("windows adapter snapshot contains an unstable identity")
 		}
 		switch adapter.Kind {
-		case AdapterRedShield:
-			if redShieldGUID == "" || guid != redShieldGUID {
-				return errors.New("unqualified RedShield adapter could bypass canary fail-closed coverage")
+		case AdapterTunnel:
+			if tunnelGUID == "" || guid != tunnelGUID {
+				return errors.New("unqualified Tunnel adapter could bypass canary fail-closed coverage")
 			}
 		case AdapterLoopback:
 			continue
@@ -1000,9 +1000,9 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 			if _, guidErr := canonicalGUID(guid); guidErr != nil || !exists || adapter.Index != current.InterfaceIndex || current.Family != addressFamily(prefix.Addr()) || current.State < routeStateAlive || current.State > 2 {
 				return errors.New("live default route is not bound to one stable adapter")
 			}
-			if adapter.Kind == AdapterRedShield {
-				if redShieldGUID == "" || guid != redShieldGUID {
-					return errors.New("unqualified RedShield default path could bypass canary fail-closed coverage")
+			if adapter.Kind == AdapterTunnel {
+				if tunnelGUID == "" || guid != tunnelGUID {
+					return errors.New("unqualified Tunnel default path could bypass canary fail-closed coverage")
 				}
 				continue
 			}
@@ -1049,8 +1049,8 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 			}
 			qualified[prefix.String()]++
 			endpointPrefixes = append(endpointPrefixes, prefix)
-		} else if adapter.Kind != AdapterRedShield {
-			return errors.New("VPN-class route does not use the RedShield adapter")
+		} else if adapter.Kind != AdapterTunnel {
+			return errors.New("VPN-class route does not use the Tunnel adapter")
 		}
 		for _, current := range snapshot.Routes {
 			if routeCollision(route, current.ManagedRoute) && current.Owner != ArtifactOwner {
@@ -1076,7 +1076,7 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 	for _, rule := range artifacts.firewall.Rules {
 		guid := strings.ToLower(rule.InterfaceGUID)
 		adapter, exists := adapters[guid]
-		if !exists || adapter.Kind == AdapterRedShield || adapter.Kind == AdapterLoopback {
+		if !exists || adapter.Kind == AdapterTunnel || adapter.Kind == AdapterLoopback {
 			return errors.New("firewall rule refers to a stale, mismatched, or unsupported fallback interface GUID")
 		}
 		for _, current := range snapshot.Firewall {
@@ -1100,7 +1100,7 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 			if !slices.ContainsFunc(artifacts.firewall.Rules, func(rule FirewallRule) bool {
 				return rule.Family == route.Family && rule.RemoteCIDR == route.Destination && rule.InterfaceGUID == guid
 			}) {
-				return errors.New("VPN-class route lacks fail-closed coverage for every stable non-RedShield adapter")
+				return errors.New("VPN-class route lacks fail-closed coverage for every stable non-Tunnel adapter")
 			}
 		}
 	}
@@ -1147,7 +1147,7 @@ func (runtime *Runtime) validateCandidateAgainstSnapshot(artifacts artifactSet, 
 	return nil
 }
 
-func (runtime *Runtime) requireRedShieldEffectiveRoutes(ctx context.Context, artifacts artifactSet) error {
+func (runtime *Runtime) requireTunnelEffectiveRoutes(ctx context.Context, artifacts artifactSet) error {
 	for _, route := range artifacts.routes.Routes {
 		if route.Role != RouteRoleVPNClass {
 			continue
@@ -1157,7 +1157,7 @@ func (runtime *Runtime) requireRedShieldEffectiveRoutes(ctx context.Context, art
 			return fmt.Errorf("resolve effective Windows route for %s: %w", route.Destination, err)
 		}
 		if resolved.NoRoute || resolved.Family != route.Family || resolved.Destination != route.Destination || !strings.EqualFold(resolved.InterfaceGUID, route.InterfaceGUID) || resolved.InterfaceIndex != route.InterfaceIndex {
-			return errors.New("effective Windows route does not select the qualified RedShield interface")
+			return errors.New("effective Windows route does not select the qualified Tunnel interface")
 		}
 	}
 	return nil
@@ -1181,7 +1181,7 @@ func protectedPrefixes(snapshot MutationSnapshot, adapters map[string]Adapter) (
 		if _, guidErr := canonicalGUID(guid); guidErr != nil || !exists || adapter.Index <= 0 || route.InterfaceIndex != adapter.Index || route.State < routeStateAlive || route.State > 2 {
 			return nil, errors.New("unowned system route is not bound to one stable adapter")
 		}
-		if route.Protected || adapter.Kind != AdapterRedShield && adapter.Kind != AdapterLoopback {
+		if route.Protected || adapter.Kind != AdapterTunnel && adapter.Kind != AdapterLoopback {
 			result = append(result, prefix)
 		}
 	}

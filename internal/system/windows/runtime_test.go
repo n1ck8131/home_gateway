@@ -120,7 +120,7 @@ func TestWindowsRuntimeCoversRetainedDownCiscoDefaultPath(t *testing.T) {
 	covered := append([]FirewallRule(nil), artifacts.firewall.Rules...)
 	artifacts.firewall.Rules = slices.DeleteFunc(artifacts.firewall.Rules, func(rule FirewallRule) bool { return rule.InterfaceGUID == testCiscoGUID })
 	runtime := &Runtime{QualifiedEndpoints: testQualifiedEndpoints()}
-	if err := runtime.validateCandidateAgainstSnapshot(artifacts, backend.state); err == nil || !strings.Contains(err.Error(), "every stable non-RedShield adapter") {
+	if err := runtime.validateCandidateAgainstSnapshot(artifacts, backend.state); err == nil || !strings.Contains(err.Error(), "every stable non-Tunnel adapter") {
 		t.Fatalf("uncovered Cisco default result = %v", err)
 	}
 	artifacts.firewall.Rules = covered
@@ -214,7 +214,7 @@ func TestWindowsRuntimeResnapshotsFallbackCoverageBeforeVPNRoutes(t *testing.T) 
 	}
 	artifacts := decodeCandidate(t, safeCandidate(t, "r1"))
 	runtime := &Runtime{Backend: backend, QualifiedEndpoints: testQualifiedEndpoints()}
-	if err := runtime.applyArtifacts(context.Background(), artifacts, true); err == nil || !strings.Contains(err.Error(), "every stable non-RedShield adapter") {
+	if err := runtime.applyArtifacts(context.Background(), artifacts, true); err == nil || !strings.Contains(err.Error(), "every stable non-Tunnel adapter") {
 		t.Fatalf("pre-route fallback race result = %v", err)
 	}
 	if slices.ContainsFunc(backend.calls, func(call string) bool { return strings.HasPrefix(call, "add-route:vpn_class:") }) {
@@ -505,7 +505,7 @@ func TestWindowsRuntimeRejectsVirtualDefaultAddedAfterValidate(t *testing.T) {
 	otherRedShieldGUID := "33333333-3333-4333-8333-333333333333"
 	backend.state.Adapters = append(backend.state.Adapters, Adapter{Index: 22, InterfaceGUID: otherRedShieldGUID, Kind: AdapterRedShield, Up: true})
 	backend.state.Routes = append(backend.state.Routes, RouteState{ManagedRoute: ManagedRoute{Family: FamilyIPv4, Destination: "0.0.0.0/0", NextHop: "10.30.40.1", InterfaceGUID: otherRedShieldGUID, InterfaceIndex: 22}})
-	if err := runtime.Activate(context.Background(), candidate); err == nil || !strings.Contains(err.Error(), "unqualified RedShield adapter") {
+	if err := runtime.Activate(context.Background(), candidate); err == nil || !strings.Contains(err.Error(), "unqualified Tunnel adapter") {
 		t.Fatalf("TOCTOU virtual default error = %v", err)
 	}
 	if len(backend.calls) != 0 {
@@ -1000,7 +1000,7 @@ func TestWindowsRuntimeRequiresFirewallCoverageForEveryFallbackDefault(t *testin
 		RouteState{ManagedRoute: ManagedRoute{Family: FamilyIPv6, Destination: "::/0", NextHop: "2001:db8:2::1", InterfaceGUID: secondGUID, InterfaceIndex: 13}},
 	)
 	tx := newWindowsTransaction(t, backend)
-	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil || !strings.Contains(err.Error(), "every stable non-RedShield adapter") {
+	if err := tx.Apply(context.Background(), safeCandidate(t, "r1")); err == nil || !strings.Contains(err.Error(), "every stable non-Tunnel adapter") {
 		t.Fatalf("undercovered multi-default state error = %v", err)
 	}
 	if len(backend.calls) != 0 {

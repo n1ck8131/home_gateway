@@ -153,12 +153,12 @@ func collectCanaryPlan(ctx context.Context, command canaryPlanCommand, dependenc
 	}
 	if dependencies.validateConfigSource != nil {
 		if err := dependencies.validateConfigSource(command.configPath); err != nil {
-			return windowssystem.CanaryPlan{}, 3, fmt.Errorf("redshield config source blocked: %w", err)
+			return windowssystem.CanaryPlan{}, 3, fmt.Errorf("tunnel config source blocked: %w", err)
 		}
 	}
 	inspection, err := dependencies.backend.Inspect(ctx, tunnel.ConfigSource{Path: command.configPath, SHA256: command.configSHA256})
 	if err != nil {
-		return windowssystem.CanaryPlan{}, 1, fmt.Errorf("redshield config inspection failed: %w", err)
+		return windowssystem.CanaryPlan{}, 1, fmt.Errorf("tunnel config inspection failed: %w", err)
 	}
 	inventory, err := dependencies.collect.Collect(ctx)
 	if err != nil {
@@ -166,7 +166,7 @@ func collectCanaryPlan(ctx context.Context, command canaryPlanCommand, dependenc
 	}
 	resolved, err := dependencies.resolve(ctx, inspection.Metadata.Endpoint.Host)
 	if err != nil {
-		return windowssystem.CanaryPlan{}, 1, errors.New("redshield endpoint qualification failed")
+		return windowssystem.CanaryPlan{}, 1, errors.New("tunnel endpoint qualification failed")
 	}
 	inventory.EndpointAddresses = resolved
 	plan, err := windowssystem.BuildCanaryPlan(inventory, inspection, windowssystem.CanaryRequest{

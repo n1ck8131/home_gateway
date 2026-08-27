@@ -2,6 +2,8 @@ package redshield
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/vsevo/home-gateway/internal/tunnel"
@@ -33,7 +35,11 @@ func TestBackendIsReadOnlyAndServerManagementIsUnavailable(t *testing.T) {
 }
 
 func TestBackendInspectReturnsOnlyRedactedMetadata(t *testing.T) {
-	path := writeConfig(t, validConfig(t, "", "0.0.0.0/0, ::/0"))
+	path := filepath.Join(t.TempDir(), "synthetic.conf")
+	config := "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = example.invalid:51820\n"
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	inspection, err := (Backend{}).Inspect(context.Background(), tunnel.ConfigSource{Path: path})
 	if err != nil {
 		t.Fatal(err)

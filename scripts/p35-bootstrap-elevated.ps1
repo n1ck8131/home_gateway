@@ -239,7 +239,7 @@ function Get-StreamFileIdentity([IO.FileStream]$Stream) {
 }
 
 function Open-ConfigSecurityStream([string]$Path) {
-    Assert-RegularFile -Path $Path -Label 'RedShield config source'
+    Assert-RegularFile -Path $Path -Label 'Tunnel config source'
     $handle = [HomeGateway.P35.NativeFileIdentity]::OpenConfigSecurityFile($Path)
     if ($null -eq $handle -or $handle.IsInvalid) {
         if ($null -ne $handle) { $handle.Dispose() }
@@ -254,7 +254,7 @@ function Open-ConfigSecurityStream([string]$Path) {
             throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
         }
         if (($information.FileAttributes -band 0x10) -ne 0 -or ($information.FileAttributes -band 0x400) -ne 0) {
-            throw 'RedShield config security handle is not a regular non-reparse file'
+            throw 'Tunnel config security handle is not a regular non-reparse file'
         }
         return $stream
     } catch {
@@ -273,7 +273,7 @@ function Assert-ConfigStreamBinding([object]$Binding, [IO.FileStream]$Stream, [s
     $actual = Get-StreamSHA256 -Stream $Stream
     $fileIdentity = Get-StreamFileIdentity -Stream $Stream
     if ($actual -cne $Expected -or [string]$fileIdentity.volume_serial -cne [string]$Binding.volume_serial -or [string]$fileIdentity.file_index -cne [string]$Binding.file_index) {
-        throw 'RedShield config file identity differs from the protected snapshot'
+        throw 'Tunnel config file identity differs from the protected snapshot'
     }
 }
 
@@ -281,7 +281,7 @@ function Get-ConfigSourceBinding([string]$Path, [string]$Expected) {
     $stream = Open-ConfigSecurityStream -Path $Path
     try {
         $actual = Get-StreamSHA256 -Stream $stream
-        if ($actual -cne $Expected) { throw 'RedShield config hash differs from the approved local file' }
+        if ($actual -cne $Expected) { throw 'Tunnel config hash differs from the approved local file' }
         $fileIdentity = Get-StreamFileIdentity -Stream $stream
         $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
         $sddl = $stream.GetAccessControl().GetSecurityDescriptorSddlForm($sections)
@@ -301,7 +301,7 @@ function Assert-ConfigSourceBinding([object]$Binding, [string]$Path, [string]$Ex
         throw 'config ACL snapshot binding differs'
     }
     $current = Get-ConfigSourceBinding -Path $Path -Expected $Expected
-    if ([string]$current.volume_serial -cne [string]$Binding.volume_serial -or [string]$current.file_index -cne [string]$Binding.file_index) { throw 'RedShield config file identity differs from the protected snapshot' }
+    if ([string]$current.volume_serial -cne [string]$Binding.volume_serial -or [string]$current.file_index -cne [string]$Binding.file_index) { throw 'Tunnel config file identity differs from the protected snapshot' }
 }
 
 function Read-ConfigAclSnapshot([string]$Path, [string]$ConfigPath, [string]$Expected) {
@@ -341,19 +341,19 @@ function Install-PinnedFile([string]$Source, [string]$Destination, [string]$Expe
 }
 
 function Install-PinnedConfig([string]$Source, [string]$Destination, [string]$Expected, [object]$Binding) {
-    Assert-RegularFile -Path $Source -Label 'RedShield config source'
+    Assert-RegularFile -Path $Source -Label 'Tunnel config source'
     $sourceStream = [IO.File]::Open($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
     try {
         $actual = Get-StreamSHA256 -Stream $sourceStream
         $fileIdentity = Get-StreamFileIdentity -Stream $sourceStream
-        if ($actual -cne $Expected -or [string]$fileIdentity.volume_serial -cne [string]$Binding.volume_serial -or [string]$fileIdentity.file_index -cne [string]$Binding.file_index) { throw 'RedShield config differs from the approved bound source' }
+        if ($actual -cne $Expected -or [string]$fileIdentity.volume_serial -cne [string]$Binding.volume_serial -or [string]$fileIdentity.file_index -cne [string]$Binding.file_index) { throw 'Tunnel config differs from the approved bound source' }
         if ([IO.File]::Exists($Destination)) {
-            if ((Get-ExclusiveFileSHA256 -Path $Destination) -cne $Expected) { throw 'installed RedShield config differs from the approved source' }
+            if ((Get-ExclusiveFileSHA256 -Path $Destination) -cne $Expected) { throw 'installed Tunnel config differs from the approved source' }
             return
         }
         $temporary = $Destination + '.next'
         if ([IO.File]::Exists($temporary)) {
-            if ((Get-ExclusiveFileSHA256 -Path $temporary) -cne $Expected) { throw 'RedShield config staging collision differs' }
+            if ((Get-ExclusiveFileSHA256 -Path $temporary) -cne $Expected) { throw 'Tunnel config staging collision differs' }
         } else {
             $sourceStream.Position = 0
             $destinationStream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
@@ -361,7 +361,7 @@ function Install-PinnedConfig([string]$Source, [string]$Destination, [string]$Ex
         }
         [IO.File]::Move($temporary, $Destination)
     } finally { $sourceStream.Dispose() }
-    if ((Get-ExclusiveFileSHA256 -Path $Destination) -cne $Expected) { throw 'installed RedShield config post-check failed' }
+    if ((Get-ExclusiveFileSHA256 -Path $Destination) -cne $Expected) { throw 'installed Tunnel config post-check failed' }
 }
 
 function Protect-ConfigSource([string]$Path, [string]$Expected, [object]$Binding) {
@@ -380,15 +380,15 @@ function Protect-ConfigSource([string]$Path, [string]$Expected, [object]$Binding
         $stream.SetAccessControl($security)
         $acl = $stream.GetAccessControl()
         $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-        if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $script:CurrentSID.Value -or $rules.Count -ne 3) { throw 'RedShield config ACL post-check failed' }
+        if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $script:CurrentSID.Value -or $rules.Count -ne 3) { throw 'Tunnel config ACL post-check failed' }
         $seen = @{}
         foreach ($rule in $rules) {
             $sid = $rule.IdentityReference.Value
             $expectedRights = if ($sid -ceq $script:CurrentSID.Value) { $currentRights } else { [Security.AccessControl.FileSystemRights]::FullControl }
-            if ($rule.IsInherited -or $rule.AccessControlType -ne $allow -or $sid -notin @($script:CurrentSID.Value, $script:SystemSID.Value, $script:AdministratorsSID.Value) -or $rule.FileSystemRights -ne $expectedRights -or $seen.ContainsKey($sid)) { throw 'RedShield config ACL contains an unauthorized ACE' }
+            if ($rule.IsInherited -or $rule.AccessControlType -ne $allow -or $sid -notin @($script:CurrentSID.Value, $script:SystemSID.Value, $script:AdministratorsSID.Value) -or $rule.FileSystemRights -ne $expectedRights -or $seen.ContainsKey($sid)) { throw 'Tunnel config ACL contains an unauthorized ACE' }
             $seen[$sid] = $true
         }
-        if (-not $seen.ContainsKey($script:CurrentSID.Value) -or -not $seen.ContainsKey($script:SystemSID.Value) -or -not $seen.ContainsKey($script:AdministratorsSID.Value)) { throw 'RedShield config ACL lacks an authorized ACE' }
+        if (-not $seen.ContainsKey($script:CurrentSID.Value) -or -not $seen.ContainsKey($script:SystemSID.Value) -or -not $seen.ContainsKey($script:AdministratorsSID.Value)) { throw 'Tunnel config ACL lacks an authorized ACE' }
         Assert-ConfigStreamBinding -Binding $Binding -Stream $stream -Path $Path -Expected $Expected
     } finally { $stream.Dispose() }
 }
@@ -403,12 +403,12 @@ function Restore-ConfigSourceACL([string]$Path, [string]$Expected, [object]$Bind
         $stream.SetAccessControl($security)
         Assert-ConfigStreamBinding -Binding $Binding -Stream $stream -Path $Path -Expected $Expected
         $actual = $stream.GetAccessControl().GetSecurityDescriptorSddlForm($sections)
-        if ($actual -cne [string]$Binding.sddl) { throw 'RedShield config ACL restore post-check failed' }
+        if ($actual -cne [string]$Binding.sddl) { throw 'Tunnel config ACL restore post-check failed' }
     } finally { $stream.Dispose() }
 }
 
 Assert-SHA256 -Value ([string]$request.config_sha256) -Label 'approved config hash'
-$configSource = Resolve-LocalCleanPath -Path ([string]$request.config_path) -Label 'RedShield config source'
+$configSource = Resolve-LocalCleanPath -Path ([string]$request.config_path) -Label 'Tunnel config source'
 
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 if ([string]::IsNullOrWhiteSpace($programData)) { throw 'trusted ProgramData known folder is unavailable' }

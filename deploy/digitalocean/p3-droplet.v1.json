@@ -1,0 +1,16 @@
+{
+  "provider": "digitalocean",
+  "regions": { "primary": "ams3", "fallback": "fra1" },
+  "image": "ubuntu-24-04-x64",
+  "size": { "family": "Basic Regular", "vcpu": 1, "memory_gib": 1, "disk_gib": 25, "transfer_gib": 1000, "monthly_label": "$6" },
+  "ipv6": true,
+  "monitoring": true,
+  "backups": false,
+  "volumes": false,
+  "marketplace_or_one_click": false,
+  "api_automation": false,
+  "inbound": {
+    "ssh": { "source_prefixes": "pending-observation", "default_routes_forbidden": true },
+    "amneziawg_udp": { "observed_port": "pending-observation", "source_prefixes": "pending-observation", "count": 1 }
+  }
+}

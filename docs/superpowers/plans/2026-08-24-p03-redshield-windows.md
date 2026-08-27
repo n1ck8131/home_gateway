@@ -1,18 +1,19 @@
-# P3 RedShield-backed Windows pilot implementation plan
+# P3 self-hosted Windows pilot implementation plan
 
-Status: Active — P3.1 through P3.5 complete for their offline/software scope; the P3.5 imported-DNS/Cisco overlap diagnostic gap is implemented offline, the authorized live sub-batch remains safely blocked at exact Plan pending its imported-DNS/Cisco prerequisite, and `pc-core-ready` remains open
+Status: Active — P3.1 through the existing P3.5 offline/software scope are complete; the 2026-08-26 RedShield live sub-batch remains historical pre-mutation evidence; ADR-0016 now makes one self-hosted DigitalOcean server the P3 live target, and `pc-core-ready` remains open
 
 ## Goal
 
-Deliver `pc-core-ready` on the current Windows PC by routing selected traffic through the existing RedShield WireGuard/AmneziaWG tunnel while preserving ordinary direct traffic, Cisco connectivity and the pre-install network state. Own VPS work is deferred to P8 and Flint 2 migration to P12.
+Deliver `pc-core-ready` on the current Windows PC by routing selected traffic through one owned DigitalOcean AmneziaWG server while preserving ordinary direct traffic, Cisco connectivity and the pre-install network state. P3 owns only the minimal manual self-hosted bootstrap and static PC peer; managed server/mobile lifecycle remains P8 and Flint 2 migration remains P12.
 
 ## Safety boundary
 
-- Never disconnect or restart the active RedShield or Cisco tunnel without separate confirmation.
+- Never disconnect, restart or reconfigure the installed RedShield or Cisco tunnel without separate confirmation. Retiring RedShield as the target backend is not authorization to change its live state.
+- Do not create a billable Droplet, connect through SSH, publish a UDP port or use cloud credentials without the matching separate gate.
 - Do not mutate Windows routes, firewall, DNS, services or adapters during P3 read-only qualification.
-- Treat the supplied `.conf` as an external secret: read locally, never copy to the repository, fixtures, logs or evidence.
+- Treat every retained RedShield or generated self-hosted `.conf` as an external secret: read locally, never copy to the repository, fixtures, logs or evidence.
 - Do not apply `AllowedIPs = 0.0.0.0/0, ::/0` as Windows global default routes.
-- The physical/provider endpoint and Cisco destinations must remain outside the project VPN route class.
+- The physical/self-hosted endpoint and Cisco destinations must remain outside the project VPN route class.
 - Every future mutation must have a deterministic dry-run, exact ownership markers, snapshot, last-known-good rollback and emergency-disable path.
 
 ## Work packages
@@ -69,13 +70,25 @@ Status: offline implementation complete on 2026-08-26. Persistent fail-closed si
 - Test adapter loss, daemon crash, OS restart, recovery and emergency disable.
 - Verify complete removal restores the pre-install network state.
 
-Exit: `pc-core-ready`; own VPS and Flint 2 are not required. This exit remains open until the DNS/Cisco isolation prerequisite is resolved under a new approved envelope, the live matrix runs, and terminal `FullRestore` field evidence passes after an actual journaled canary.
+Historical result: the RedShield candidate remains blocked and must not be revived by bypassing the DNS/Cisco isolation guard. It is not the new self-hosted acceptance path.
 
-### P3.6 Minimal operator flow
+### P3.6 Minimal self-hosted DigitalOcean bootstrap and transition
+
+Status: planned and design-approved; no resource or live change has been made
+
+- Follow [ADR-0016](../../adr/ADR-0016-p3-self-hosted-digitalocean-bootstrap.md) and the [detailed bootstrap plan](2026-08-27-p3-self-hosted-digitalocean-bootstrap.md).
+- Generalize the protected config importer, CLI and Windows planner from a RedShield identity to a qualified provider-neutral AmneziaWG tunnel without weakening redaction, file identity or Cisco/DNS overlap guards.
+- Produce a deterministic non-secret create checklist; pin the official AmneziaVPN 5.0.1.5 Windows installer hash, use its supported GUI server flow, capture the installed container image identity, and document clear-server/rebuild limitations without claiming a supported headless bootstrap.
+- Generate one protected static PC peer profile outside Git and observe handshake/egress before any Windows mutation.
+- Run exact Plan, then separately authorize bounded Apply/Confirm, the complete safety matrix and terminal journaled `FullRestore`.
+
+Exit: `pc-core-ready`; one own VPS is required, but P8 automation/mobile scope and Flint 2 are not. The exit remains open until the self-hosted server and profile are qualified, the live matrix passes, and terminal `FullRestore` field evidence passes after an actual journaled canary.
+
+### P3.7 Minimal operator flow
 
 - Provide enable, inspect, confirm, rollback, disable and restore commands.
-- Keep provider server-management controls explicitly unavailable until P8.
+- Keep automated provider/server-management controls explicitly unavailable until P8.
 
 ## Validation batch
 
-Focused Go tests run during implementation. P3.5 offline persistent-sink work closed with focused Go integration, exact Windows PowerShell 5.1 and PowerShell 7 Pester contracts, direct gitleaks and `scripts/dev.ps1 -Command verify`. The bounded live precheck/bootstrap attempt is recorded as a safe pre-mutation block, not live acceptance. The remaining matrix requires a separately approved resolution that does not bypass Cisco protection. Real config contents must never appear in test or support artifacts. `RUFF_NOT_APPLICABLE_NO_PYTHON`.
+Focused Go tests run during implementation. P3.5 offline persistent-sink work closed with focused Go integration, exact Windows PowerShell 5.1 and PowerShell 7 Pester contracts, direct gitleaks and `scripts/dev.ps1 -Command verify`. The RedShield live precheck/bootstrap attempt is recorded as a safe pre-mutation historical block, not live acceptance. P3.6 must add provider-neutral importer/planner/bootstrap tests and then pass the full repository gate before the separately approved self-hosted live matrix. No real config content or secret may appear in test or support artifacts. `RUFF_NOT_APPLICABLE_NO_PYTHON`.

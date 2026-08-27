@@ -1,8 +1,8 @@
 # Довести Windows-приложение до собственного VPN на DigitalOcean
 
-Status: planned for 2026-08-26
+Status: amended on 2026-08-27; initial DigitalOcean bootstrap moved from P8 to P3 by ADR-0016
 
-Этот план продолжает завершённый software scope P3.3. Сначала Windows PC работает через RedShield. Затем приложение получает управление, обновляемые списки и Cisco-aware routing. После этого P8 переводит тот же control plane на один собственный VPN-сервер DigitalOcean. Покупка роутера и домашняя сеть начинаются только после отдельного PC-first acceptance gate.
+Этот план продолжает завершённый software scope P3.3. Решение владельца от 2026-08-27 меняет последовательность: P3 сразу квалифицирует Windows PC через один минимальный собственный VPN-сервер DigitalOcean; P8 позже добавляет automation, restricted `server-agent`, mobile lifecycle и telemetry. Покупка роутера и домашняя сеть начинаются только после отдельного PC-first acceptance gate.
 
 ## Контракт документа
 
@@ -10,23 +10,22 @@ Status: planned for 2026-08-26
 - **Аудитория**: владелец проекта и implementation agents
 - **Одна задача**: довести Windows PC от завершённого P3.3 до принятого приложения с одним собственным VPN
 - **Canonical roadmap**: [PLAN.md](../../../PLAN.md)
-- **Текущий phase plan**: [P3 RedShield-backed Windows pilot](2026-08-24-p03-redshield-windows.md)
+- **Текущий phase plan**: [P3 self-hosted Windows pilot](2026-08-24-p03-redshield-windows.md) и [DigitalOcean bootstrap implementation plan](2026-08-27-p3-self-hosted-digitalocean-bootstrap.md)
 - **Evidence status**: repository state и официальная документация DigitalOcean проверены 2026-08-25
 - **Не входит в разрешение**: покупка Droplet, изменение Windows routes, DNS, firewall, adapters, RedShield или Cisco
 
 ## Зафиксированная последовательность
 
-1. Завершить selective routing на Windows через текущий RedShield config.
-2. Добавить локальное приложение управления, revisions, rollback и понятный status.
-3. Отдельно исследовать GitHub-проекты со списками для РФ.
-4. Реализовать безопасное обновление принятых списков.
-5. Подтвердить работу direct, RedShield и Cisco без изменения Cisco config.
-6. Развернуть один собственный VPN на DigitalOcean.
-7. Переключить Windows-приложение с RedShield на собственный VPN без смены policy semantics.
-8. Добавить учёт общего и per-peer трафика, прогноз лимита и уведомления.
-9. Пройти PC-first acceptance и только затем покупать роутер.
+1. Подготовить provider-neutral self-hosted path и reviewed create/bootstrap artifacts offline.
+2. Отдельно подтвердить и вручную создать один DigitalOcean Droplet.
+3. Развернуть pinned AmneziaWG server и создать один защищённый Windows peer.
+4. Подтвердить direct, self-hosted VPN и Cisco без изменения Cisco config; завершить terminal `FullRestore`.
+5. Добавить локальное приложение управления, revisions, rollback и понятный status.
+6. Отдельно исследовать и затем безопасно обновлять принятые списки для РФ.
+7. В P8 добавить managed server/mobile lifecycle, traffic accounting, прогноз лимита и уведомления.
+8. Пройти PC-first acceptance и только затем покупать роутер.
 
-RedShield остаётся bootstrap backend до успешной приёмки собственного VPN. Он не становится автоматическим fallback. Router work остаётся за P12.
+RedShield больше не является bootstrap target или обязательным backend. Его текущая установка, исторический importer и evidence сохраняются без live changes; автоматический fallback не добавляется. Router work остаётся за P12.
 
 ## Целевой DigitalOcean baseline
 
@@ -36,12 +35,12 @@ RedShield остаётся bootstrap backend до успешной приёмк�
 |---|---|---|
 | Size | Basic Regular, 1 vCPU, 1 GiB RAM, 25 GiB SSD | Подтвердить через `/v2/sizes` перед созданием |
 | Image | Ubuntu 24.04 LTS x64 | Pin image slug и текущий image ID в deployment manifest |
-| Region | AMS или FRA candidate | Выбрать после latency, packet-loss и availability preflight |
+| Region | `ams3`; `fra1` fallback | Использовать fallback только при недоступности или худшем bounded latency result |
 | Transfer | 1,000 GiB plan allowance | Показывать accrued team allowance, а не безусловный статический лимит |
 | Public services | SSH и один UDP tunnel port | Не публиковать web panel, DNS resolver или proxy |
 | Access | SSH key, non-root sudo, root password login disabled | Проверить recovery до закрытия initial SSH path |
 | Firewall | DigitalOcean Cloud Firewall и host firewall | Правила должны совпадать и не образовывать неожиданный union |
-| Backups | Отдельное решение перед production | Не считать выключенный Droplet бесплатным |
+| Backups | Off для первого disposable canary | Snapshot может копировать secrets; production backup остаётся отдельным решением; выключенный Droplet не бесплатен |
 
 Official references:
 
@@ -105,12 +104,12 @@ Evidence: [P3.4 offline mutation phase report](../../reports/2026-08-25-p34-offl
 
 ## Phase 3: закрыть P3.5 и P3.6 на текущем PC
 
-Эта фаза превращает RedShield foundation в первый рабочий PC dataplane.
+Эта фаза превращает provider-neutral Windows foundation в первый рабочий self-hosted PC dataplane.
 
 ### Scope
 
 - выполнить отдельно подтверждённый bounded live canary
-- проверить direct и RedShield egress, DNS, IPv4, IPv6, MTU, TCP, UDP и QUIC
+- проверить direct и self-hosted egress, DNS, IPv4, IPv6, MTU, TCP, UDP и QUIC
 - проверить tunnel-down fail-closed без утечки VPN-class traffic в WAN
 - проверить adapter loss, service crash, restart, recovery и emergency disable
 - проверить uninstall и восстановление pre-install state
@@ -120,7 +119,7 @@ Evidence: [P3.4 offline mutation phase report](../../reports/2026-08-25-p34-offl
 
 - `pc-core-ready`
 - frozen `PC-DP-SAFE` regression suite
-- RedShield остаётся активным bootstrap backend
+- self-hosted AmneziaWG становится принятым P3 backend; RedShield live state не меняется этим gate
 - ни один тест не обходит Cisco policy
 
 ## Phase 4: реализовать P4 control plane
@@ -239,37 +238,35 @@ Evidence: [P3.4 offline mutation phase report](../../reports/2026-08-25-p34-offl
 - full-tunnel flow подтверждает только diagnosis и non-interference
 - Cisco workday soak не показывает reconnect или route churn, вызванный проектом
 
-## Phase 8A: подготовить и развернуть DigitalOcean Droplet
+## Phase 3.6A: подготовить и развернуть первый DigitalOcean Droplet
 
 Эта фаза создаёт billable resource только после отдельного подтверждения.
 
 ### User inputs at the gate
 
 - DigitalOcean account с настроенным billing
-- выбранный region после latency preflight
+- `ams3` либо документированный `fra1` fallback
 - SSH public key; private key не передаётся в chat
-- локально сохранённый scoped API token, если automation использует DigitalOcean API
 - подтверждение $6 monthly plan и возможного transfer overage
 
 ### Scope
 
 - pin image, size, region и deployment artifact hashes
-- создать Droplet idempotently через reviewed `doctl` или API plan
+- создать первый Droplet вручную через DigitalOcean UI; API token и `doctl` не требуются
 - создать non-root operator и отключить password/root SSH login
-- применить Cloud Firewall до публикации tunnel port
-- установить signed or checksummed AmneziaWG artifacts
-- запустить restricted `server-agent` через forced SSH command без `shell.exec`
+- применить Cloud Firewall с SSH-only до установки, затем добавить только фактически выбранный UDP tunnel port
+- проверить SHA-256 официального AmneziaVPN 5.0.1.5 Windows installer, через GUI установить только AmneziaWG и зафиксировать observed container image ID/digest
 - настроить automatic security updates, time sync, log rotation и recovery access
 - запретить open proxy и open recursive DNS
 
 ### Exit gate
 
-- повторный provision не меняет healthy server
-- unknown command, malformed JSON и replay отклоняются
+- client installer hash и фактически установленный server image ID/digest зафиксированы; unsupported headless reproducibility не заявляется
+- immutable metadata и SSH host-key fingerprints зафиксированы без secrets
 - только registered peer keys могут передавать traffic
-- backup и full rebuild восстанавливают server без копирования private keys в repository
+- official clear-server/rebuild boundaries задокументированы; rebuild инвалидирует прежние peer configs и не обещает сохранение private material
 
-## Phase 8B: переключить Windows с RedShield на собственный VPN
+## Phase 3.6B: квалифицировать Windows через собственный VPN
 
 Эта фаза меняет только `TunnelBackend`. Policy, UI и routing semantics остаются прежними.
 
@@ -278,17 +275,17 @@ Evidence: [P3.4 offline mutation phase report](../../reports/2026-08-25-p34-offl
 - создать отдельный PC peer
 - установить endpoint-direct route до DigitalOcean server
 - проверить handshake, egress, DNS, IPv6, MTU и fail-closed
-- сравнить решения RedShield и self-hosted backend на общих fixtures
-- сохранить RedShield как manual diagnostic option на период миграции
-- rollback возвращает confirmed RedShield revision без автоматического переключения
+- сравнить provider-neutral решения на общих fixtures и сохранить RedShield evidence как historical baseline
+- не отключать и не перенастраивать RedShield во время self-hosted canary
+- rollback/`FullRestore` возвращает pre-install project-owned Windows state без автоматического переключения backend
 
 ### Exit gate
 
 - self-hosted VPN становится primary backend
 - полный `PC-DP-SAFE` проходит без policy regression
-- RedShield больше не требуется для normal operation
+- RedShield не требуется для normal operation; его live retirement остаётся отдельным gate
 
-## Phase 8C: добавить traffic accounting и прогноз
+## Phase 8A: добавить managed operations, traffic accounting и прогноз
 
 Эта фаза реализует данные, похожие на второй скриншот. Web UI является primary surface. Telegram notification остаётся optional read-only adapter поверх того же API.
 
@@ -373,7 +370,7 @@ Windows application
 
 Router purchase разрешается только после принятого PC application и own-VPS evidence bundle. Текущий master roadmap также содержит P9 multi-server, P10 TCP fallback и P11 installer, backup и hardening. Их нельзя молча удалить из `pc-first-qualified`: перед покупкой router нужно либо завершить P9–P11, либо отдельно утвердить narrower single-server gate и обновить `PLAN.md`.
 
-## Завтрашний execution slice
+## Исторический execution slice от 2026-08-26
 
 26 августа не следует обещать завершение всех фаз. Live canary, reboot, Cisco soak и billable provisioning требуют отдельных gates и реального времени наблюдения.
 
@@ -396,14 +393,14 @@ Router purchase разрешается только после принятог�
 | RedShield restart or disconnect | Да |
 | Cisco state change | Не разрешается этим планом |
 | Droplet creation and billing start | Да |
-| DigitalOcean API token use | Да, token остаётся локальным |
+| DigitalOcean API token use | Не требуется для первого P3 Droplet; любое будущее P8 API use требует отдельного gate и остаётся локальным |
 | Self-hosted backend activation | Да |
 | Router purchase | Да, после pre-router acceptance |
 
-## Open decisions
+## Remaining decisions
 
-- выбрать AMS или FRA после измерения с текущего connection
-- включать DigitalOcean backups или использовать independent encrypted backup
+- подтвердить `ams3` availability в UI; использовать `fra1` только как documented fallback
+- определить production backup после disposable canary; initial backups остаются off
 - нужен ли Telegram read-only notifier в первом own-VPS milestone
 - сохранять ли обязательные P9 second-VPS и P10 fallback gates до router purchase
 - определить retention и alert thresholds после первого telemetry benchmark

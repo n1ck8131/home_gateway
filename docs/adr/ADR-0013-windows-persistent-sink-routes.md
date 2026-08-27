@@ -1,10 +1,10 @@
 # ADR-0013: Windows persistent fail-closed sink routes
 
-Status: Accepted
+Status: Accepted; provider identity amended by ADR-0016
 
 ## Context
 
-P3.4 kept project-managed Windows routes transient in `ActiveStore`. That remains correct for RedShield VPN-class routes because they must not silently survive a restart without reconciliation. P3.5 adds a deliberate exception for fail-closed sink routes: exact target prefixes need a persistent loopback path so a missing transient RedShield route cannot fall back to a physical/default route before startup reconciliation runs.
+P3.4 kept project-managed Windows routes transient in `ActiveStore`. That remains correct for any qualified-tunnel VPN-class route because it must not silently survive a restart without reconciliation. P3.5 adds a deliberate exception for fail-closed sink routes: exact target prefixes need a persistent loopback path so a missing transient tunnel route cannot fall back to a physical/default route before startup reconciliation runs. ADR-0016 changes the active provider identity but not this sink invariant.
 
 The P3.5 read-only evidence qualified this primitive on the current Windows PC, but did not authorize live mutation. All implementation and verification in this phase remains fake-runner/offline unless a later live canary gate is explicitly approved.
 
@@ -19,8 +19,8 @@ Apply is additive-first:
 - establish endpoint-direct assertions first;
 - create and verify persistent sinks;
 - validate firewall coverage;
-- activate transient RedShield VPN-class routes;
-- verify the effective route selects the qualified RedShield interface;
+- activate transient qualified-tunnel VPN-class routes;
+- verify the effective route selects the exact imported-profile-matched tunnel interface;
 - publish DNS policy;
 - prune stale NRPT, transient routes and firewall rules;
 - prune stale sinks last.

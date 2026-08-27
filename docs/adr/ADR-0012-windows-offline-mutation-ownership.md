@@ -1,18 +1,18 @@
 # ADR-0012: Windows offline mutation ownership and recovery
 
-Status: Accepted
+Status: Accepted; provider identity amended by ADR-0016
 
 ## Context
 
-P3.3 qualified the Windows inventory and dry-run boundary without exposing mutation. P3.4 needs a testable Windows apply model that preserves the RedShield provider endpoint, physical direct paths, Cisco/system routes and all unowned state, while keeping live changes behind a separate approval gate.
+P3.3 qualified the Windows inventory and dry-run boundary without exposing mutation. P3.4 originally proved the model against RedShield. ADR-0016 keeps that evidence historical and applies the same ownership model to one qualified self-hosted tunnel endpoint while preserving physical direct paths, Cisco/system routes and all unowned state behind a separate live approval gate.
 
 ## Decision
 
-Windows desired state is split into strict versioned route, firewall and NRPT artifacts. A candidate is accepted only when every provider endpoint matches an independently qualified canonical host prefix, every VPN-class route uses the active RedShield adapter, every live default path is a stable physical adapter, and every VPN-class prefix has an exact outbound block on every physical default interface. Default routes, protected-prefix overlaps, stale GUIDs and unowned ownership collisions fail before mutation.
+Windows desired state is split into strict versioned route, firewall and NRPT artifacts. A candidate is accepted only when every provider endpoint matches an independently qualified canonical host prefix, every VPN-class route uses the one active imported-profile-matched tunnel adapter, every live default path is a stable physical adapter, and every VPN-class prefix has an exact outbound block on every physical default interface. Default routes, protected-prefix overlaps, stale GUIDs and unowned ownership collisions fail before mutation.
 
 Project-created routes use transient `ActiveStore`, `NetMgmt`, a reserved metric and journal ownership; they are reconciled before policy activation after restart. Fail-closed firewall rules use `PersistentStore` and deterministic revision-qualified identities. NRPT rules retain the exact OS-generated identity returned by the backend. Provider/OS-owned endpoint routes may be asserted as evidence but are never claimed or removed. These store semantics follow the Microsoft contracts for [New-NetRoute](https://learn.microsoft.com/en-us/powershell/module/nettcpip/new-netroute) and [New-NetFirewallRule](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule).
 
-ADR-0013 adds a narrow P3.5 exception for dedicated persistent fail-closed sink routes. The transient `ActiveStore` rule in this ADR still applies to `ManagedRoute` and RedShield VPN-class routes; persistent loopback sinks are governed by the separate `SinkRoute` artifact/backend contract.
+ADR-0013 adds a narrow P3.5 exception for dedicated persistent fail-closed sink routes. The transient `ActiveStore` rule in this ADR still applies to `ManagedRoute` and active-tunnel VPN-class routes; persistent loopback sinks are governed by the separate `SinkRoute` artifact/backend contract.
 
 Apply is additive-first: endpoint protection, firewall blocks, VPN routes and NRPT are established before stale project state is pruned. Immutable revisions carry SHA-256 manifests. Before/LKG snapshots contain project-owned state only, carry digest sidecars and are semantically matched back to immutable artifacts before replay.
 

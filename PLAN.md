@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:writing-plans` to create a phase-specific plan, then `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement it task by task. This master plan does not authorize implementation without the phase approval gate.
 
-**Goal:** сначала реализовать и подтвердить на текущем Windows PC воспроизводимый и безопасно обновляемый selective-routing gateway, используя существующий ручной RedShield WireGuard/AmneziaWG `.conf` как bootstrap tunnel; затем перевести PC-first продукт на собственный VPS для управляемых server/mobile/failover функций; только после успешного self-hosted PC-first acceptance перенести тот же policy/control plane на GL.iNet Flint 2 / GL-MT6000 как домашний шлюз для всей сети.
+**Goal:** сначала реализовать и подтвердить на текущем Windows PC воспроизводимый и безопасно обновляемый selective-routing gateway через один минимальный self-hosted DigitalOcean AmneziaWG server; затем добавить управляемые server/mobile/failover функции поверх уже принятого own-VPS path; только после успешного self-hosted PC-first acceptance перенести тот же policy/control plane на GL.iNet Flint 2 / GL-MT6000 как домашний шлюз для всей сети.
 
-**Architecture:** PC-first risk-first modular monolith на Go с платформонезависимыми policy/control-plane contracts, сменными platform adapters и отдельным `TunnelBackend` contract. P2 завершает Linux/OpenWrt dataplane в network namespaces/QEMU; P3 подключает Windows adapter к импортированному RedShield config и даёт ранний рабочий продукт без собственного VPS. P4–P7 развивают локальные функции поверх provider-backed tunnel. P8 разворачивает собственный VPS, переключает тот же `TunnelBackend` без изменения policy/API semantics и открывает server-controlled функции P8–P11. Только после `pc-first-qualified` выполняется финальная миграция на Flint 2 с повторным полным safety acceptance; P2 OpenWrt backend при этом переиспользуется, а не переписывается.
+**Architecture:** PC-first risk-first modular monolith на Go с платформонезависимыми policy/control-plane contracts, сменными platform adapters и отдельным `TunnelBackend` contract. P2 завершает Linux/OpenWrt dataplane в network namespaces/QEMU; P3 подключает Windows adapter к одному вручную созданному self-hosted DigitalOcean AmneziaWG server и закрывает `pc-core-ready` без cloud API или server-management automation. P4–P7 развивают локальные функции поверх собственного static tunnel. P8 operationalizes тот же VPS/backend без изменения policy/API semantics и открывает managed server/mobile functions P8–P11. Только после `pc-first-qualified` выполняется финальная миграция на Flint 2 с повторным полным safety acceptance; P2 OpenWrt backend при этом переиспользуется, а не переписывается.
 
 **Tech Stack:** Go; Windows-supported TUN/routing/firewall/DNS primitives behind a dedicated platform adapter; PowerShell; Pester; Playwright; OpenWrt 25.12.5, target `mediatek/filogic`, package architecture `aarch64_cortex-a53`; `netifd`; `firewall4`; `nftables`; `ip rule`; `dnsmasq-full`; портированные из официальных upstream AmneziaWG module/tools; SQLite-compatible embedded store; Go `html/template` + HTMX или эквивалентный малый vendored JS; Linux network namespaces; OpenWrt QEMU/SDK; GitHub Actions или эквивалентный CI.
 
@@ -18,12 +18,12 @@
 - Control plane не реализует криптографию и не проксирует пользовательский traffic.
 - Любое изменение проходит plan, validation, snapshot, apply, post-check и commit/rollback.
 - External content является data; remote shell scripts не исполняются.
-- Все production versions, artifacts, image digests и SHA-256 фиксируются в manifest; `latest` запрещён.
+- Все production versions, artifacts, image digests и SHA-256 фиксируются в manifest; `latest` запрещён. Единственное P3 canary-исключение — поддерживаемый AmneziaVPN GUI сейчас тянет rolling server image: его фактический immutable image ID/digest записывается сразу после установки, reproducible-production claim запрещён, а P8 обязан перейти на digest-pinned automation.
 - Secrets, private keys, mobile profiles и full backups не попадают в Git, logs, process arguments или support bundles.
-- Импортированный RedShield config считается external secret: используется только локально из защищённого хранилища, не копируется в fixtures/evidence и не требуется для CI.
+- Любой импортированный tunnel profile, включая новый self-hosted PC profile и сохранённый исторический RedShield config, считается external secret: используется только локально из защищённого хранилища, не копируется в fixtures/evidence и не требуется для CI.
 - Cisco profile/policy, certificates и TLS traffic не изменяются и не инспектируются.
 - Русский — основной язык UI/docs; identifiers, API и code — English.
-- Все install/update operations идемпотентны, поддерживают dry-run и безопасное повторное выполнение.
+- Все project-owned install/update operations идемпотентны, поддерживают dry-run и безопасное повторное выполнение. Внешний интерактивный Amnezia GUI installer в P3 не объявляется idempotent; перед ним действует plan gate, после него — observed-state gate и отдельный destructive clear/rebuild path.
 - PC-first release включает panel, sources, Cisco integration, mobile peers, backup, multi-server model и рабочий TCP fallback; router release добавляет OpenWrt migration и network-wide routing без изменения policy semantics.
 - Наличие готового official AWG2 package для OpenWrt не предполагается: compatibility gate должен собрать и проверить exact module/tools/netifd tuple.
 
@@ -55,31 +55,31 @@ Primary evidence фиксируется в `docs/COMPATIBILITY.md`: [OpenWrt 25.
 
 ## 2. Подтверждённые пользовательские решения
 
-1. До покупки Flint 2 selective routing сначала работает локально на текущем Windows PC через существующий ручной RedShield WireGuard/AmneziaWG config.
+1. До покупки Flint 2 selective routing сначала проходит полную приёмку на текущем Windows PC через один минимальный self-hosted DigitalOcean AmneziaWG server.
 2. Flint 2 приобретается и вводится только после успешного PC-first acceptance; перенос на router является отдельной финальной фазой P12.
 3. После переноса Work PC с Cisco подключается непосредственно к Flint 2: Ethernet — основной вариант, прямой Wi-Fi Flint 2 допустим как резервный, Xiaomi-ретранслятор исключён.
 4. Ethernet MAC/client-id и Wi-Fi MAC/client-id представляют одну logical device `work-pc` с несколькими разрешёнными identities.
 5. Windows Random Hardware Address для домашнего SSID должен быть отключён либо явно диагностирован.
 6. Если Cisco запрещает local LAN, система не обходит policy: панель открывается с другого разрешённого admin device либо после отключения Cisco.
 7. В PC-first режиме `cisco-discovery` использует локальный API; после переноса он хранит pending snapshot локально и отправляет его после восстановления разрешённой связи с router API.
-8. RedShield — временный provider-backed transport для P3–P7, а не замена управляемого собственного сервера: P8 обязан перевести PC на собственный VPS до `pc-first-qualified`.
+8. Решение владельца от 2026-08-27: RedShield больше не является target/required transport. P3 создаёт и квалифицирует первый own VPS; P8 добавляет automation, restricted `server-agent`, mobile lifecycle и telemetry. Текущее RedShield/Cisco live state не меняется без отдельного разрешения.
 
 ## 3. Уровни готовности
 
 | Уровень | Значение | Что ещё не разрешено утверждать |
 |---|---|---|
 | `lab-safe` | Policy model и Linux/OpenWrt dataplane safety доказаны в unit/property/netns/QEMU tests | Реальная Windows PC/VPS и Flint 2 совместимость |
-| `pc-core-ready` | Windows PC + импортированный RedShield config проходят selective-routing, fail-closed, restart и recovery smoke | Self-hosted server/mobile/failover scope и router qualification |
+| `pc-core-ready` | Windows PC + один static self-hosted AmneziaWG server проходят selective-routing, fail-closed, restart, recovery и terminal `FullRestore` smoke | Managed server/mobile/failover scope и router qualification |
 | `pc-first-qualified` | Все обязательные функции реализованы и приняты на Windows PC/VPS/Cisco/mobile стенде | Flint 2 migration, network-wide behavior и router performance |
 | `field-qualified 1.0` | Закрыта вся acceptance matrix на реальном router/VPS/Cisco/mobile стенде | Ничего из обязательного scope |
 
-Собственный VPS не нужен до P8: P3–P7 используют RedShield только как непрозрачный client tunnel. Один собственный VPS обязателен с P8 для server-agent и mobile peer lifecycle. Для `pc-first-qualified` multi-server scope и последующего `field-qualified 1.0` нужен второй собственный VPS у другого provider/ASN: provider locations или simulated failover не заменяют real acceptance.
+Один собственный VPS является внешним P3 field gate и нужен для `pc-core-ready`; первый bootstrap выполняется вручную без DigitalOcean API. P8 добавляет `server-agent`, automation и mobile peer lifecycle на уже принятом сервере. Для `pc-first-qualified` multi-server scope и последующего `field-qualified 1.0` нужен второй собственный VPS у другого provider/ASN: provider locations или simulated failover не заменяют real acceptance.
 
 ## 4. Варианты декомпозиции
 
 ### Вариант A — safety spine → feature slices (выбран)
 
-Сначала executable policy model и netns/QEMU dataplane, затем реальный Windows dataplane через импортированный RedShield WireGuard/AmneziaWG config; после этого headless control plane, UI и независимые feature slices развивают provider-backed PC-пилот. В P8 тот же `TunnelBackend` переключается на личный VPS, P9–P11 доводят self-hosted PC-first продукт до полной приёмки, а Flint 2 добавляется последним platform slice поверх уже принятой логики.
+Сначала executable policy model и netns/QEMU dataplane, затем реальный Windows dataplane через один static self-hosted DigitalOcean AmneziaWG server; после этого headless control plane, UI и независимые feature slices развивают own-VPS PC-пилот. В P8 тот же `TunnelBackend` получает managed server/mobile lifecycle, P9–P11 доводят self-hosted PC-first продукт до полной приёмки, а Flint 2 добавляется последним platform slice поверх уже принятой логики.
 
 ### Вариант B — буквально Milestone 0–7 из спецификации
 
@@ -96,13 +96,13 @@ flowchart LR
     P0["P0 Foundation and compatibility"]
     P1["P1 Policy core"]
     P2["P2 Netns/QEMU dataplane"]
-    P3["P3 RedShield-backed PC pilot"]
+    P3["P3 Self-hosted PC pilot"]
     SAFE["PC-DP-SAFE gate"]
     P4["P4 State, revisions, API, hgctl"]
     P5["P5 Panel and PC controls"]
     P6["P6 External sources and probes"]
     P7["P7 Cisco integration"]
-    P8["P8 Own VPS and mobile peers"]
+    P8["P8 Managed VPS and mobile peers"]
     P9["P9 Multi-server and failover"]
     P10["P10 TCP fallback"]
     P11["P11 PC release and recovery"]
@@ -134,7 +134,7 @@ Phase 0 создаёт `DECISIONS.md` и следующие ADR. ADR прини�
 | ADR | Решение, которое нужно зафиксировать | Рекомендуемая исходная позиция |
 |---|---|---|
 | ADR-0001 | Supported platforms и recovery path | Windows PC — первая production target; OpenWrt 25.12.5 `mediatek/filogic` / `aarch64_cortex-a53` — финальная router target; platform adapters имеют независимый recovery profile |
-| ADR-0002 | Tunnel backends, AWG primary и TCP fallback | P3 импортирует supported RedShield WireGuard/AmneziaWG config через read-only provider adapter; P8 переключает тот же contract на self-hosted AWG; OpenWrt port из P0/P2 сохраняется для P12; independent VLESS Reality TUN adapter выбирается benchmark-ом на каждой platform |
+| ADR-0002 | Tunnel backends, AWG primary и TCP fallback | P3 квалифицирует static self-hosted AWG через provider-neutral importer/backend; P8 добавляет managed lifecycle; OpenWrt port из P0/P2 сохраняется для P12; independent VLESS Reality TUN adapter выбирается benchmark-ом на каждой platform |
 | ADR-0003 | Routing ownership, marks и stickiness | Общая semantics скрыта за platform contract; Windows routes/firewall/TUN и OpenWrt marks/tables имеют одного owner; новые connections идут на active server, старые drain на прежнем healthy tunnel |
 | ADR-0004 | Formal precedence и DNS no-leak scope | Origin tier выигрывает раньше specificity; specificity применяется внутри tier; shared-IP collision выбирает `direct`; guarantee действует для managed DNS и explicit device policy |
 | ADR-0005 | Transaction/rollback model | Local commit-confirm watchdog; platform state + DB — coordinated local transaction; host/router↔VPS — idempotent saga с compensation, а не ложная distributed atomicity |
@@ -143,6 +143,7 @@ Phase 0 создаёт `DECISIONS.md` и следующие ADR. ADR прини�
 | ADR-0008 | Cisco discovery и device identity | Read-only Windows observation; scoped token; offline queue; logical device поддерживает Ethernet/Wi-Fi identities; work PC нельзя перевести в `always-vpn` |
 | ADR-0009 | Supply chain и signing | Separate development/release signing; no secret in CI logs; manifest, checksums, signatures, SBOM и provenance обязательны |
 | ADR-0011 | PC-first platform/tunnel boundary | Policy, DesiredState, API и audit не зависят от OS или VPN provider; Windows/OpenWrt реализуют один tested `RoutingBackend`, RedShield/self-hosted paths реализуют один `TunnelBackend`; P8/P12 не меняют public semantics |
+| ADR-0016 | P3 self-hosted DigitalOcean bootstrap | Первый own VPS и static PC peer переходят в P3; P8 сохраняет automation/mobile scope; RedShield остаётся historical compatibility evidence и не меняется live без отдельного gate |
 
 Дополнительные решения, входящие в ADR/tests:
 
@@ -155,7 +156,7 @@ Phase 0 создаёт `DECISIONS.md` и следующие ADR. ADR прини�
 
 ## 7. Dataplane safety gate
 
-До P4 запрещено начинать production API/UI. P1–P2 доказывают platform-neutral policy и Linux/OpenWrt lab invariants; P3 повторяет ту же матрицу на Windows PC с реальным RedShield provider tunnel:
+До P4 запрещено начинать production API/UI. P1–P2 доказывают platform-neutral policy и Linux/OpenWrt lab invariants; P3 повторяет ту же матрицу на Windows PC с одним реальным self-hosted DigitalOcean AmneziaWG tunnel:
 
 | Traffic class | VPN healthy | VPN unavailable | Проверяемый инвариант |
 |---|---|---|---|
@@ -271,26 +272,26 @@ Expected on Linux CI: the same checks plus network-lab prerequisite smoke. `make
 
 **Exit gate:** all §7 dataplane invariants pass in netns and QEMU; invalid apply, crash and reboot preserve WAN management and VPN-class fail-closed behavior.
 
-### P3 — RedShield-backed PC-first VPN pilot on Windows
+### P3 — Self-hosted PC-first VPN pilot on Windows
 
 **Spec mapping:** §4.1–4.7 semantics adapted to one Windows host, §7–11 excluding real multi-server failover, §18 baseline, §26 bootstrap subset, §29.4, §30.1–30.3.
 
-**Files:** provider-neutral `TunnelBackend` contracts, local RedShield config importer, Windows `RoutingBackend` adapter under `internal/system/windows/`, Windows install/recovery smoke scripts and platform contract tests. Secret config and generated runtime state remain outside Git.
+**Files:** provider-neutral `TunnelBackend` contracts, protected local AWG 3.1 config importer, non-secret DigitalOcean create plan, hash-pinned official AmneziaVPN client plus observed server image identity contract, Windows `RoutingBackend` adapter under `internal/system/windows/`, Windows install/recovery smoke scripts and platform contract tests. Secret configs, SSH private keys and generated runtime state remain outside Git.
 
-**Consumes:** P1 policy contracts, P2 `RoutingBackend` semantics and safety matrix, and a user-supplied manual RedShield WireGuard or AmneziaWG `.conf`. P2 Linux/OpenWrt implementation remains unchanged and is reused in P12.
+**Consumes:** P1 policy contracts, P2 `RoutingBackend` semantics and safety matrix, one manually created DigitalOcean Droplet and one protected static self-hosted AmneziaWG PC profile. P2 Linux/OpenWrt implementation remains unchanged and is reused in P12.
 
 **Work:**
 
-1. Before implementation, accept ADR-0011 and validate the exact user config format without printing keys: WireGuard and AmneziaWG are supported candidates; proprietary app-only RedLink state is not an integration contract.
-2. Import the provider config from protected local storage, preserve its endpoint, keys and obfuscation fields, and prevent it from entering Git, logs, evidence bundles or command-line arguments.
+1. Retain ADR-0011 and accept ADR-0016; validate the exact self-hosted config format without printing keys. WireGuard and AmneziaWG remain supported parser candidates; proprietary app-only state is not an integration contract.
+2. Create one DigitalOcean Droplet manually from a reviewed non-secret plan, use the hash-pinned official AmneziaVPN GUI to install only AmneziaWG, record the observed server image identity and export one native guest profile. Import it from protected local storage, preserve endpoint, keys and obfuscation fields, and prevent it from entering Git, logs, evidence bundles or command-line arguments.
 3. Implement the Windows platform adapter for project-owned routes, firewall/DNS state, tunnel lifecycle, validation, apply, LKG and rollback without changing Cisco configuration.
-4. Keep the RedShield endpoint and protected system/Cisco destinations on the direct path; implement VPN-class fail-closed for IPv4 and IPv6 without requiring provider-side changes.
+4. Keep the self-hosted endpoint and protected system/Cisco destinations on the direct path; implement VPN-class fail-closed for IPv4 and IPv6 without changing Cisco or relying on automatic cloud actions.
 5. Repeat the complete safety matrix, MTU, TCP/UDP/QUIC, daemon crash, adapter loss, OS restart and recovery on the current Windows PC.
-6. Produce a minimal operator flow to enable, inspect, disable and fully restore the pre-install Windows network state; expose provider capabilities as read-only and explicitly mark server-management operations unavailable until P8.
+6. Produce a minimal operator flow to enable, inspect, disable and fully restore the pre-install Windows network state; keep automated server-management operations unavailable until P8.
 
-**Verification:** config schema/redaction tests; Windows install/upgrade/remove and rollback smoke; real direct/RedShield egress and DNS/IPv6 assertions; tunnel-down packet capture; Cisco-off fixture; restart persistence and emergency disable. Tests must not persist or echo the real config.
+**Verification:** AWG 3.1 config schema/redaction and create-plan tests; pinned client hash plus observed server image identity; documented clear-server/rebuild behavior; Windows install/upgrade/remove and rollback smoke; observed handshake plus real direct/self-hosted egress and DNS/IPv6 assertions; tunnel-down packet capture; Cisco-off fixture; restart persistence, emergency disable and terminal `FullRestore`. Tests must not persist or echo the real config.
 
-**Exit gate:** `pc-core-ready`; selective routing through RedShield works on the current PC, protected traffic is fail-closed, direct/Cisco paths remain available, removal restores the prior network state, and `PC-DP-SAFE` is frozen as mandatory regression suite. Own VPS and Flint 2 are not required.
+**Exit gate:** `pc-core-ready`; selective routing through the self-hosted server works on the current PC, protected traffic is fail-closed, direct/Cisco paths remain available, terminal journaled `FullRestore` restores prior project-owned network state, and `PC-DP-SAFE` is frozen as mandatory regression suite. P8 automation/mobile scope and Flint 2 are not required.
 
 ### P4 — State, revisions, local API and `hgctl`
 
@@ -369,7 +370,7 @@ Expected on Linux CI: the same checks plus network-lab prerequisite smoke. `make
 
 **Exit gate:** split-tunnel branch proves Cisco endpoint direct, internal routes remain OS-owned, public work portals use WAN/Cisco exit, blocked non-work resources use the local PC VPN where policy allows; full-tunnel branch proves diagnosis and non-interference only.
 
-### P8 — Own VPS transition and mobile peer lifecycle
+### P8 — Managed VPS operations and mobile peer lifecycle
 
 **Spec mapping:** §7–11 single self-hosted server baseline, §17–18 peer operations, §16.7, §24 peer endpoints, §30.1–30.4.
 
@@ -377,17 +378,17 @@ Expected on Linux CI: the same checks plus network-lab prerequisite smoke. `make
 
 **Work:**
 
-1. Provision one personal VPS idempotently from pinned artifacts and implement restricted `server-agent` operations through a versioned allowlisted JSON protocol over SSH forced command with no `shell.exec`.
-2. Create a self-hosted PC peer, switch from RedShield to the own-VPS `TunnelBackend`, and rerun `PC-DP-SAFE`; policy, lists, UI/API and route decisions must remain equivalent for shared fixtures.
-3. Keep RedShield as an optional manually selected diagnostic/provider backend during migration, not as an automatic fallback or production dependency.
+1. Reconcile the P3-qualified server idempotently from pinned artifacts and implement restricted `server-agent` operations through a versioned allowlisted JSON protocol over SSH forced command with no `shell.exec`.
+2. Preserve the accepted self-hosted PC `TunnelBackend` behavior while moving static/manual operations under the managed lifecycle; rerun `PC-DP-SAFE` with equivalent policy, lists, UI/API and route decisions.
+3. Keep historical RedShield compatibility outside normal operation; do not add automatic fallback or restore it as a production dependency.
 4. Create one keypair per mobile device/server pair; persist only public key/metadata after delivery.
 5. Make one-time profile single-consumption with 10-minute TTL, cache-control and audit without secret logging.
 6. Apply peer changes transactionally through official `awg syncconf`/supported mechanism; implement stats, disable, rotate and revoke idempotently.
 7. Use tunnel-only DNS for full-tunnel mobile profiles.
 
-**Verification:** pinned server deployment/recovery; RedShield-versus-own-VPS decision equivalence; real PC egress/DNS/IPv6 and fail-closed checks after migration; server protocol fuzzing; one-time lifecycle tests; physical mobile import over cellular; revoke stops access within 10 seconds and does not affect other devices.
+**Verification:** pinned managed-server reconciliation/recovery; P3-static-versus-P8-managed decision equivalence; real PC egress/DNS/IPv6 and fail-closed regression; server protocol fuzzing; one-time lifecycle tests; physical mobile import over cellular; revoke stops access within 10 seconds and does not affect other devices.
 
-**Exit gate:** the PC-first product uses one own VPS as its primary managed VPN without policy/API regression; full mobile acceptance passes on that server and one physical client. RedShield is no longer required for normal operation.
+**Exit gate:** the P3-qualified own VPS is managed without policy/API regression; full mobile acceptance passes on that server and one physical client. RedShield remains unnecessary for normal operation.
 
 ### P9 — Multi-server health, stickiness and failover
 
@@ -478,7 +479,7 @@ Expected on Linux CI: the same checks plus network-lab prerequisite smoke. `make
 | Goal, supplied infrastructure, logical architecture | P0, P3–P5, P7–P8, P12 | PC-first scenarios followed by equivalent router scenarios |
 | Principles, route classes, precedence | P1–P3, P12 | Unit/property + netns/QEMU + Windows captures + final Flint captures |
 | Platform dataplane, DNS, IPv6, QUIC | P2–P3, P12 | Shared safety matrix across lab, Windows PC and Flint 2 |
-| Tunnel transport, AWG/VPS and server-agent | P3, P8, P12 | RedShield-backed PC pilot, self-hosted migration/mobile tests, then router migration proof |
+| Tunnel transport, AWG/VPS and server-agent | P3, P8, P12 | Static self-hosted PC pilot, managed server/mobile tests, then router migration proof |
 | Multi-server/failover | P9 | Two providers/ASNs, repeated outage cycles |
 | Lists, sources, probes | P1, P6 | Fuzz/offline fixtures + 100k hardware benchmark |
 | Cisco | P7 | Fixture matrix + Ethernet/Wi-Fi field snapshots + workday soak |
@@ -494,16 +495,16 @@ Expected on Linux CI: the same checks plus network-lab prerequisite smoke. `make
 
 The following evidence cannot be replaced by mocks:
 
-- RedShield bootstrap: a real manual WireGuard/AmneziaWG config must connect through the supported Windows integration; provider credentials and keys remain outside repository evidence.
+- P3 self-hosted bootstrap: one real manually created DigitalOcean Droplet and native AmneziaWG guest profile must connect through the supported Windows integration; cloud/SSH/VPN credentials and keys remain outside repository evidence. Historical RedShield evidence is retained but is not an active gate.
 - GL-MT6000: exact firmware/kernel/AWG compatibility, APK lifecycle, reboot/failsafe, flow offload, flash/RAM/CPU and throughput.
-- One real VPS: AWG handshake/egress/MTU, restricted SSH, peer revoke and server backup.
+- One real VPS: P3 owns AWG handshake/egress/MTU and restricted SSH; P8 owns managed peer revoke and server backup.
 - Two VPS on different provider/ASN: real health failover/failback and multi-server peer operations.
 - Cisco work environment: endpoint discovery, split/full tunnel, NRPT/DNS, LAN policy and workday stability.
 - Physical mobile client + cellular network: profile import, tunnel DNS, egress and revoke.
 - ISP/ONT environment: DHCP/PPPoE/VLAN, bridge/double NAT, IPTV/VoIP and recovery path if these functions are used.
 - Release signing credentials: production signatures and Windows trust cannot be represented by development test keys.
 
-The GL-MT6000 and ISP/ONT gates are intentionally deferred to P12 and do not block P3–P11 or `pc-first-qualified`. RedShield is sufficient only for P3–P7; one real own VPS becomes mandatory in P8, and the current Windows PC plus applicable Cisco/mobile gates are mandatory for P11. If an external gate required by the active phase is unavailable, software work may reach `awaiting-field-qualification`, but the corresponding acceptance item and release level remain open in `STATUS.md`.
+The GL-MT6000 and ISP/ONT gates are intentionally deferred to P12 and do not block P3–P11 or `pc-first-qualified`. One real own VPS is mandatory in P3 for `pc-core-ready`; P8 adds managed/mobile lifecycle, and the current Windows PC plus applicable Cisco/mobile gates are mandatory for P11. If an external gate required by the active phase is unavailable, software work may reach `awaiting-field-qualification`, but the corresponding acceptance item and release level remain open in `STATUS.md`.
 
 ## 12. Out of first-release scope
 
@@ -524,13 +525,13 @@ The following remain architecture-compatible but do not delay 1.0 unless the spe
 Approval of this document accepts:
 
 1. PC-first safety decomposition P0–P12, with the completed P2 scope preserved as a regression baseline;
-2. existing manual RedShield WireGuard/AmneziaWG config as the provider-backed bootstrap for P3–P7, with no provider-side management assumptions;
+2. one manually created DigitalOcean AmneziaWG server and protected static PC profile as the P3 bootstrap, with RedShield retained only as historical compatibility evidence;
 3. conditional Cisco full-tunnel acceptance;
 4. platform-neutral per-server session selection with Windows-specific implementation first and OpenWrt marks/tables in P12;
-5. mandatory migration to one own VPS in P8 before mobile/server-controlled features and `pc-first-qualified`;
+5. mandatory qualification of one own VPS in P3 before `pc-core-ready`, followed by P8 mobile/server-controlled lifecycle;
 6. Flint 2 purchase and all physical-router gates deferred until `pc-first-qualified`, followed by final P12 migration;
 7. mandatory second own VPS for PC-first multi-server acceptance and final field-qualified failover;
 8. separate phase plan/review/test cycle before every implementation phase;
 9. correction of ambiguous APK naming and the mandatory AWG2/OpenWrt porting gate in P12.
 
-P0-P2 are complete for their declared software/emulated scopes. The approved P3 PC-first implementation plan is active on `phase/p3-redshield-windows`; it must not start Flint 2 work or require router/VPS hardware.
+P0-P2 are complete for their declared software/emulated scopes. The approved P3 PC-first implementation plan is active on the historically named `phase/p3-redshield-windows`; it now requires one external VPS field gate but must not start Flint 2 work or claim P8 managed/mobile acceptance.

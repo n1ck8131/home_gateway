@@ -14,3 +14,6 @@
 | [ADR-0010](docs/adr/ADR-0010-dnsmasq-domain-match-capability.md) | Accepted | dnsmasq domain match capability |
 | [ADR-0011](docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md) | Accepted | PC-first platform and tunnel boundary |
 | [ADR-0012](docs/adr/ADR-0012-windows-offline-mutation-ownership.md) | Accepted | Windows offline mutation ownership and recovery |
+| [ADR-0013](docs/adr/ADR-0013-windows-persistent-sink-routes.md) | Accepted | Windows persistent fail-closed sink routes |
+| [ADR-0015](docs/adr/ADR-0015-p35-redacted-canary-block-diagnostics.md) | Accepted | P3.5 redacted canary block diagnostics |
+| [ADR-0016](docs/adr/ADR-0016-p3-self-hosted-digitalocean-bootstrap.md) | Accepted | P3 self-hosted DigitalOcean bootstrap |

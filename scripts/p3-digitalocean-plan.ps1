@@ -5,6 +5,7 @@ $ErrorActionPreference = 'Stop'
 $script:P3DigitalOceanPlanRoot = Split-Path -Parent $PSScriptRoot
 $script:P3MaximumPublicKeyBytes = 4096
 $script:P3MaximumManifestBytes = 16384
+$script:P3DriveFixed = 3
 
 function Test-P3LocalPublicKeyPathSyntax([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0) { return $false }
@@ -28,24 +29,48 @@ function Get-P3CanonicalPublicKeyPath([string]$Path) {
     if (-not (Test-P3LocalPublicKeyPathSyntax $fullPath)) {
         throw 'public key must be an absolute local .pub path'
     }
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($root) -or (Get-P3DriveType -Root $root) -ne $script:P3DriveFixed) {
+        throw 'public key must be on a local fixed drive'
+    }
     return $fullPath
 }
 
+function Get-P3DriveType([string]$Root) {
+    try {
+        $drive = New-Object -TypeName IO.DriveInfo -ArgumentList $Root
+        return [int]$drive.DriveType
+    } catch {
+        return 0
+    }
+}
+
+function Get-P3PathItem([string]$Path) {
+    return Get-Item -LiteralPath $Path -Force
+}
+
 function Assert-P3NoReparsePath([string]$Path) {
-    $current = $Path
-    while ($true) {
+    $root = [IO.Path]::GetPathRoot($Path)
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        throw 'public key file or an ancestor is unavailable'
+    }
+    $segments = @($Path.Substring($root.Length) -split '[\\/]' | Where-Object { $_ -ne '' })
+    $current = $root
+    for ($index = -1; $index -lt $segments.Count; $index++) {
+        if ($index -ge 0) { $current = Join-Path $current $segments[$index] }
         try {
-            $item = Get-Item -LiteralPath $current -Force
+            $item = Get-P3PathItem -Path $current
         } catch {
             throw 'public key file or an ancestor is unavailable'
         }
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw 'public key path must not traverse a reparse point'
         }
-        $parent = [IO.Path]::GetDirectoryName($current)
-        if ([string]::IsNullOrEmpty($parent) -or $parent -ceq $current) { break }
-        $current = $parent
     }
+}
+
+function Read-P3FileBytes([string]$Path) {
+    return ,[IO.File]::ReadAllBytes($Path)
 }
 
 function Read-P3BoundedFileBytes([string]$Path, [int]$MaximumBytes, [string]$Kind) {
@@ -62,7 +87,7 @@ function Read-P3BoundedFileBytes([string]$Path, [int]$MaximumBytes, [string]$Kin
         throw "$Kind file is outside the size limit"
     }
     try {
-        $bytes = [IO.File]::ReadAllBytes($Path)
+        $bytes = Read-P3FileBytes -Path $Path
     } catch {
         throw "$Kind file cannot be read"
     }

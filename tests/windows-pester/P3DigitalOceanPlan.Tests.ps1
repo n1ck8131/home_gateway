@@ -38,6 +38,13 @@ Describe 'P3 DigitalOcean plan-only guard' {
     BeforeEach {
         Copy-Item -LiteralPath $sourceManifest -Destination $script:P3FixtureManifest -Force
         [IO.File]::WriteAllText($script:P3KeyPath, $syntheticPublicKey, [Text.UTF8Encoding]::new($false))
+        $script:P3InspectedPaths = @()
+        Mock Get-P3DriveType { return 3 }
+        Mock Get-P3PathItem {
+            $script:P3InspectedPaths += $Path
+            return Get-Item -LiteralPath $Path -Force
+        }
+        Mock Read-P3FileBytes { return ,[IO.File]::ReadAllBytes($Path) }
         Mock Invoke-P3NativeSshKeygen { return 0 }
     }
 
@@ -105,20 +112,37 @@ Describe 'P3 DigitalOcean plan-only guard' {
         Should-Invoke Invoke-P3NativeSshKeygen -Times 0 -Exactly -Scope It
     }
 
-    It 'rejects every reparse ancestor and reparse leaf before native invocation' {
+    It 'rejects a mapped network drive before content or native access' {
+        Mock Get-P3DriveType { return 4 }
+        { Invoke-P3DigitalOceanPlan -PublicKeyPath $script:P3KeyPath } | Should -Throw
+        $expectedRoot = [IO.Path]::GetPathRoot($script:P3KeyPath)
+        Should-Invoke Get-P3DriveType -Times 1 -Exactly -Scope It -ParameterFilter { $Root -ceq $expectedRoot }
+        Should-Invoke Read-P3FileBytes -Times 0 -Exactly -Scope It
+        Should-Invoke Invoke-P3NativeSshKeygen -Times 0 -Exactly -Scope It
+    }
+
+    It 'inspects root-to-ancestor and rejects every reparse point before content or native access' {
         $realDirectory = Join-Path $TestDrive 'real'
         $junctionDirectory = Join-Path $TestDrive 'junction'
         New-Item -ItemType Directory -Path $realDirectory | Out-Null
         $realKey = Join-Path $realDirectory 'operator.pub'
         [IO.File]::WriteAllText($realKey, $syntheticPublicKey, [Text.UTF8Encoding]::new($false))
         New-Item -ItemType Junction -Path $junctionDirectory -Target $realDirectory | Out-Null
-        { Invoke-P3DigitalOceanPlan -PublicKeyPath (Join-Path $junctionDirectory 'operator.pub') } | Should -Throw
+        $throughJunction = Join-Path $junctionDirectory 'operator.pub'
+        { Invoke-P3DigitalOceanPlan -PublicKeyPath $throughJunction } | Should -Throw
+        $script:P3InspectedPaths[0] | Should -Be ([IO.Path]::GetPathRoot($throughJunction))
+        $script:P3InspectedPaths[-1] | Should -Be $junctionDirectory
+        $script:P3InspectedPaths | Should -Not -Contain $throughJunction
 
+        $script:P3InspectedPaths = @()
         $leafTarget = Join-Path $TestDrive 'leaf-target'
         $leafReparse = Join-Path $TestDrive 'leaf.pub'
         New-Item -ItemType Directory -Path $leafTarget | Out-Null
         New-Item -ItemType Junction -Path $leafReparse -Target $leafTarget | Out-Null
         { Invoke-P3DigitalOceanPlan -PublicKeyPath $leafReparse } | Should -Throw
+        $script:P3InspectedPaths[0] | Should -Be ([IO.Path]::GetPathRoot($leafReparse))
+        $script:P3InspectedPaths[-1] | Should -Be $leafReparse
+        Should-Invoke Read-P3FileBytes -Times 0 -Exactly -Scope It
         Should-Invoke Invoke-P3NativeSshKeygen -Times 0 -Exactly -Scope It
     }
 

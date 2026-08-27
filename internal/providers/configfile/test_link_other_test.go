@@ -2,6 +2,8 @@
 
 package configfile
 
-import "testing"
+import "os"
 
-func TestOtherPlatformLinkRejectionIsDelegatedToStrictImporter(t *testing.T) {}
+func createTestDirectoryLink(target, link string) error {
+	return os.Symlink(target, link)
+}

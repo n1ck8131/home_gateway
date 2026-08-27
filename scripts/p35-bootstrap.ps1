@@ -130,11 +130,11 @@ if ($Action -ceq 'Install') {
 
 if ([string]::IsNullOrWhiteSpace($DriverPath)) { throw 'P3.5 bootstrap driver path is required for an in-memory pinned invocation' }
 if ([string]::IsNullOrWhiteSpace($PayloadPath)) { $PayloadPath = Join-Path $PSScriptRoot 'p35-bootstrap-elevated.ps1' }
-$resolvedConfig = Resolve-LocalCleanPath -Path $ConfigPath -Label 'RedShield config source'
+$resolvedConfig = Resolve-LocalCleanPath -Path $ConfigPath -Label 'Tunnel config source'
 $resolvedDriver = Resolve-LocalCleanPath -Path $DriverPath -Label 'bootstrap driver'
 $resolvedPayload = Resolve-LocalCleanPath -Path $PayloadPath -Label 'bootstrap payload'
 
-Assert-FileSHA256 -Path $resolvedConfig -Expected $ExpectedConfigSHA256 -Label 'RedShield config source'
+Assert-FileSHA256 -Path $resolvedConfig -Expected $ExpectedConfigSHA256 -Label 'Tunnel config source'
 Assert-FileSHA256 -Path $resolvedDriver -Expected $ExpectedDriverSHA256 -Label 'bootstrap driver'
 
 if ($Action -ceq 'Install') {

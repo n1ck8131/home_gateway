@@ -7,7 +7,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/vsevo/home-gateway/internal/providers/redshield"
+	"github.com/vsevo/home-gateway/internal/providers/selfhosted"
 	"github.com/vsevo/home-gateway/internal/revisions/apply"
 	windowssystem "github.com/vsevo/home-gateway/internal/system/windows"
 	"github.com/vsevo/home-gateway/internal/tunnel"
@@ -28,7 +28,7 @@ type dependencies struct {
 
 func defaultDependencies() dependencies {
 	return dependencies{
-		backend:               redshield.Backend{},
+		backend:               selfhosted.Backend{},
 		collect:               windowssystem.NativeCollector{},
 		resolve:               windowssystem.ResolveEndpoint,
 		newMutation:           defaultMutationBackend,
@@ -62,10 +62,10 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	ctx := context.Background()
 	inspection, err := dependencies.backend.Inspect(ctx, tunnel.ConfigSource{Path: configPath})
 	if err != nil {
-		fmt.Fprintln(stderr, "RedShield config inspection failed:", err)
+		fmt.Fprintln(stderr, "Tunnel config inspection failed:", err)
 		return 1
 	}
-	if command == "redshield-inspect" {
+	if command == "redshield-inspect" || command == "tunnel-inspect" {
 		return encodeJSON(stdout, stderr, inspection)
 	}
 
@@ -103,6 +103,8 @@ func parseReadOnlyCommand(args []string) (string, string, bool) {
 	switch {
 	case args[0] == "redshield" && args[1] == "inspect":
 		return args[3], "redshield-inspect", true
+	case args[0] == "tunnel" && args[1] == "inspect":
+		return args[3], "tunnel-inspect", true
 	case args[0] == "windows" && args[1] == "preflight":
 		return args[3], "windows-preflight", true
 	default:
@@ -123,6 +125,7 @@ func encodeJSON(stdout, stderr io.Writer, value any) int {
 func writeUsage(program string, writer io.Writer) {
 	fmt.Fprintf(writer, "usage: %s version --json\n", program)
 	fmt.Fprintf(writer, "       %s redshield inspect --config <path> --json\n", program)
+	fmt.Fprintf(writer, "       %s tunnel inspect --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows preflight --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary plan --config <path> --config-sha256 <lowercase-sha256> --state-root <absolute-path> --revision <id> --target <ip> [--target <ip>] --dns-namespace <suffix> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary <apply|confirm> <plan-options> --confirm-live <challenge> --json\n", program)

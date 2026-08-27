@@ -79,8 +79,8 @@ Describe 'scripts/p35-bootstrap-elevated.ps1' {
         @($names | Where-Object { $_ -match '(?i)(NetRoute|NetFirewall|DnsClient|NetAdapter|VpnConnection|ScheduledTask|New-Service|Set-Service|netsh|route\.exe|sc\.exe)' }) | Should -BeNullOrEmpty
         @($names | Where-Object { $_ -in @('Start-Process', 'Invoke-Expression', 'Get-Content', 'Set-Content', 'Add-Content', 'Out-File', 'Invoke-WebRequest', 'Invoke-RestMethod') }) | Should -BeNullOrEmpty
         $text | Should -Match 'Install-PinnedConfig\s+-Source\s+\$configSource'
-        $text | Should -Match "secrets, 'redshield\.conf'"
-        $text | Should -Match "secrets, 'redshield\.sha256'"
+        $text | Should -Match "secrets, 'tunnel\.conf'"
+        $text | Should -Match "secrets, 'tunnel\.sha256'"
         $text | Should -Match 'FileShare\]::None'
         $text | Should -Not -Match 'ReadAllText|ReadAllBytes'
     }

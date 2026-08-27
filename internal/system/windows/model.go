@@ -12,8 +12,11 @@ const (
 type AdapterKind string
 
 const (
-	AdapterPhysical  AdapterKind = "physical"
-	AdapterRedShield AdapterKind = "redshield"
+	AdapterPhysical AdapterKind = "physical"
+	AdapterTunnel   AdapterKind = "tunnel"
+	// AdapterRedShield remains a source-compatible historical alias. New canary
+	// decisions must use AdapterTunnel, never a provider identity.
+	AdapterRedShield AdapterKind = AdapterTunnel
 	AdapterCisco     AdapterKind = "cisco"
 	AdapterLoopback  AdapterKind = "loopback"
 	AdapterOther     AdapterKind = "other"

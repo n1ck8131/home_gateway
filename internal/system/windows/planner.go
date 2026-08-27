@@ -34,7 +34,7 @@ func (Planner) Plan(inventory Inventory, inspection tunnel.Inspection) Preflight
 	} else {
 		plan.info("backend_tunnel_status_up", "The provider tunnel status is authoritatively observed as up.")
 	}
-	matchedRedShieldAdapters := planTunnelBinding(&plan, adapters, metadata)
+	matchedTunnelAdapters := planTunnelBinding(&plan, adapters, metadata)
 
 	unclassifiedIPv6Default := planUnclassifiedDefaultRoutes(&plan, inventory.Routes, adapters)
 	physicalDefaults := defaultRoutesByFamily(inventory.Routes, adapters, AdapterPhysical)
@@ -48,7 +48,7 @@ func (Planner) Plan(inventory Inventory, inspection tunnel.Inspection) Preflight
 	}
 
 	planCiscoPreservation(&plan, inventory.Routes, adapters)
-	planFailClosed(&plan, metadata, inventory.Routes, matchedRedShieldAdapters, physicalDefaults, unclassifiedIPv6Default)
+	planFailClosed(&plan, metadata, inventory.Routes, matchedTunnelAdapters, physicalDefaults, unclassifiedIPv6Default)
 
 	plan.ReadOnlyQualified = !hasBlockingFinding(plan.Findings)
 	plan.ApplyBlocked = true
@@ -58,34 +58,34 @@ func (Planner) Plan(inventory Inventory, inspection tunnel.Inspection) Preflight
 }
 
 func planTunnelBinding(plan *Preflight, adapters []Adapter, metadata tunnel.Metadata) []Adapter {
-	redShieldAdapters := activeAdapters(adapters, AdapterRedShield)
-	switch len(redShieldAdapters) {
+	tunnelAdapters := activeAdapters(adapters, AdapterTunnel)
+	switch len(tunnelAdapters) {
 	case 0:
 		plan.LocalTunnelStatus = LocalTunnelStatus{State: LocalTunnelDown, Observed: true}
-		plan.block("redshield_tunnel_not_active", "No active RedShield WireGuard or AmneziaWG adapter was found.")
+		plan.block("tunnel_not_active", "No active WireGuard or AmneziaWG tunnel adapter was found.")
 		return nil
 	case 1:
-		plan.info("redshield_tunnel_active", "Exactly one active RedShield tunnel adapter was found.")
+		plan.info("tunnel_active", "Exactly one active tunnel adapter was found.")
 	default:
-		plan.block("redshield_adapter_count_invalid", "More than one active RedShield tunnel adapter was found.")
+		plan.block("tunnel_adapter_count_invalid", "More than one active tunnel adapter was found.")
 		return nil
 	}
-	if redShieldAdapters[0].InterfaceGUID == "" {
-		plan.block("redshield_interface_identity_unresolved", "The active RedShield adapter has no stable Windows interface GUID.")
+	if tunnelAdapters[0].InterfaceGUID == "" {
+		plan.block("tunnel_interface_identity_unresolved", "The active tunnel adapter has no stable Windows interface GUID.")
 		return nil
 	}
 
-	if !adapterMatchesImportedAddresses(redShieldAdapters[0], metadata.InterfaceAddresses) {
-		plan.block("redshield_adapter_binding_mismatch", "The active RedShield adapter does not match the imported tunnel addresses.")
+	if !adapterMatchesImportedAddresses(tunnelAdapters[0], metadata.InterfaceAddresses) {
+		plan.block("tunnel_adapter_binding_mismatch", "The active tunnel adapter does not match the imported tunnel addresses.")
 		return nil
 	}
 	plan.LocalTunnelStatus = LocalTunnelStatus{
 		State:         LocalTunnelUp,
 		Observed:      true,
-		InterfaceGUID: redShieldAdapters[0].InterfaceGUID,
+		InterfaceGUID: tunnelAdapters[0].InterfaceGUID,
 	}
-	plan.info("redshield_adapter_binding_matched", "The active RedShield adapter matches the imported tunnel addresses.")
-	return []Adapter{redShieldAdapters[0]}
+	plan.info("tunnel_adapter_binding_matched", "The active tunnel adapter matches the imported tunnel addresses.")
+	return []Adapter{tunnelAdapters[0]}
 }
 
 func adapterMatchesImportedAddresses(adapter Adapter, imported []string) bool {

@@ -457,9 +457,9 @@ if ([IO.File]::Exists($configAclSnapshot)) {
     $binding = Read-ConfigAclSnapshot -Path $configAclSnapshot -ConfigPath $configSource -Expected ([string]$request.config_sha256)
 }
 
-$installedConfig = [IO.Path]::Combine($secrets, 'redshield.conf')
+$installedConfig = [IO.Path]::Combine($secrets, 'tunnel.conf')
 Install-PinnedConfig -Source $configSource -Destination $installedConfig -Expected ([string]$request.config_sha256) -Binding $binding
-Ensure-ExactTextFile -Path ([IO.Path]::Combine($secrets, 'redshield.sha256')) -Text ([string]$request.config_sha256)
+Ensure-ExactTextFile -Path ([IO.Path]::Combine($secrets, 'tunnel.sha256')) -Text ([string]$request.config_sha256)
 Protect-ConfigSource -Path $configSource -Expected ([string]$request.config_sha256) -Binding $binding
 
 $installedLauncher = [IO.Path]::Combine($bin, 'p35-canary.ps1')

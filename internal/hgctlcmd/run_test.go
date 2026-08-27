@@ -80,6 +80,13 @@ func TestRunRedShieldInspectJSONIsRedacted(t *testing.T) {
 	}
 }
 
+func TestParseReadOnlyCommandAcceptsProviderNeutralTunnelInspect(t *testing.T) {
+	path, command, ok := parseReadOnlyCommand([]string{"tunnel", "inspect", "--config", "C:\\synthetic.conf", "--json"})
+	if !ok || command != "tunnel-inspect" || path != "C:\\synthetic.conf" {
+		t.Fatalf("provider-neutral inspect = %q, %q, %v", path, command, ok)
+	}
+}
+
 func TestRunWindowsPreflightReturnsZeroOnlyWhenReadOnlyQualified(t *testing.T) {
 	inspection := tunnel.Inspection{
 		Metadata: tunnel.Metadata{

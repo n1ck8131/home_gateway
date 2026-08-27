@@ -18,7 +18,7 @@ func TestPlannerSeparatesReadOnlyQualificationFromUnsupportedApply(t *testing.T)
 		t.Fatalf("local tunnel status = %#v", plan.LocalTunnelStatus)
 	}
 	assertFinding(t, plan, "backend_tunnel_status_unobserved", SeverityInfo)
-	assertFinding(t, plan, "redshield_adapter_binding_matched", SeverityInfo)
+	assertFinding(t, plan, "tunnel_adapter_binding_matched", SeverityInfo)
 	assertFinding(t, plan, "cisco_routes_identified", SeverityInfo)
 	assertFinding(t, plan, "windows_apply_unsupported", SeverityInfo)
 	ciscoOperation := findOperation(t, plan, OperationPreserveCiscoRoute, "10.50.0.0/16")
@@ -149,7 +149,7 @@ func TestPlannerBlocksMissingTunnelCiscoRoutesAndFailClosedFamilies(t *testing.T
 		t.Fatalf("unsafe inventory unexpectedly qualified: %#v", plan)
 	}
 	for _, code := range []string{
-		"redshield_tunnel_not_active",
+		"tunnel_not_active",
 		"cisco_routes_unresolved",
 		"ipv4_fail_closed_unresolved",
 		"ipv6_fail_closed_unresolved",
@@ -186,25 +186,25 @@ func TestPlannerBlocksUnsafeLocalTunnelBindingAndIdentity(t *testing.T) {
 			mutate: func(_ *Inventory, inspection *tunnel.Inspection) {
 				inspection.Metadata.InterfaceAddresses = []string{"10.99.0.2/32"}
 			},
-			finding: "redshield_adapter_binding_mismatch",
+			finding: "tunnel_adapter_binding_mismatch",
 		},
 		"partial address mismatch": {
 			mutate: func(_ *Inventory, inspection *tunnel.Inspection) {
 				inspection.Metadata.InterfaceAddresses = []string{"10.20.30.2/24", "fd99::2/64"}
 			},
-			finding: "redshield_adapter_binding_mismatch",
+			finding: "tunnel_adapter_binding_mismatch",
 		},
 		"two active adapters": {
 			mutate: func(inventory *Inventory, _ *tunnel.Inspection) {
 				inventory.Adapters = append(inventory.Adapters, Adapter{Name: "WireGuard second", Index: 41, InterfaceGUID: "44444444-4444-4444-8444-444444444444", Kind: AdapterRedShield, Up: true, Addresses: []string{"10.99.0.2/32"}})
 			},
-			finding: "redshield_adapter_count_invalid",
+			finding: "tunnel_adapter_count_invalid",
 		},
 		"missing stable identity": {
 			mutate: func(inventory *Inventory, _ *tunnel.Inspection) {
 				inventory.Adapters[1].InterfaceGUID = ""
 			},
-			finding: "redshield_interface_identity_unresolved",
+			finding: "tunnel_interface_identity_unresolved",
 		},
 	}
 	for name, test := range tests {

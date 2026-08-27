@@ -13,16 +13,16 @@ import (
 	xwindows "golang.org/x/sys/windows"
 )
 
-const canaryInstalledConfigPinName = "redshield.sha256"
+const canaryInstalledConfigPinName = "tunnel.sha256"
 
 func ValidateProductionCanaryInstalledConfigSource(path, expectedSHA256 string) error {
 	root, err := ProductionCanaryStateRoot()
 	if err != nil {
 		return err
 	}
-	installed := filepath.Join(root, "secrets", "redshield.conf")
+	installed := filepath.Join(root, "secrets", "tunnel.conf")
 	if !strings.EqualFold(path, installed) {
-		return errors.New("live P3.5 requires the protected installed RedShield config")
+		return errors.New("live P3 requires the protected installed tunnel config")
 	}
 	if len(expectedSHA256) != 64 {
 		return errors.New("installed P3.5 config SHA-256 is invalid")
@@ -66,7 +66,7 @@ func ValidateProductionCanaryConfigSource(path string) error {
 		return err
 	}
 	root, rootErr := ProductionCanaryStateRoot()
-	installed := rootErr == nil && strings.EqualFold(path, filepath.Join(root, "secrets", "redshield.conf"))
+	installed := rootErr == nil && strings.EqualFold(path, filepath.Join(root, "secrets", "tunnel.conf"))
 	if installed {
 		if err := ValidateProductionCanaryStateAccessRoot(root); err != nil {
 			return err

@@ -25,7 +25,8 @@ import (
 const maxConfigSize = 64 * 1024
 
 var (
-	interfaceFields = map[string]struct{}{
+	taggedJunkPattern = regexp.MustCompile(`^<(b 0x(?:[0-9a-fA-F]{2})+|r [0-9]+|rd [0-9]+|rc [0-9]+)>$`)
+	interfaceFields   = map[string]struct{}{
 		"PrivateKey": {}, "Address": {}, "DNS": {}, "MTU": {}, "ListenPort": {},
 		"Jc": {}, "Jmin": {}, "Jmax": {}, "S1": {}, "S2": {}, "S3": {}, "S4": {},
 		"H1": {}, "H2": {}, "H3": {}, "H4": {}, "ContentPaddingAddition": {}, "RekeyAfterTime": {}, "RekeyTimeout": {}, "RejectAfterTime": {}, "KeepaliveTimeout": {}, "MaxHandshakeAttempts": {},
@@ -648,7 +649,7 @@ func validTaggedJunk(value string) bool {
 			return false
 		}
 		tag := value[:end+1]
-		if tag != "<t>" && !regexp.MustCompile(`^<(b 0x[0-9a-fA-F]+|r [0-9]+|rd [0-9]+|rc [0-9]+)>$`).MatchString(tag) {
+		if tag != "<t>" && !taggedJunkPattern.MatchString(tag) {
 			return false
 		}
 		value = value[end+1:]

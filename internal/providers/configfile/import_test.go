@@ -96,6 +96,177 @@ func TestImportFileAmneziaWGMetadata(t *testing.T) {
 	}
 }
 
+func TestImportFileAcceptsEveryAmneziaWG31InterfaceField(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "Jc minimum", field: "Jc", value: "0"},
+		{name: "Jmin maximum", field: "Jmin", value: "65535"},
+		{name: "Jmax", field: "Jmax", value: "65535"},
+		{name: "S1", field: "S1", value: "1"},
+		{name: "S2", field: "S2", value: "2"},
+		{name: "S3", field: "S3", value: "3"},
+		{name: "S4", field: "S4", value: "4"},
+		{name: "H1 single", field: "H1", value: "0"},
+		{name: "H2 range", field: "H2", value: "25-35"},
+		{name: "H3 uint32 maximum", field: "H3", value: "4294967295"},
+		{name: "H4 uint32 maximum range", field: "H4", value: "0-4294967295"},
+		{name: "ContentPaddingAddition single", field: "ContentPaddingAddition", value: "0"},
+		{name: "RekeyAfterTime range", field: "RekeyAfterTime", value: "25-35"},
+		{name: "RekeyTimeout maximum", field: "RekeyTimeout", value: "65535"},
+		{name: "RejectAfterTime", field: "RejectAfterTime", value: "1-2"},
+		{name: "KeepaliveTimeout", field: "KeepaliveTimeout", value: "3"},
+		{name: "MaxHandshakeAttempts", field: "MaxHandshakeAttempts", value: "4-5"},
+		{name: "I1 byte tag", field: "I1", value: "<b 0x0102>"},
+		{name: "I2 random tag", field: "I2", value: "<r 2>"},
+		{name: "I3 random data tag", field: "I3", value: "<rd 4>"},
+		{name: "I4 random char tag", field: "I4", value: "<rc 4>"},
+		{name: "I5 tag sequence", field: "I5", value: "<t><r 3><b 0xaB>"},
+		{name: "HeaderProtectionKey", field: "HeaderProtectionKey", value: syntheticKey(9)},
+		{name: "RandomTrailers true", field: "RandomTrailers", value: "true"},
+		{name: "DisableCookies false", field: "DisableCookies", value: "false"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := importText(t, validConfig(t, test.field+" = "+test.value, "0.0.0.0/0"))
+			if config.Metadata().Transport != tunnel.TransportAmneziaWG {
+				t.Fatalf("transport = %q", config.Metadata().Transport)
+			}
+		})
+	}
+}
+
+func TestImportFileAcceptsCanonicalPersistentKeepaliveValues(t *testing.T) {
+	for _, value := range []string{"0", "25", "65535", "25-35", "0-65535"} {
+		t.Run(value, func(t *testing.T) {
+			text := strings.Replace(validConfig(t, "", "0.0.0.0/0"), "PersistentKeepalive = 25", "PersistentKeepalive = "+value, 1)
+			if _, err := ImportFile(writeConfig(t, text), "selfhosted"); err != nil {
+				t.Fatalf("canonical keepalive %q rejected: %v", value, err)
+			}
+		})
+	}
+}
+
+func TestImportFileRejectsNonCanonicalAmneziaWG31Values(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		value string
+	}{
+		{name: "empty present", field: "Jc", value: ""},
+		{name: "integer plus", field: "Jc", value: "+1"},
+		{name: "integer leading zero", field: "S4", value: "01"},
+		{name: "integer non ASCII", field: "Jmax", value: "１"},
+		{name: "integer overflow", field: "Jmin", value: "65536"},
+		{name: "integer range forbidden", field: "S1", value: "1-2"},
+		{name: "uint32 plus", field: "H1", value: "+1"},
+		{name: "uint32 leading zero", field: "H2", value: "01"},
+		{name: "uint32 reversed", field: "H3", value: "2-1"},
+		{name: "uint32 overflow", field: "H4", value: "4294967296"},
+		{name: "uint32 range overflow", field: "H1", value: "1-4294967296"},
+		{name: "uint32 malformed", field: "H2", value: "1-2-3"},
+		{name: "uint32 non ASCII", field: "H3", value: "１"},
+		{name: "uint16 plus", field: "RekeyAfterTime", value: "+1"},
+		{name: "uint16 leading zero", field: "RekeyTimeout", value: "01"},
+		{name: "uint16 reversed", field: "RejectAfterTime", value: "2-1"},
+		{name: "uint16 overflow", field: "KeepaliveTimeout", value: "65536"},
+		{name: "uint16 range overflow", field: "MaxHandshakeAttempts", value: "1-65536"},
+		{name: "uint16 malformed", field: "ContentPaddingAddition", value: "1-2-3"},
+		{name: "uint16 non ASCII", field: "RekeyAfterTime", value: "１"},
+		{name: "opaque empty", field: "I1", value: ""},
+		{name: "opaque unclosed", field: "I2", value: "<r 2"},
+		{name: "opaque unknown tag", field: "I3", value: "<x 2>"},
+		{name: "opaque embedded whitespace", field: "I4", value: "<t> <r 2>"},
+		{name: "opaque non ASCII number", field: "I5", value: "<r ２>"},
+		{name: "opaque odd byte hex", field: "I1", value: "<b 0x0>"},
+		{name: "opaque uppercase hex prefix", field: "I2", value: "<b 0X0102>"},
+		{name: "opaque oversized", field: "I3", value: strings.Repeat("<t>", 1366)},
+		{name: "header key malformed", field: "HeaderProtectionKey", value: "not-a-key"},
+		{name: "random trailers uppercase", field: "RandomTrailers", value: "True"},
+		{name: "disable cookies numeric", field: "DisableCookies", value: "1"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			text := validConfig(t, test.field+" = "+test.value, "0.0.0.0/0")
+			if _, err := ImportFile(writeConfig(t, text), "selfhosted"); err == nil {
+				t.Fatalf("invalid %s value %q accepted", test.field, test.value)
+			}
+		})
+	}
+}
+
+func TestImportFileRejectsNonCanonicalPersistentKeepaliveValues(t *testing.T) {
+	for _, value := range []string{"", "+1", "01", "１", "2-1", "65536", "1-65536", "1-2-3", "-1"} {
+		t.Run(fmt.Sprintf("%q", value), func(t *testing.T) {
+			text := strings.Replace(validConfig(t, "", "0.0.0.0/0"), "PersistentKeepalive = 25", "PersistentKeepalive = "+value, 1)
+			if _, err := ImportFile(writeConfig(t, text), "selfhosted"); err == nil {
+				t.Fatalf("invalid keepalive %q accepted", value)
+			}
+		})
+	}
+}
+
+func TestImportFileRejectsEveryDuplicateAWGFieldMultiplePeersAndUnsafeDirective(t *testing.T) {
+	for _, field := range []string{
+		"Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4",
+		"ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts",
+		"I1", "I2", "I3", "I4", "I5", "HeaderProtectionKey", "RandomTrailers", "DisableCookies",
+	} {
+		t.Run("duplicate "+field, func(t *testing.T) {
+			value := "1"
+			switch {
+			case strings.HasPrefix(field, "I"):
+				value = "<t>"
+			case field == "HeaderProtectionKey":
+				value = syntheticKey(8)
+			case field == "RandomTrailers" || field == "DisableCookies":
+				value = "true"
+			}
+			text := validConfig(t, field+" = "+value+"\n"+field+" = "+value, "0.0.0.0/0")
+			if _, err := ImportFile(writeConfig(t, text), "selfhosted"); err == nil {
+				t.Fatalf("duplicate %s accepted", field)
+			}
+		})
+	}
+
+	base := validConfig(t, "", "0.0.0.0/0")
+	peer := strings.Split(base, "[Peer]")[1]
+	if _, err := ImportFile(writeConfig(t, base+"[Peer]"+peer), "selfhosted"); err == nil {
+		t.Fatal("multiple peers accepted")
+	}
+	for _, directive := range []string{"Table", "PreUp", "PostUp", "PreDown", "PostDown"} {
+		t.Run("unsafe "+directive, func(t *testing.T) {
+			text := strings.Replace(base, "MTU = 1420", directive+" = synthetic", 1)
+			if _, err := ImportFile(writeConfig(t, text), "selfhosted"); err == nil {
+				t.Fatalf("unsafe directive %s accepted", directive)
+			}
+		})
+	}
+}
+
+func TestImportFileRejectsMalformedKeysInEveryKeyField(t *testing.T) {
+	for _, field := range []string{"PrivateKey", "PublicKey", "PresharedKey", "HeaderProtectionKey"} {
+		t.Run(field, func(t *testing.T) {
+			text := validConfig(t, "", "0.0.0.0/0")
+			switch field {
+			case "PrivateKey":
+				text = strings.Replace(text, syntheticKey(1), "not-a-key", 1)
+			case "PublicKey":
+				text = strings.Replace(text, syntheticKey(2), "not-a-key", 1)
+			case "PresharedKey":
+				text = strings.Replace(text, "[Peer]", "[Peer]\nPresharedKey = not-a-key", 1)
+			case "HeaderProtectionKey":
+				text = strings.Replace(text, "[Peer]", "HeaderProtectionKey = not-a-key\n[Peer]", 1)
+			}
+			if _, err := ImportFile(writeConfig(t, text), "selfhosted"); err == nil {
+				t.Fatalf("malformed %s accepted", field)
+			}
+		})
+	}
+}
+
 func TestImportFileRejectsMalformedDuplicateUnknownAndUnsafeFields(t *testing.T) {
 	privateKey := syntheticKey(1)
 	publicKey := syntheticKey(2)
@@ -159,6 +330,42 @@ func TestImportFileErrorsAndSerializationDoNotLeakSecrets(t *testing.T) {
 		t.Fatal("expected unknown field error")
 	}
 	assertNoLeak(t, err.Error(), unknownSecret, "value")
+}
+
+func TestAmneziaOpaqueValuesKeysRawProfileAndPathStayRedactedEverywhere(t *testing.T) {
+	privateKey := syntheticKey(41)
+	publicKey := syntheticKey(42)
+	presharedKey := syntheticKey(43)
+	headerKey := syntheticKey(44)
+	opaque := "<t><r 983><rd 17><rc 29><b 0x01020304>"
+	text := validConfig(t, "I1 = "+opaque+"\nHeaderProtectionKey = "+headerKey, "0.0.0.0/0, ::/0")
+	text = strings.Replace(text, syntheticKey(1), privateKey, 1)
+	text = strings.Replace(text, syntheticKey(2), publicKey, 1)
+	text = strings.Replace(text, "[Peer]", "[Peer]\nPresharedKey = "+presharedKey, 1)
+	path := writeConfig(t, text)
+	config, err := ImportFile(path, "selfhosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonValue, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs := []string{
+		config.String(), config.GoString(),
+		fmt.Sprintf("%v %+v %#v %s %q %x %d %t", config, config, config, config, config, config, config, config),
+		string(jsonValue),
+	}
+	for _, output := range outputs {
+		assertNoLeak(t, output, privateKey, publicKey, presharedKey, headerKey, opaque, text, path, filepath.Base(path))
+	}
+
+	badOpaque := opaque + "RAW_OPAQUE_SENTINEL"
+	_, err = ImportFile(writeConfig(t, strings.Replace(text, opaque, badOpaque, 1)), "selfhosted")
+	if err == nil {
+		t.Fatal("malformed opaque value accepted")
+	}
+	assertNoLeak(t, err.Error(), badOpaque, opaque, "RAW_OPAQUE_SENTINEL")
 }
 
 func TestSecretHoldersUseFixedRedactionForFormatVerbs(t *testing.T) {

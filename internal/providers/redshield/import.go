@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -26,8 +27,9 @@ const maxConfigSize = 64 * 1024
 var (
 	interfaceFields = map[string]struct{}{
 		"PrivateKey": {}, "Address": {}, "DNS": {}, "MTU": {}, "ListenPort": {},
-		"Jc": {}, "Jmin": {}, "Jmax": {}, "S1": {}, "S2": {},
-		"H1": {}, "H2": {}, "H3": {}, "H4": {},
+		"Jc": {}, "Jmin": {}, "Jmax": {}, "S1": {}, "S2": {}, "S3": {}, "S4": {},
+		"H1": {}, "H2": {}, "H3": {}, "H4": {}, "ContentPaddingAddition": {}, "RekeyAfterTime": {}, "RekeyTimeout": {}, "RejectAfterTime": {}, "KeepaliveTimeout": {}, "MaxHandshakeAttempts": {},
+		"I1": {}, "I2": {}, "I3": {}, "I4": {}, "I5": {}, "HeaderProtectionKey": {}, "RandomTrailers": {}, "DisableCookies": {},
 	}
 	peerFields = map[string]struct{}{
 		"PublicKey": {}, "PresharedKey": {}, "AllowedIPs": {}, "Endpoint": {}, "PersistentKeepalive": {},
@@ -376,22 +378,57 @@ func validateFields(fields parsedFields) (Config, error) {
 	if err != nil {
 		return Config{}, errors.New("config contains an invalid listen port")
 	}
-	keepalive, err := parseOptionalInteger(fields.peerValues["PersistentKeepalive"], 0, 65535)
+	keepalive, err := parseOptionalRange(fields.peerValues["PersistentKeepalive"], 0, 65535)
 	if err != nil {
 		return Config{}, errors.New("config contains an invalid keepalive")
 	}
 
 	awgParameters := make(map[string]uint32)
-	for _, name := range []string{"Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"} {
+	for _, name := range []string{"Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4"} {
 		value := fields.interfaceValues[name]
 		if value == "" {
 			continue
 		}
-		parsed, parseErr := strconv.ParseUint(value, 10, 32)
+		parsed, parseErr := strconv.ParseUint(value, 10, 16)
 		if parseErr != nil {
 			return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
 		}
 		awgParameters[name] = uint32(parsed)
+	}
+	for _, name := range []string{"H1", "H2", "H3", "H4"} {
+		if value := fields.interfaceValues[name]; value != "" {
+			if _, err := parseOptionalRange32(value); err != nil {
+				return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
+			}
+			awgParameters[name] = 1
+		}
+	}
+	for _, name := range []string{"ContentPaddingAddition", "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime", "KeepaliveTimeout", "MaxHandshakeAttempts"} {
+		if value := fields.interfaceValues[name]; value != "" {
+			if _, err := parseOptionalRange(value, 0, 65535); err != nil {
+				return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
+			}
+			awgParameters[name] = 1
+		}
+	}
+	for _, name := range []string{"I1", "I2", "I3", "I4", "I5"} {
+		if value := fields.interfaceValues[name]; value != "" {
+			if !validTaggedJunk(value) {
+				return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
+			}
+			awgParameters[name] = 1
+		}
+	}
+	for _, name := range []string{"RandomTrailers", "DisableCookies"} {
+		if value := fields.interfaceValues[name]; value != "" && value != "true" && value != "false" {
+			return Config{}, errors.New("config contains an invalid AmneziaWG parameter")
+		}
+	}
+	if value := fields.interfaceValues["HeaderProtectionKey"]; value != "" {
+		if _, err := parseKey(value); err != nil {
+			return Config{}, errors.New("config contains invalid key material")
+		}
+		awgParameters["HeaderProtectionKey"] = 1
 	}
 	if minimum, hasMinimum := awgParameters["Jmin"]; hasMinimum {
 		if maximum, hasMaximum := awgParameters["Jmax"]; hasMaximum && minimum > maximum {
@@ -536,6 +573,61 @@ func parseOptionalInteger(value string, minimum, maximum uint64) (uint16, error)
 		return 0, errors.New("integer out of range")
 	}
 	return uint16(parsed), nil
+}
+
+func parseOptionalRange(value string, minimum, maximum uint64) (uint16, error) {
+	if value == "" {
+		return 0, nil
+	}
+	pieces := strings.Split(value, "-")
+	if len(pieces) > 2 {
+		return 0, errors.New("invalid range")
+	}
+	first, err := strconv.ParseUint(pieces[0], 10, 16)
+	if err != nil || first < minimum || first > maximum {
+		return 0, errors.New("invalid range")
+	}
+	if len(pieces) == 2 {
+		last, err := strconv.ParseUint(pieces[1], 10, 16)
+		if err != nil || last < first || last > maximum {
+			return 0, errors.New("invalid range")
+		}
+	}
+	return uint16(first), nil
+}
+func parseOptionalRange32(value string) (uint32, error) {
+	pieces := strings.Split(value, "-")
+	if len(pieces) > 2 {
+		return 0, errors.New("invalid range")
+	}
+	first, err := strconv.ParseUint(pieces[0], 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	if len(pieces) == 2 {
+		last, err := strconv.ParseUint(pieces[1], 10, 32)
+		if err != nil || last < first {
+			return 0, errors.New("invalid range")
+		}
+	}
+	return uint32(first), nil
+}
+func validTaggedJunk(value string) bool {
+	if len(value) == 0 || len(value) > 4096 {
+		return false
+	}
+	for len(value) > 0 {
+		end := strings.IndexByte(value, '>')
+		if end < 0 {
+			return false
+		}
+		tag := value[:end+1]
+		if tag != "<t>" && !regexp.MustCompile(`^<(b 0x[0-9a-fA-F]+|r [0-9]+|rd [0-9]+|rc [0-9]+)>$`).MatchString(tag) {
+			return false
+		}
+		value = value[end+1:]
+	}
+	return true
 }
 
 func fullTunnelFamilies(prefixes []string) (bool, bool) {

@@ -93,6 +93,16 @@ Describe 'P3 DigitalOcean plan-only guard' {
         Should-Invoke Invoke-P3NativeSshKeygen -Times 2 -Exactly -Scope It
     }
 
+    It 'accepts one trailing CRLF emitted by Windows ssh-keygen' {
+        $windowsPublicKey = [Text.Encoding]::UTF8.GetBytes($syntheticPublicKey + "`r`n")
+        [IO.File]::WriteAllBytes($script:P3KeyPath, $windowsPublicKey)
+
+        $output = Invoke-P3DigitalOceanPlan -PublicKeyPath $script:P3KeyPath
+
+        ($output | ConvertFrom-Json).public_key_sha256 | Should -Be ((Get-FileHash -LiteralPath $script:P3KeyPath -Algorithm SHA256).Hash.ToLowerInvariant())
+        Should-Invoke Invoke-P3NativeSshKeygen -Times 1 -Exactly -Scope It
+    }
+
     It 'rejects unsafe path syntax before native invocation' {
         foreach ($path in @(
             'relative.pub',

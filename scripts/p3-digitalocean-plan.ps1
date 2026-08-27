@@ -110,7 +110,7 @@ function Assert-P3CanonicalPublicKey([string]$Text) {
     if ($Text -match '(?i)BEGIN (OPENSSH|RSA|EC|DSA|PRIVATE) KEY|private|password|token') {
         throw 'private, password, and token material is forbidden'
     }
-    if ($Text -notmatch '^ssh-ed25519 [A-Za-z0-9+/]+={0,2}( [\x21-\x7E]+)?$') {
+    if ($Text -notmatch '\Assh-ed25519 [A-Za-z0-9+/]+={0,2}( [\x21-\x7E]+)?(?:\r\n|\n)?\z') {
         throw 'public key must be one canonical ssh-ed25519 line'
     }
 }

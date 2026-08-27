@@ -46,6 +46,20 @@
       }
     }
   },
+  "amnezia_self_hosted_p3": {
+    "client": {
+      "tag": "5.0.1.5",
+      "commit": "7d4f3e0f5090b74903609179653d1f669d2ad08a",
+      "windows_x64_url": "https://github.com/amnezia-vpn/amnezia-client/releases/download/5.0.1.5/AmneziaVPN_5.0.1.5_windows_x64.exe",
+      "size": 91991200,
+      "sha256": "2e898bbd1d639f5066416961a2a458dba7c3455c0e8f49c7f130e9281d700377"
+    },
+    "amneziawg_go": { "tag": "v3.1.20260814", "commit": "1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1" },
+    "amneziawg_tools": { "tag": "v3.1.20260812", "commit": "ee0f0a9aa34ff0a0da4b3433b9512781cfe02843" },
+    "amneziawg_linux_kernel_module": { "tag": "v3.1.20260812", "commit": "46803204e7ec3b068199cd671143bec661d3fe21" },
+    "server_image_pin_state": "observed-after-install",
+    "server_image_note": "The tagged client Dockerfile uses amneziavpn/amneziawg-go:latest; record the immutable image ID/digest only after the approved GUI installation."
+  },
   "artifacts": {
     "go_windows_amd64": {
       "url": "https://go.dev/dl/go1.26.6.windows-amd64.zip",

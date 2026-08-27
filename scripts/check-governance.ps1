@@ -39,6 +39,21 @@ foreach ($relativePath in $required) {
     }
 }
 
+$versionsPath = Join-Path $Root 'manifest/versions.lock.yaml'
+if (-not (Test-Path -LiteralPath $versionsPath)) {
+    $errors.Add('missing required path: manifest/versions.lock.yaml')
+} else {
+    try {
+        $versions = Get-Content -LiteralPath $versionsPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 16
+        $p3 = $versions.amnezia_self_hosted_p3
+        if ($null -eq $p3 -or $p3.client.tag -ne '5.0.1.5' -or $p3.client.commit -ne '7d4f3e0f5090b74903609179653d1f669d2ad08a' -or $p3.client.size -ne 91991200 -or $p3.client.sha256 -ne '2e898bbd1d639f5066416961a2a458dba7c3455c0e8f49c7f130e9281d700377' -or $p3.server_image_pin_state -ne 'observed-after-install' -or $p3.amneziawg_go.tag -ne 'v3.1.20260814' -or $p3.amneziawg_go.commit -ne '1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1' -or $p3.amneziawg_tools.tag -ne 'v3.1.20260812' -or $p3.amneziawg_tools.commit -ne 'ee0f0a9aa34ff0a0da4b3433b9512781cfe02843' -or $p3.amneziawg_linux_kernel_module.tag -ne 'v3.1.20260812' -or $p3.amneziawg_linux_kernel_module.commit -ne '46803204e7ec3b068199cd671143bec661d3fe21') {
+            $errors.Add('invalid self-hosted P3 Amnezia lock')
+        }
+    } catch {
+        $errors.Add('invalid manifest/versions.lock.yaml')
+    }
+}
+
 foreach ($relativePath in $adrPaths) {
     $path = Join-Path $Root $relativePath
     if (-not (Test-Path -LiteralPath $path)) {

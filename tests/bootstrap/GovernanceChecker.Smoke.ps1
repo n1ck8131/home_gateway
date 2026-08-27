@@ -89,6 +89,8 @@ try {
     Set-FixtureFile -FixtureRoot $validRoot -RelativePath 'DECISIONS.md' -Content (($decisionLines -join "`n") + "`n")
     $matrix = (1..8 | ForEach-Object { "## ${sectionSign}30.$_ Evidence`n`n| Requirement | Owner phase | Evidence type |`n|---|---|---|`n| Fixture | P$_ | automated |" }) -join "`n`n"
     Set-FixtureFile -FixtureRoot $validRoot -RelativePath 'docs/ACCEPTANCE_MATRIX.md' -Content ($matrix + "`n")
+    $p3Lock = @{ amnezia_self_hosted_p3 = @{ client = @{ tag = '5.0.1.5'; commit = '7d4f3e0f5090b74903609179653d1f669d2ad08a'; size = 91991200; sha256 = '2e898bbd1d639f5066416961a2a458dba7c3455c0e8f49c7f130e9281d700377' }; amneziawg_go = @{ tag = 'v3.1.20260814'; commit = '1b86b2ae0e493e7ea93f8c1a0f0cb6735b1551f1' }; amneziawg_tools = @{ tag = 'v3.1.20260812'; commit = 'ee0f0a9aa34ff0a0da4b3433b9512781cfe02843' }; amneziawg_linux_kernel_module = @{ tag = 'v3.1.20260812'; commit = '46803204e7ec3b068199cd671143bec661d3fe21' }; server_image_pin_state = 'observed-after-install' } } | ConvertTo-Json -Depth 8
+    Set-FixtureFile -FixtureRoot $validRoot -RelativePath 'manifest/versions.lock.yaml' -Content $p3Lock
 
     $validOutput = @(& $powerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $checker -Root $validRoot 2>&1)
     if ($LASTEXITCODE -ne 0 -or ($validOutput -join "`n") -notmatch 'GOVERNANCE_CHECK_PASS') {
@@ -136,6 +138,19 @@ try {
     $repositoryOutput = @(& $powerShellExecutable -NoProfile -ExecutionPolicy Bypass -File $checker -Root $root 2>&1)
     if ($LASTEXITCODE -ne 0 -or ($repositoryOutput -join "`n") -notmatch 'GOVERNANCE_CHECK_PASS') {
         throw "Real repository governance rejected: $($repositoryOutput -join "`n")"
+    }
+
+    $lock = Get-Content -LiteralPath (Join-Path $root 'manifest/versions.lock.yaml') -Raw -Encoding UTF8
+    foreach ($requiredPin in @(
+        '"amnezia_self_hosted_p3"',
+        '"tag": "5.0.1.5"',
+        '"server_image_pin_state": "observed-after-install"',
+        'v3.1.20260814',
+        'v3.1.20260812'
+    )) {
+        if ($lock -notmatch [regex]::Escape($requiredPin)) {
+            throw "Self-hosted P3 lock missing: $requiredPin"
+        }
     }
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

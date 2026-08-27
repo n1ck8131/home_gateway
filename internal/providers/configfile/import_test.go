@@ -2,7 +2,10 @@ package configfile
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,71 +15,284 @@ import (
 	"github.com/vsevo/home-gateway/internal/tunnel"
 )
 
-func TestImportFileAcceptsBoundedAWG31FieldsWithoutLeaking(t *testing.T) {
-	key := func(value byte) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32)) }
-	text := fmt.Sprintf("[Interface]\nPrivateKey = %s\nAddress = 10.0.0.2/32\nJc = 1\nJmin = 2\nJmax = 3\nS1 = 4\nS2 = 5\nS3 = 6\nS4 = 7\nH1 = 1-2\nH2 = 3\nH3 = 4\nH4 = 5\nContentPaddingAddition = 1-2\nRekeyAfterTime = 3\nRekeyTimeout = 4\nRejectAfterTime = 5\nKeepaliveTimeout = 6\nMaxHandshakeAttempts = 7\nI1 = <b 0x1><r 2><rd 3><rc 4><t>\nRandomTrailers = true\nDisableCookies = false\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0\nEndpoint = example.invalid:51820\nPersistentKeepalive = 25-35\n", key(1), key(2))
-	path := filepath.Join(t.TempDir(), "synthetic.conf")
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config, err := ImportFile(path, "selfhosted")
+func TestImportFilePinnedBindsParsedBytesToLowercaseSHA256(t *testing.T) {
+	path := writeConfig(t, validConfig(t, "", "0.0.0.0/0, ::/0"))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Metadata().Provider != "selfhosted" || config.Metadata().Transport != tunnel.TransportAmneziaWG {
-		t.Fatalf("metadata = %#v", config.Metadata())
+	digest := sha256.Sum256(data)
+	pin := hex.EncodeToString(digest[:])
+	if _, err := ImportFilePinned(path, pin, "selfhosted"); err != nil {
+		t.Fatalf("matching pin: %v", err)
 	}
-	output := fmt.Sprintf("%v %#v %s", config, config, path)
-	if strings.Contains(output, key(1)) || strings.Contains(output, "<b 0x1>") {
-		t.Fatal("secret material leaked")
+	replaced := strings.Replace(string(data), syntheticKey(1), syntheticKey(3), 1)
+	if err := os.WriteFile(path, []byte(replaced), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestImportFileRejectsUnsafeOrInvalidAWG31Values(t *testing.T) {
-	for _, value := range []string{"Jc = 65536", "H1 = 4-3", "I1 = <shell x>", "PersistentKeepalive = 65536", "PostUp = powershell"} {
-		t.Run(value, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "bad.conf")
-			text := "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.0.0.2/32\n" + value + "\n[Peer]\nPublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=\nAllowedIPs = 0.0.0.0/0\nEndpoint = example.invalid:51820\n"
-			if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := ImportFile(path, "selfhosted"); err == nil {
-				t.Fatal("invalid field accepted")
+	if _, err := ImportFilePinned(path, pin, "selfhosted"); err == nil || !strings.Contains(err.Error(), "differs") {
+		t.Fatalf("same-metadata config with replaced key result = %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"different": strings.Repeat("0", 64),
+		"uppercase": strings.ToUpper(pin),
+		"short":     pin[:63],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ImportFilePinned(path, value, "selfhosted"); err == nil {
+				t.Fatal("invalid or mismatched config pin was accepted")
 			}
 		})
 	}
 }
 
-func TestConfigfileOwnsParserWithoutProviderDependency(t *testing.T) {
-	data, err := os.ReadFile("import.go")
-	if err != nil {
-		t.Fatal(err)
+func TestImportFileWireGuardMetadata(t *testing.T) {
+	configText := validConfig(t, "", "0.0.0.0/0, ::/0")
+	config := importText(t, configText)
+	metadata := config.Metadata()
+
+	if metadata.Provider != "selfhosted" || metadata.Transport != tunnel.TransportWireGuard {
+		t.Fatalf("unexpected identity: %#v", metadata)
 	}
-	if strings.Contains(string(data), "providers/redshield") {
-		t.Fatal("configfile parser depends on the compatibility provider")
+	if metadata.Endpoint.Host != "vpn.example.test" || metadata.Endpoint.Port != 51820 {
+		t.Fatalf("unexpected endpoint: %#v", metadata.Endpoint)
+	}
+	if !metadata.IPv4FullTunnel || !metadata.IPv6FullTunnel {
+		t.Fatalf("full-tunnel families not detected: %#v", metadata)
+	}
+	if got := strings.Join(metadata.InterfaceAddresses, ","); got != "10.20.30.2/32,fd00::2/128" {
+		t.Fatalf("interface addresses = %q", got)
+	}
+	if got := strings.Join(metadata.DNS, ","); got != "10.20.30.1,fd00::1" {
+		t.Fatalf("DNS = %q", got)
+	}
+	if metadata.MTU != 1420 {
+		t.Fatalf("MTU = %d", metadata.MTU)
 	}
 }
 
-func TestCanonicalAWGIntegerRangesRejectAmbiguousSyntax(t *testing.T) {
-	for _, value := range []string{"+1", "01", "1-02", "1-", "-1", "2-1", "4294967296"} {
-		if _, err := parseOptionalRange(value, 0, 65535); err == nil {
-			t.Fatalf("16-bit value accepted: %q", value)
-		}
-		if _, err := parseOptionalRange32(value); err == nil {
-			t.Fatalf("32-bit value accepted: %q", value)
+func TestImportFileAmneziaWGMetadata(t *testing.T) {
+	awg := strings.Join([]string{
+		"Jc = 4",
+		"Jmin = 40",
+		"Jmax = 70",
+		"S1 = 0",
+		"S2 = 0",
+		"H1 = 1",
+		"H2 = 2",
+		"H3 = 3",
+		"H4 = 4",
+	}, "\n")
+	config := importText(t, validConfig(t, awg, "0.0.0.0/0"))
+
+	if config.Metadata().Transport != tunnel.TransportAmneziaWG {
+		t.Fatalf("transport = %q", config.Metadata().Transport)
+	}
+	if !config.Metadata().IPv4FullTunnel || config.Metadata().IPv6FullTunnel {
+		t.Fatalf("unexpected family flags: %#v", config.Metadata())
+	}
+}
+
+func TestImportFileRejectsMalformedDuplicateUnknownAndUnsafeFields(t *testing.T) {
+	privateKey := syntheticKey(1)
+	publicKey := syntheticKey(2)
+	tests := map[string]string{
+		"duplicate section": fmt.Sprintf("[Interface]\nPrivateKey = %s\nAddress = 10.0.0.2/32\n[Interface]\nAddress = 10.0.0.3/32\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0\nEndpoint = vpn.example.test:51820\n", privateKey, publicKey),
+		"duplicate field":   strings.Replace(validConfig(t, "", "0.0.0.0/0"), "Address =", "Address = 10.0.0.9/32\nAddress =", 1),
+		"unknown field":     strings.Replace(validConfig(t, "", "0.0.0.0/0"), "MTU = 1420", "UnknownOption = true", 1),
+		"unsafe script":     strings.Replace(validConfig(t, "", "0.0.0.0/0"), "MTU = 1420", "PostUp = powershell something", 1),
+		"unsafe table":      strings.Replace(validConfig(t, "", "0.0.0.0/0"), "MTU = 1420", "Table = off", 1),
+		"missing peer":      strings.Split(validConfig(t, "", "0.0.0.0/0"), "[Peer]")[0],
+		"bad private key":   strings.Replace(validConfig(t, "", "0.0.0.0/0"), privateKey, "not-a-key", 1),
+		"bad endpoint":      strings.Replace(validConfig(t, "", "0.0.0.0/0"), "vpn.example.test:51820", "https://vpn.example.test", 1),
+		"bad address":       strings.Replace(validConfig(t, "", "0.0.0.0/0"), "10.20.30.2/32", "not-an-address", 1),
+		"bad DNS":           strings.Replace(validConfig(t, "", "0.0.0.0/0"), "10.20.30.1, fd00::1", "resolver.example.test", 1),
+		"bad MTU":           strings.Replace(validConfig(t, "", "0.0.0.0/0"), "MTU = 1420", "MTU = 1", 1),
+		"inline script":     strings.Replace(validConfig(t, "", "0.0.0.0/0"), "MTU = 1420", "MTU = 1420 ; PostUp = command", 1),
+	}
+	for name, text := range tests {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfig(t, text)
+			if _, err := ImportFile(path, "selfhosted"); err == nil {
+				t.Fatal("expected import failure")
+			}
+		})
+	}
+}
+
+func TestImportFileErrorsAndSerializationDoNotLeakSecrets(t *testing.T) {
+	privateKey := syntheticKey(11)
+	publicKey := syntheticKey(22)
+	presharedKey := syntheticKey(33)
+	text := validConfig(t, "", "0.0.0.0/0, ::/0")
+	text = strings.Replace(text, syntheticKey(1), privateKey, 1)
+	text = strings.Replace(text, syntheticKey(2), publicKey, 1)
+	text = strings.Replace(text, "[Peer]", "[Peer]\nPresharedKey = "+presharedKey, 1)
+	path := writeConfig(t, text)
+
+	config, err := ImportFile(path, "selfhosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	formatted := fmt.Sprintf("%v %+v %#v", config, config, config)
+	assertNoLeak(t, string(data)+formatted, privateKey, publicKey, presharedKey, path)
+
+	badSecret := "THIS_VALUE_MUST_NEVER_APPEAR"
+	bad := strings.Replace(text, privateKey, badSecret, 1)
+	_, err = ImportFile(writeConfig(t, bad), "selfhosted")
+	if err == nil {
+		t.Fatal("expected invalid key error")
+	}
+	assertNoLeak(t, err.Error(), badSecret)
+
+	unknownSecret := "THIS_UNKNOWN_FIELD_NAME_MUST_NOT_APPEAR"
+	bad = strings.Replace(text, "MTU = 1420", unknownSecret+" = value", 1)
+	_, err = ImportFile(writeConfig(t, bad), "selfhosted")
+	if err == nil {
+		t.Fatal("expected unknown field error")
+	}
+	assertNoLeak(t, err.Error(), unknownSecret, "value")
+}
+
+func TestSecretHoldersUseFixedRedactionForFormatVerbs(t *testing.T) {
+	config := importText(t, validConfig(t, "", "0.0.0.0/0, ::/0"))
+	holders := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "config value", value: config, want: "configfile.Config{key_material:[REDACTED]}"},
+		{name: "config pointer", value: &config, want: "configfile.Config{key_material:[REDACTED]}"},
+		{name: "key value", value: config.privateKey, want: "[REDACTED]"},
+		{name: "key pointer", value: &config.privateKey, want: "[REDACTED]"},
+	}
+	formats := []string{
+		"%v", "%+v", "%#v", "%s", "%q",
+		"%d", "%o", "%O", "%b", "%x", "%X", "%c", "%U",
+		"%e", "%E", "%f", "%F", "%g", "%G", "%t",
+		"%20v", "%-20s", "%.3q", "%#+020.8x", "%+12.4d",
+	}
+	for _, holder := range holders {
+		for _, format := range formats {
+			if got := fmt.Sprintf(format, holder.value); got != holder.want {
+				t.Errorf("%s with %q = %q, want fixed redaction %q", holder.name, format, got, holder.want)
+			}
 		}
 	}
-	if _, err := parseOptionalRange("65536", 0, 65535); err == nil {
-		t.Fatal("16-bit overflow accepted")
+}
+
+func TestImportFileRequiresBoundedRegularAbsolutePath(t *testing.T) {
+	if _, err := ImportFile("relative.conf", "selfhosted"); err == nil {
+		t.Fatal("relative path accepted")
 	}
-	for _, value := range []string{"0", "65535", "1-2"} {
-		if _, err := parseOptionalRange(value, 0, 65535); err != nil {
-			t.Fatalf("16-bit value rejected: %q: %v", value, err)
+	if _, err := ImportFile(t.TempDir(), "selfhosted"); err == nil {
+		t.Fatal("directory accepted")
+	}
+	path := filepath.Join(t.TempDir(), "large.conf")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxConfigSize+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportFile(path, "selfhosted"); err == nil {
+		t.Fatal("oversized file accepted")
+	}
+}
+
+func TestImportFileRejectsSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real-parent")
+	if err := os.Mkdir(realParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(realParent, "synthetic.conf")
+	if err := os.WriteFile(configPath, []byte(validConfig(t, "", "0.0.0.0/0")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkParent := filepath.Join(root, "symlink-parent")
+	if err := createTestDirectoryLink(realParent, symlinkParent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ImportFile(filepath.Join(symlinkParent, filepath.Base(configPath)), "selfhosted"); err == nil {
+		t.Fatal("config beneath a symlinked parent was accepted")
+	}
+}
+
+func TestValidateLocalConfigPathRejectsWindowsUNCAndDeviceNamespaces(t *testing.T) {
+	for _, allowed := range []string{`C:\Users\Example\provider.conf`, `D:/configs/provider.conf`, t.TempDir()} {
+		if err := validateLocalConfigPath(allowed); err != nil {
+			t.Fatalf("local absolute path %q rejected: %v", allowed, err)
 		}
 	}
-	for _, value := range []string{"0", "4294967295", "1-2"} {
-		if _, err := parseOptionalRange32(value); err != nil {
-			t.Fatalf("32-bit value rejected: %q: %v", value, err)
+	for _, rejected := range []string{
+		`\\server\share\provider.conf`,
+		`//server/share/provider.conf`,
+		`\\?\C:\provider.conf`,
+		`\\.\PhysicalDrive0`,
+		`\??\C:\provider.conf`,
+		`C:relative.conf`,
+	} {
+		err := validateLocalConfigPath(rejected)
+		if err == nil {
+			t.Fatalf("unsafe Windows path %q accepted", rejected)
+		}
+		if strings.Contains(err.Error(), rejected) {
+			t.Fatalf("path leaked in validation error: %q", err)
+		}
+	}
+}
+
+func validConfig(t *testing.T, awgFields, allowedIPs string) string {
+	t.Helper()
+	if awgFields != "" {
+		awgFields += "\n"
+	}
+	return fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = 10.20.30.2/32, fd00::2/128
+DNS = 10.20.30.1, fd00::1
+MTU = 1420
+ListenPort = 51821
+%s[Peer]
+PublicKey = %s
+AllowedIPs = %s
+Endpoint = vpn.example.test:51820
+PersistentKeepalive = 25
+`, syntheticKey(1), awgFields, syntheticKey(2), allowedIPs)
+}
+
+func syntheticKey(value byte) string {
+	return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
+}
+
+func importText(t *testing.T, text string) Config {
+	t.Helper()
+	config, err := ImportFile(writeConfig(t, text), "selfhosted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return config
+}
+
+func writeConfig(t *testing.T, text string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "synthetic.conf")
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertNoLeak(t *testing.T, output string, forbidden ...string) {
+	t.Helper()
+	for _, value := range forbidden {
+		if strings.Contains(output, value) {
+			t.Fatalf("output leaked forbidden value: %q", output)
 		}
 	}
 }

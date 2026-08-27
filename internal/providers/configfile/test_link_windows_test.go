@@ -2,6 +2,8 @@
 
 package configfile
 
-import "testing"
+import "os/exec"
 
-func TestWindowsLinkRejectionIsDelegatedToStrictImporter(t *testing.T) {}
+func createTestDirectoryLink(target, link string) error {
+	return exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).Run()
+}

@@ -188,12 +188,12 @@ func planCiscoPreservation(plan *Preflight, routes []Route, adapters []Adapter) 
 	}
 }
 
-func planFailClosed(plan *Preflight, metadata tunnel.Metadata, routes []Route, redShieldAdapters []Adapter, physicalDefaults map[AddressFamily]Route, unclassifiedIPv6Default bool) {
+func planFailClosed(plan *Preflight, metadata tunnel.Metadata, routes []Route, tunnelAdapters []Adapter, physicalDefaults map[AddressFamily]Route, unclassifiedIPv6Default bool) {
 	plan.Operations = append(plan.Operations, Operation{Kind: OperationEnforceFailClosed, Family: FamilyIPv4})
 	if !metadata.IPv4FullTunnel {
 		plan.block("ipv4_fail_closed_unresolved", "The imported config does not cover the IPv4 default prefix.")
-	} else if !adaptersHaveFamily(redShieldAdapters, routes, FamilyIPv4) {
-		plan.block("ipv4_fail_closed_unresolved", "The active RedShield adapter has no usable IPv4 path.")
+	} else if !adaptersHaveFamily(tunnelAdapters, routes, FamilyIPv4) {
+		plan.block("ipv4_fail_closed_unresolved", "The active tunnel adapter has no usable IPv4 path.")
 	} else {
 		plan.info("ipv4_fail_closed_ready", "IPv4 fail-closed prerequisites are present.")
 	}
@@ -204,8 +204,8 @@ func planFailClosed(plan *Preflight, metadata tunnel.Metadata, routes []Route, r
 	}
 	if physicalIPv6 && !metadata.IPv6FullTunnel {
 		plan.block("ipv6_fail_closed_unresolved", "A physical IPv6 default route exists but the imported config does not cover the IPv6 default prefix.")
-	} else if metadata.IPv6FullTunnel && !adaptersHaveFamily(redShieldAdapters, routes, FamilyIPv6) {
-		plan.block("ipv6_fail_closed_unresolved", "The active RedShield adapter has no usable IPv6 path.")
+	} else if metadata.IPv6FullTunnel && !adaptersHaveFamily(tunnelAdapters, routes, FamilyIPv6) {
+		plan.block("ipv6_fail_closed_unresolved", "The active tunnel adapter has no usable IPv6 path.")
 	} else if metadata.IPv6FullTunnel {
 		plan.info("ipv6_fail_closed_ready", "IPv6 fail-closed prerequisites are present.")
 	} else if !unclassifiedIPv6Default {

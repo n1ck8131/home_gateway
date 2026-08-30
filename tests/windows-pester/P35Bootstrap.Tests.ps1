@@ -339,24 +339,59 @@ if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore orig
         $config = Join-Path $TestDrive 'acl-plan-provider.conf'
         $payload = Join-Path $TestDrive 'acl-plan-payload.ps1'
         [IO.File]::WriteAllText($config,'[synthetic-profile]',[Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText($payload,"'payload'",[Text.UTF8Encoding]::new($false))
+        $payloadText = @'
+Set-StrictMode -Version Latest
+$requestText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:HG_P35_BOOTSTRAP_REQUEST_B64))
+$request = ConvertFrom-Json -InputObject $requestText -ErrorAction Stop
+if ([string]$request.action -cne 'restore-config-acl-plan') { throw 'unexpected action' }
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'read-only plan child unexpectedly elevated' }
+function Get-SyntheticHash([string]$value) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($value)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+$identity = [pscustomobject][ordered]@{
+    schema = 'home-gateway/windows-restore-config-acl/v1'
+    protected_config_path_identity = Get-SyntheticHash ([string]$request.config_path).ToLowerInvariant()
+    current_acl_sha256 = '1111111111111111111111111111111111111111111111111111111111111111'
+    baseline_acl_sha256 = '2222222222222222222222222222222222222222222222222222222222222222'
+    config_sha256 = [string]$request.config_sha256
+    bootstrap_driver_sha256 = [string]$request.driver_sha256
+    bootstrap_payload_sha256 = [string]$request.payload_sha256
+    network_restore_plan_sha256 = [string]$request.network_restore_plan_sha256
+    operation = 'restore-config-acl'
+}
+$planHash = Get-SyntheticHash (ConvertTo-Json -Compress -InputObject $identity)
+$challengeHash = Get-SyntheticHash (([string]$request.config_path).ToLowerInvariant() + [char]0 + $planHash)
+[Console]::Out.WriteLine((ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{
+    mode = 'restore-config-acl-plan'
+    live_mutation_performed = $false
+    identity = $identity
+    acl_plan_sha256 = $planHash
+    confirmation_challenge = 'P35-RESTORE-CONFIG-ACL-' + $challengeHash.Substring(0,16).ToUpperInvariant()
+})))
+'@
+        [IO.File]::WriteAllText($payload,$payloadText,[Text.UTF8Encoding]::new($false))
         $driverHash = (Get-FileHash -LiteralPath $script:Driver -Algorithm SHA256).Hash.ToLowerInvariant()
         $payloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant()
-        $script:aclPlanStartCount = 0
-        function global:Start-Process {
-            param([string]$FilePath,[string[]]$ArgumentList,[string]$Verb,[string]$WindowStyle,[switch]$Wait,[switch]$PassThru)
-            $script:aclPlanStartCount++
-            return [pscustomobject]@{ExitCode=0}
-        }
-        try {
-            $driverText = [IO.File]::ReadAllText($script:Driver,[Text.UTF8Encoding]::new($false,$true))
-            $output = & ([ScriptBlock]::Create($driverText)) -Action RestoreConfigAclPlan -ConfigPath $config -DriverPath $script:Driver `
-                -ExpectedConfigSHA256 (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() `
-                -ExpectedDriverSHA256 $driverHash -ExpectedPayloadSHA256 $payloadHash -PayloadPath $payload `
-                -NetworkRestorePlanSHA256 ('e' * 64) -WhatIf
-        } finally { Remove-Item -LiteralPath Function:\global:Start-Process -ErrorAction SilentlyContinue }
-        $script:aclPlanStartCount | Should -Be 1
-        (($output | Out-String) | ConvertFrom-Json).action | Should -Be 'RestoreConfigAclPlan'
+        $configHash = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+        $beforeConfig = [IO.File]::ReadAllBytes($config)
+        $driverText = [IO.File]::ReadAllText($script:Driver,[Text.UTF8Encoding]::new($false,$true))
+        $output = & ([ScriptBlock]::Create($driverText)) -Action RestoreConfigAclPlan -ConfigPath $config -DriverPath $script:Driver `
+            -ExpectedConfigSHA256 $configHash -ExpectedDriverSHA256 $driverHash -ExpectedPayloadSHA256 $payloadHash -PayloadPath $payload `
+            -NetworkRestorePlanSHA256 ('e' * 64) -WhatIf
+        $result = ($output | Out-String) | ConvertFrom-Json
+
+        @($result.PSObject.Properties.Name) | Should -Be @('mode','live_mutation_performed','identity','acl_plan_sha256','confirmation_challenge')
+        $result.mode | Should -BeExactly 'restore-config-acl-plan'
+        $result.live_mutation_performed | Should -BeFalse
+        $result.identity.config_sha256 | Should -BeExactly $configHash
+        $result.identity.bootstrap_driver_sha256 | Should -BeExactly $driverHash
+        $result.identity.bootstrap_payload_sha256 | Should -BeExactly $payloadHash
+        $result.identity.network_restore_plan_sha256 | Should -BeExactly ('e' * 64)
+        $result.acl_plan_sha256 | Should -Match '^[0-9a-f]{64}$'
+        $result.confirmation_challenge | Should -Match '^P35-RESTORE-CONFIG-ACL-[0-9A-F]{16}$'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($config)) | Should -BeExactly ([Convert]::ToBase64String($beforeConfig))
     }
 
     It 'launches a short pinned loader that exclusively reads and executes the approved payload' {
@@ -435,7 +470,7 @@ if ([string]::IsNullOrWhiteSpace(`$requestBase64) -or `$requestBase64 -cne `$exp
                 -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' -PayloadPath $payload -LauncherPath $launcher -HgctlPath $hgctl -Confirm:$false
             $env:HG_P35_BOOTSTRAP_REQUEST_B64 | Should -Be 'parent-sentinel'
         } finally {
-            Remove-Item -LiteralPath Function:\global:Start-Process -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath Function:\global:Start-Process -ErrorAction SilentlyContinue -WhatIf:$false
             $env:HG_P35_BOOTSTRAP_REQUEST_B64 = $previousRequest
         }
 

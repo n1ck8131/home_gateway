@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -11,7 +12,8 @@ import (
 )
 
 type canaryWatchdogRunner struct {
-	calls []nativeMutationCommand
+	calls  []nativeMutationCommand
+	output []byte
 }
 
 func (runner *canaryWatchdogRunner) Run(_ context.Context, command nativeMutationCommand) ([]byte, error) {
@@ -20,8 +22,53 @@ func (runner *canaryWatchdogRunner) Run(_ context.Context, command nativeMutatio
 	copyCommand.Environment = append([]string(nil), command.Environment...)
 	copyCommand.Input = append([]byte(nil), command.Input...)
 	runner.calls = append(runner.calls, copyCommand)
+	if runner.output != nil {
+		return append([]byte(nil), runner.output...), nil
+	}
 	return []byte(`{"version":1,"ok":true}`), nil
 }
+
+func TestObserveWatchdogTasksUsesBoundedExactStructuredReceipt(t *testing.T) {
+	want := validObservedWatchdogTasks()
+	data, err := json.Marshal(canaryWatchdogResponse{Version: 1, OK: boolPointer(true), Tasks: want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &canaryWatchdogRunner{output: data}
+	command, err := buildCanaryWatchdogCommand(nativeInventoryPaths{WindowsDirectory: `C:\Windows`, SystemDirectory: `C:\Windows\System32`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := observeWatchdogTasks(t.Context(), `C:\ProgramData\HomeGateway\P35`, `C:\ProgramData\HomeGateway\P35\bin\hgctl.exe`, command, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("observed tasks = %#v", got)
+	}
+	var request canaryWatchdogRequest
+	if err := json.Unmarshal(runner.calls[0].Input, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Operation != "observe" {
+		t.Fatalf("operation = %q", request.Operation)
+	}
+
+	for name, output := range map[string][]byte{
+		"unbounded": bytes.Repeat([]byte("x"), maxStderrBytes+1),
+		"malformed": []byte(`{"version":1,"ok":true,"tasks":`),
+		"extra":     append(data[:len(data)-1], []byte(`,"extra":true}`)...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			badRunner := &canaryWatchdogRunner{output: output}
+			if _, err := observeWatchdogTasks(t.Context(), `C:\ProgramData\HomeGateway\P35`, `C:\ProgramData\HomeGateway\P35\bin\hgctl.exe`, command, badRunner); err == nil {
+				t.Fatal("invalid watchdog observer receipt passed")
+			}
+		})
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
 
 func TestDurableCanaryWatchdogUsesFixedStructuredScheduledTaskCommand(t *testing.T) {
 	runner := &canaryWatchdogRunner{}

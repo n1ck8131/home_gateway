@@ -118,6 +118,96 @@ class PeerGuardTests(unittest.TestCase):
         self.assertTrue(all(value <= 1006.0 for value in observations))
         self.assertEqual(sleeps, [2])
 
+    def test_initial_oversleep_never_starts_an_observation_at_the_deadline(self):
+        clock = [40.0]
+        observations = []
+
+        def sleep(seconds):
+            clock[0] += seconds + 3
+
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            guard.await_stable(
+                lambda: observations.append(clock[0]) or snapshot(),
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+                timeout_seconds=5,
+            )
+        self.assertEqual(observations, [])
+
+    def test_slow_first_observation_stops_before_stability_sleep(self):
+        clock = [100.0]
+        sleeps = []
+
+        class DeadlinePoisonSnapshot(dict):
+            def get(self, key, default=None):
+                if clock[0] >= 110.0:
+                    raise AssertionError("expired observation was processed")
+                return super().get(key, default)
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        def observe():
+            clock[0] = 110.0
+            return DeadlinePoisonSnapshot(snapshot(peer="candidate"))
+
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            guard.await_stable(
+                observe,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+                timeout_seconds=10,
+            )
+        self.assertEqual(sleeps, [2])
+
+    def test_slow_second_observation_cannot_return_success_after_deadline(self):
+        clock = [200.0]
+        observations = [0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def observe():
+            observations[0] += 1
+            if observations[0] == 2:
+                clock[0] = 210.5
+            return snapshot(peer="candidate")
+
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            guard.await_stable(
+                observe,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+                timeout_seconds=10,
+            )
+        self.assertEqual(observations[0], 2)
+
+    def test_second_observation_must_finish_strictly_before_exact_deadline(self):
+        def run(second_finished_at):
+            clock = [300.0]
+            observations = [0]
+
+            def sleep(seconds):
+                clock[0] += seconds
+
+            def observe():
+                observations[0] += 1
+                if observations[0] == 2:
+                    clock[0] = second_finished_at
+                return snapshot(peer="candidate")
+
+            return guard.await_stable(
+                observe,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+                timeout_seconds=10,
+            )
+
+        self.assertEqual(run(309.999)["peers"], ["candidate"])
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            run(310.0)
+
     def test_emergency_rollback_is_exact_one_peer_and_one_syncconf(self):
         baseline = snapshot()
         baseline["peers"] = ["baseline"]

@@ -32,8 +32,9 @@ type canaryWatchdogRequest struct {
 }
 
 type canaryWatchdogResponse struct {
-	Version int   `json:"version"`
-	OK      *bool `json:"ok"`
+	Version int                    `json:"version"`
+	OK      *bool                  `json:"ok"`
+	Tasks   []WatchdogTaskIdentity `json:"tasks,omitempty"`
 }
 
 type durableCanaryWatchdog struct {
@@ -204,6 +205,28 @@ func (watchdog *durableCanaryWatchdog) invoke(request canaryWatchdogRequest) err
 		return errors.New("durable canary watchdog response is invalid")
 	}
 	return nil
+}
+
+func observeWatchdogTasks(ctx context.Context, root, executable string, command nativeMutationCommand, runner nativeMutationRunner) ([]WatchdogTaskIdentity, error) {
+	data, err := json.Marshal(canaryWatchdogRequest{Version: canaryWatchdogVersion, Operation: "observe", Root: root, Executable: executable})
+	if err != nil || len(data) > maxArtifactBytes || runner == nil {
+		return nil, errors.New("watchdog task observation request is invalid")
+	}
+	boundedContext, cancel := context.WithTimeout(ctx, canaryWatchdogTimeout)
+	defer cancel()
+	spec := command
+	spec.Arguments = append([]string(nil), command.Arguments...)
+	spec.Environment = append([]string(nil), command.Environment...)
+	spec.Input = data
+	output, err := runner.Run(boundedContext, spec)
+	if err != nil || len(output) == 0 || len(output) > maxStderrBytes {
+		return nil, errors.New("watchdog task observation command failed")
+	}
+	var response canaryWatchdogResponse
+	if err := decodeStrictLimit(output, &response, maxStderrBytes); err != nil || response.Version != canaryWatchdogVersion || response.OK == nil || !*response.OK || len(response.Tasks) != 2 {
+		return nil, errors.New("watchdog task observation response is invalid")
+	}
+	return append([]WatchdogTaskIdentity(nil), response.Tasks...), nil
 }
 
 const canaryWatchdogScript = `$ErrorActionPreference = 'Stop'
@@ -380,6 +403,60 @@ function Remove-AllOwnedTasks {
 	if (@(Get-ExactTask $recoveryTaskName).Count -ne 0 -or @(Get-ExactTask $reconcileTaskName).Count -ne 0) { throw 'scheduled watchdog removal post-check failed' }
 }
 
+function Get-TextSHA256([string]$value) {
+	$sha = [Security.Cryptography.SHA256]::Create()
+	try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($value)))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+function Get-TaskProperty([object]$value, [string]$name) {
+	if ($null -eq $value) { return $null }
+	$property = $value.PSObject.Properties[$name]
+	if ($null -eq $property) { return $null }
+	return $property.Value
+}
+
+function Get-ObservedTaskStateSHA256([object]$task) {
+	$triggers = @()
+	foreach ($trigger in @($task.Triggers)) {
+		$repetition = Get-TaskProperty $trigger 'Repetition'
+		$triggers += [pscustomobject][ordered]@{
+			class = [string]$trigger.CimClass.CimClassName
+			enabled = [bool]$trigger.Enabled
+			start_boundary = [string](Get-TaskProperty $trigger 'StartBoundary')
+			end_boundary = [string](Get-TaskProperty $trigger 'EndBoundary')
+			delay = [string](Get-TaskProperty $trigger 'Delay')
+			random_delay = [string](Get-TaskProperty $trigger 'RandomDelay')
+			days_interval = [int](Get-TaskProperty $trigger 'DaysInterval')
+			repetition_interval = [string](Get-TaskProperty $repetition 'Interval')
+			repetition_duration = [string](Get-TaskProperty $repetition 'Duration')
+		}
+	}
+	$state = [pscustomobject][ordered]@{
+		description = [string]$task.Description
+		state = [string]$task.State
+		enabled = Test-TaskEnabled $task
+		principal_user = [string]$task.Principal.UserId
+		principal_logon_type = [string]$task.Principal.LogonType
+		principal_run_level = [string]$task.Principal.RunLevel
+		settings_enabled = [bool]$task.Settings.Enabled
+		settings_restart_count = [int]$task.Settings.RestartCount
+		settings_restart_interval = [string]$task.Settings.RestartInterval
+		settings_execution_time_limit = [string]$task.Settings.ExecutionTimeLimit
+		triggers = $triggers
+	}
+	return Get-TextSHA256 (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $state -Compress -Depth 5)
+}
+
+function New-ObservedTask([object]$task, [string]$identitySHA256) {
+	return [pscustomobject][ordered]@{
+		type = 'scheduled-task'
+		role = 'remove'
+		identity_sha256 = $identitySHA256
+		observed_state_sha256 = Get-ObservedTaskStateSHA256 $task
+	}
+}
+
+$observedTasks = $null
 switch ([string]$request.operation) {
 	'arm' {
 		$deadline = [DateTimeOffset]::Parse([string]$request.deadline, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
@@ -393,7 +470,22 @@ switch ([string]$request.operation) {
 	'disarm' {
 		Remove-AllOwnedTasks
 	}
+	'observe' {
+		$recovery = @(Get-ExactTask $recoveryTaskName)
+		$reconcile = @(Get-ExactTask $reconcileTaskName)
+		if ($recovery.Count -ne 1 -or $reconcile.Count -ne 1) { throw 'scheduled watchdog observation is incomplete or ambiguous' }
+		Assert-OwnedRecoveryTask $recovery[0]
+		Assert-OwnedReconcileTask $reconcile[0]
+		$observedTasks = @(
+			New-ObservedTask $recovery[0] '2d58ac8b637df61862670dffe7100d6c425aac2347d7d2d3843dd3ce0130f571'
+			New-ObservedTask $reconcile[0] 'f5e1d15dbb7b3e43d6e74e84763ae4487a35a673e608806acf5990ecbbd46fc9'
+		)
+	}
 	default { throw 'unsupported watchdog operation' }
 }
 
-Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject ([pscustomobject][ordered]@{ version = 1; ok = $true }) -Compress`
+if ($null -eq $observedTasks) {
+	Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject ([pscustomobject][ordered]@{ version = 1; ok = $true }) -Compress
+} else {
+	Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject ([pscustomobject][ordered]@{ version = 1; ok = $true; tasks = $observedTasks }) -Compress
+}`

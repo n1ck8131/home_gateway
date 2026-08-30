@@ -1,6 +1,7 @@
 package windows
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -30,6 +32,25 @@ type fakeMutationBackend struct {
 	resolveAmbiguous        bool
 	snapshotCount           int
 	snapshotHook            func(*fakeMutationBackend, int)
+	watchdogTasks           []WatchdogTaskIdentity
+	watchdogErr             error
+}
+
+func (backend *fakeMutationBackend) ObserveWatchdogTasks(context.Context) ([]WatchdogTaskIdentity, error) {
+	if backend.watchdogErr != nil {
+		return nil, backend.watchdogErr
+	}
+	if backend.watchdogTasks == nil {
+		backend.watchdogTasks = validObservedWatchdogTasks()
+	}
+	return append([]WatchdogTaskIdentity(nil), backend.watchdogTasks...), nil
+}
+
+func validObservedWatchdogTasks() []WatchdogTaskIdentity {
+	return []WatchdogTaskIdentity{
+		{Type: "scheduled-task", Role: "remove", IdentitySHA256: "2d58ac8b637df61862670dffe7100d6c425aac2347d7d2d3843dd3ce0130f571", ObservedStateSHA256: strings.Repeat("a", 64)},
+		{Type: "scheduled-task", Role: "remove", IdentitySHA256: "f5e1d15dbb7b3e43d6e74e84763ae4487a35a673e608806acf5990ecbbd46fc9", ObservedStateSHA256: strings.Repeat("b", 64)},
+	}
 }
 
 type fakeFirewallBatchMutationBackend struct {
@@ -1231,6 +1252,159 @@ func TestFullRestorePlanIdentityBindsExactObjectsNotOnlyCounts(t *testing.T) {
 	}
 }
 
+func prepareFullRestorePlan(t *testing.T, backend *fakeMutationBackend) (*Runtime, apply.Journal) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "runtime")
+	tx := transactionForRoot(root, backend, &mutableClock{now: time.Unix(100, 0).UTC()})
+	if err := tx.Apply(t.Context(), safeCandidate(t, "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Confirm(); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"hgctl.exe", "p35-canary.ps1", "p35-bootstrap.ps1", "p35-bootstrap-elevated.ps1"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("synthetic-"+name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "boot-marker.v1.json"), []byte(`{"boot":"synthetic"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "native-ownership.v1.json"), []byte(`{"version":1,"entries":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "source.conf")
+	config := []byte("[synthetic-profile]")
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDigest := sha256.Sum256(config)
+	binding, err := json.Marshal(configACLRestoreBinding{
+		Version: 1, ConfigPath: configPath, ConfigSHA256: fmt.Sprintf("%x", configDigest[:]),
+		VolumeSerial: "00000000", FileIndex: "0000000000000000", SDDL: "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config-source-before.v1.json"), binding, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := tx.Journal.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tx.Runtime.(*Runtime), journal
+}
+
+func TestFullRestorePlanBindsObservedWatchdogState(t *testing.T) {
+	backend := newSafeBackend()
+	runtime, journal := prepareFullRestorePlan(t, backend)
+	first, err := runtime.PlanFullRestore(t.Context(), journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first.WatchdogTaskIdentities, validObservedWatchdogTasks()) {
+		t.Fatalf("watchdog plan identities = %#v", first.WatchdogTaskIdentities)
+	}
+	backend.watchdogTasks[0].ObservedStateSHA256 = strings.Repeat("c", 64)
+	second, err := runtime.PlanFullRestore(t.Context(), journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.IdentitySHA256() == second.IdentitySHA256() {
+		t.Fatal("watchdog state drift reused the full restore plan hash")
+	}
+}
+
+func TestFullRestorePlanRejectsIncompleteOrForeignWatchdogObservation(t *testing.T) {
+	tests := map[string]func([]WatchdogTaskIdentity) []WatchdogTaskIdentity{
+		"missing":   func(tasks []WatchdogTaskIdentity) []WatchdogTaskIdentity { return tasks[:1] },
+		"duplicate": func(tasks []WatchdogTaskIdentity) []WatchdogTaskIdentity { return append(tasks[:1], tasks[0]) },
+		"unknown": func(tasks []WatchdogTaskIdentity) []WatchdogTaskIdentity {
+			tasks[0].IdentitySHA256 = strings.Repeat("c", 64)
+			return tasks
+		},
+		"malformed state": func(tasks []WatchdogTaskIdentity) []WatchdogTaskIdentity {
+			tasks[0].ObservedStateSHA256 = "not-a-hash"
+			return tasks
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			backend := newSafeBackend()
+			runtime, journal := prepareFullRestorePlan(t, backend)
+			backend.watchdogTasks = mutate(validObservedWatchdogTasks())
+			if _, err := runtime.PlanFullRestore(t.Context(), journal); err == nil {
+				t.Fatal("invalid watchdog observation produced a full restore plan")
+			}
+		})
+	}
+}
+
+func TestFullRestorePlanFailsClosedWhenAnyRevisionPointerHasNoManifest(t *testing.T) {
+	for name, mutate := range map[string]func(*apply.Journal){
+		"active":   func(journal *apply.Journal) { journal.ActiveRevision = "missing-active" },
+		"lkg":      func(journal *apply.Journal) { journal.LastKnownGoodRevision = "missing-lkg" },
+		"pending":  func(journal *apply.Journal) { journal.PendingRevision = "missing-pending" },
+		"recovery": func(journal *apply.Journal) { journal.FailedRevision = "missing-recovery" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := newSafeBackend()
+			runtime, journal := prepareFullRestorePlan(t, backend)
+			journal.ActiveRevision = ""
+			journal.LastKnownGoodRevision = ""
+			journal.PendingRevision = ""
+			journal.FailedRevision = ""
+			mutate(&journal)
+			if _, err := runtime.PlanFullRestore(t.Context(), journal); err == nil {
+				t.Fatal("revision pointer without a manifest produced a full restore plan")
+			}
+		})
+	}
+}
+
+func TestFullRestorePlanRejectsInvalidOrUnboundedReferencedManifest(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"invalid":   []byte(`{"version":1}`),
+		"unbounded": bytes.Repeat([]byte("x"), maxArtifactBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := newSafeBackend()
+			runtime, journal := prepareFullRestorePlan(t, backend)
+			path := filepath.Join(runtime.Root, "revisions", journal.ActiveRevision, revisionManifestName)
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runtime.PlanFullRestore(t.Context(), journal); err == nil {
+				t.Fatal("invalid referenced manifest produced a full restore plan")
+			}
+		})
+	}
+}
+
+func TestFullRestorePlanRejectsReparseBackedReferencedManifest(t *testing.T) {
+	backend := newSafeBackend()
+	runtime, journal := prepareFullRestorePlan(t, backend)
+	revisionDirectory := filepath.Join(runtime.Root, "revisions", journal.ActiveRevision)
+	targetDirectory := revisionDirectory + "-target"
+	if err := os.Rename(revisionDirectory, targetDirectory); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G204 -- cmd.exe and mklink /J are fixed; both paths are test-owned
+	// absolute directories below t.TempDir and contain no external input.
+	output, err := exec.CommandContext(t.Context(), "cmd.exe", "/d", "/c", "mklink", "/J", revisionDirectory, targetDirectory).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create test junction: %v: %s", err, output)
+	}
+	if _, err := runtime.PlanFullRestore(t.Context(), journal); err == nil {
+		t.Fatal("manifest below a reparse-backed revision directory produced a full restore plan")
+	}
+}
+
 func TestBoundFileHashRejectsPathSubstitutionAfterIdentityCheck(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "artifact.bin")
@@ -1268,7 +1442,8 @@ func TestFullRestorePlanValidationRequiresTerminalAndACLCrossBindingIdentities(t
 	plan.InstallSnapshotSHA256 = hash
 	plan.CurrentManagedSHA256 = hash
 	plan.PreservedForeignSHA256 = hash
-	plan.WatchdogTaskIdentities = []artifactIdentity{{Type: "scheduled-task", Role: "remove", SHA256: hash}}
+	watchdogs := validObservedWatchdogTasks()
+	plan.WatchdogTaskIdentities = watchdogs[:1]
 	plan.ProtectedConfigPathIdentity = hash
 	plan.CurrentConfigACLSHA256 = hash
 	plan.BaselineConfigACLSHA256 = hash
@@ -1282,7 +1457,7 @@ func TestFullRestorePlanValidationRequiresTerminalAndACLCrossBindingIdentities(t
 	if err := plan.Validate(); err == nil {
 		t.Fatal("restore plan with only one watchdog task identity passed validation")
 	}
-	plan.WatchdogTaskIdentities = append(plan.WatchdogTaskIdentities, artifactIdentity{Type: "scheduled-task", Role: "remove", SHA256: strings.Repeat("b", 64)})
+	plan.WatchdogTaskIdentities = watchdogs
 	if err := plan.Validate(); err != nil {
 		t.Fatalf("complete restore plan rejected: %v", err)
 	}

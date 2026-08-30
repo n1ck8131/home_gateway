@@ -46,7 +46,8 @@ function Invoke-BoundedNativeProcess([string]$Executable,[string[]]$Arguments,[i
     $stdoutPath = [IO.Path]::GetTempFileName()
     $stderrPath = [IO.Path]::GetTempFileName()
     try {
-        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+        $process = Microsoft.PowerShell.Management\Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+        $process.EnableRaisingEvents = $true
         $watch = [Diagnostics.Stopwatch]::StartNew()
         $timedOut = $false
         $oversized = $false

@@ -26,6 +26,13 @@ type commandMutationBackend struct {
 	failCall string
 }
 
+func (*commandMutationBackend) ObserveWatchdogTasks(context.Context) ([]windowssystem.WatchdogTaskIdentity, error) {
+	return []windowssystem.WatchdogTaskIdentity{
+		{Type: "scheduled-task", Role: "remove", IdentitySHA256: "2d58ac8b637df61862670dffe7100d6c425aac2347d7d2d3843dd3ce0130f571", ObservedStateSHA256: strings.Repeat("a", 64)},
+		{Type: "scheduled-task", Role: "remove", IdentitySHA256: "f5e1d15dbb7b3e43d6e74e84763ae4487a35a673e608806acf5990ecbbd46fc9", ObservedStateSHA256: strings.Repeat("b", 64)},
+	}, nil
+}
+
 type blockingDisarmWatchdog struct {
 	entered chan struct{}
 	release chan struct{}

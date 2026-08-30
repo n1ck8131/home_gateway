@@ -119,6 +119,17 @@ type manifestEntry struct {
 	SHA256 string `json:"sha256"`
 }
 
+type WatchdogTaskIdentity struct {
+	Type                string `json:"type"`
+	Role                string `json:"role"`
+	IdentitySHA256      string `json:"identity_sha256"`
+	ObservedStateSHA256 string `json:"observed_state_sha256"`
+}
+
+type WatchdogTaskObserver interface {
+	ObserveWatchdogTasks(context.Context) ([]WatchdogTaskIdentity, error)
+}
+
 type RecoveryPlan struct {
 	RemoveVPNRoutes int `json:"remove_vpn_routes"`
 	RetainSinks     int `json:"retain_sinks,omitempty"`
@@ -133,45 +144,49 @@ type RecoveryPlan struct {
 }
 
 type FullRestorePlan struct {
-	Schema                         string             `json:"schema"`
-	StateRootIdentity              string             `json:"state_root_identity"`
-	JournalState                   apply.State        `json:"journal_state"`
-	JournalFileSHA256              string             `json:"journal_file_sha256"`
-	OwnershipRegistrySHA256        string             `json:"ownership_registry_sha256"`
-	OwnedEntryIdentities           []artifactIdentity `json:"owned_entry_identities"`
-	RegistryVersion                int                `json:"registry_version"`
-	BootMarkerSHA256               string             `json:"boot_marker_sha256"`
-	NonterminalMutation            bool               `json:"nonterminal_mutation"`
-	InstallSnapshotSHA256          string             `json:"install_snapshot_sha256"`
-	CurrentManagedSHA256           string             `json:"current_managed_state_sha256"`
-	PreservedForeignSHA256         string             `json:"preserved_foreign_state_sha256"`
-	FirewallEnforced               bool               `json:"firewall_enforced"`
-	ActiveRevisionManifestSHA256   string             `json:"active_revision_manifest_sha256"`
-	LKGRevisionManifestSHA256      string             `json:"lkg_revision_manifest_sha256"`
-	PendingRevisionManifestSHA256  string             `json:"pending_revision_manifest_sha256"`
-	RecoveryRevisionManifestSHA256 string             `json:"recovery_revision_manifest_sha256"`
-	RemoveRouteIdentities          []artifactIdentity `json:"remove_route_identities"`
-	RetainSinkIdentities           []artifactIdentity `json:"retain_sink_identities"`
-	RemoveSinkIdentities           []artifactIdentity `json:"remove_sink_identities"`
-	RemoveFirewallIdentities       []artifactIdentity `json:"remove_firewall_identities"`
-	RemoveNRPTIdentities           []artifactIdentity `json:"remove_nrpt_identities"`
-	RestoreRouteIdentities         []artifactIdentity `json:"restore_route_identities"`
-	RestoreSinkIdentities          []artifactIdentity `json:"restore_sink_identities"`
-	RestoreFirewallIdentities      []artifactIdentity `json:"restore_firewall_identities"`
-	RestoreNRPTIdentities          []artifactIdentity `json:"restore_nrpt_identities"`
-	WatchdogTaskIdentities         []artifactIdentity `json:"watchdog_task_identities"`
-	ProtectedConfigPathIdentity    string             `json:"protected_config_path_identity"`
-	CurrentConfigACLSHA256         string             `json:"current_config_acl_sha256"`
-	BaselineConfigACLSHA256        string             `json:"baseline_config_acl_sha256"`
-	ProtectedConfigSHA256          string             `json:"protected_config_sha256"`
-	ConfigACLSnapshotSHA256        string             `json:"config_acl_snapshot_sha256"`
-	ProtectedConfigOperation       string             `json:"protected_config_operation"`
-	HgctlSHA256                    string             `json:"hgctl_sha256"`
-	CanaryLauncherSHA256           string             `json:"canary_launcher_sha256"`
-	BootstrapDriverSHA256          string             `json:"bootstrap_driver_sha256"`
-	BootstrapPayloadSHA256         string             `json:"bootstrap_payload_sha256"`
-	LockAtomicIdentities           []artifactIdentity `json:"lock_atomic_identities"`
-	Counts                         RecoveryPlan       `json:"counts"`
+	Schema                         string                 `json:"schema"`
+	StateRootIdentity              string                 `json:"state_root_identity"`
+	JournalState                   apply.State            `json:"journal_state"`
+	JournalFileSHA256              string                 `json:"journal_file_sha256"`
+	OwnershipRegistrySHA256        string                 `json:"ownership_registry_sha256"`
+	OwnedEntryIdentities           []artifactIdentity     `json:"owned_entry_identities"`
+	RegistryVersion                int                    `json:"registry_version"`
+	BootMarkerSHA256               string                 `json:"boot_marker_sha256"`
+	NonterminalMutation            bool                   `json:"nonterminal_mutation"`
+	InstallSnapshotSHA256          string                 `json:"install_snapshot_sha256"`
+	CurrentManagedSHA256           string                 `json:"current_managed_state_sha256"`
+	PreservedForeignSHA256         string                 `json:"preserved_foreign_state_sha256"`
+	FirewallEnforced               bool                   `json:"firewall_enforced"`
+	ActiveRevisionPresent          bool                   `json:"active_revision_present"`
+	ActiveRevisionManifestSHA256   string                 `json:"active_revision_manifest_sha256"`
+	LKGRevisionPresent             bool                   `json:"lkg_revision_present"`
+	LKGRevisionManifestSHA256      string                 `json:"lkg_revision_manifest_sha256"`
+	PendingRevisionPresent         bool                   `json:"pending_revision_present"`
+	PendingRevisionManifestSHA256  string                 `json:"pending_revision_manifest_sha256"`
+	RecoveryRevisionPresent        bool                   `json:"recovery_revision_present"`
+	RecoveryRevisionManifestSHA256 string                 `json:"recovery_revision_manifest_sha256"`
+	RemoveRouteIdentities          []artifactIdentity     `json:"remove_route_identities"`
+	RetainSinkIdentities           []artifactIdentity     `json:"retain_sink_identities"`
+	RemoveSinkIdentities           []artifactIdentity     `json:"remove_sink_identities"`
+	RemoveFirewallIdentities       []artifactIdentity     `json:"remove_firewall_identities"`
+	RemoveNRPTIdentities           []artifactIdentity     `json:"remove_nrpt_identities"`
+	RestoreRouteIdentities         []artifactIdentity     `json:"restore_route_identities"`
+	RestoreSinkIdentities          []artifactIdentity     `json:"restore_sink_identities"`
+	RestoreFirewallIdentities      []artifactIdentity     `json:"restore_firewall_identities"`
+	RestoreNRPTIdentities          []artifactIdentity     `json:"restore_nrpt_identities"`
+	WatchdogTaskIdentities         []WatchdogTaskIdentity `json:"watchdog_task_identities"`
+	ProtectedConfigPathIdentity    string                 `json:"protected_config_path_identity"`
+	CurrentConfigACLSHA256         string                 `json:"current_config_acl_sha256"`
+	BaselineConfigACLSHA256        string                 `json:"baseline_config_acl_sha256"`
+	ProtectedConfigSHA256          string                 `json:"protected_config_sha256"`
+	ConfigACLSnapshotSHA256        string                 `json:"config_acl_snapshot_sha256"`
+	ProtectedConfigOperation       string                 `json:"protected_config_operation"`
+	HgctlSHA256                    string                 `json:"hgctl_sha256"`
+	CanaryLauncherSHA256           string                 `json:"canary_launcher_sha256"`
+	BootstrapDriverSHA256          string                 `json:"bootstrap_driver_sha256"`
+	BootstrapPayloadSHA256         string                 `json:"bootstrap_payload_sha256"`
+	LockAtomicIdentities           []artifactIdentity     `json:"lock_atomic_identities"`
+	Counts                         RecoveryPlan           `json:"counts"`
 }
 
 func sha256JSON(value any) string {
@@ -303,17 +318,44 @@ func (plan FullRestorePlan) Validate() error {
 			return fmt.Errorf("full restore plan %s identity is required", label)
 		}
 	}
+	for label, binding := range map[string]struct {
+		present bool
+		hash    string
+	}{
+		"active revision":   {plan.ActiveRevisionPresent, plan.ActiveRevisionManifestSHA256},
+		"LKG revision":      {plan.LKGRevisionPresent, plan.LKGRevisionManifestSHA256},
+		"pending revision":  {plan.PendingRevisionPresent, plan.PendingRevisionManifestSHA256},
+		"recovery revision": {plan.RecoveryRevisionPresent, plan.RecoveryRevisionManifestSHA256},
+	} {
+		validHash := len(binding.hash) == 64 && strings.Trim(binding.hash, "0123456789abcdef") == ""
+		if binding.present != validHash {
+			return fmt.Errorf("full restore plan %s manifest binding differs", label)
+		}
+	}
+	expectedWatchdogs := expectedWatchdogTaskIdentitySet()
 	watchdogIdentities := make(map[string]struct{}, len(plan.WatchdogTaskIdentities))
 	for _, identity := range plan.WatchdogTaskIdentities {
-		if identity.Type != "scheduled-task" || identity.Role != "remove" || len(identity.SHA256) != 64 || strings.Trim(identity.SHA256, "0123456789abcdef") != "" {
+		if identity.Type != "scheduled-task" || identity.Role != "remove" ||
+			len(identity.IdentitySHA256) != 64 || strings.Trim(identity.IdentitySHA256, "0123456789abcdef") != "" ||
+			len(identity.ObservedStateSHA256) != 64 || strings.Trim(identity.ObservedStateSHA256, "0123456789abcdef") != "" {
 			return errors.New("full restore plan watchdog identity differs")
 		}
-		watchdogIdentities[identity.SHA256] = struct{}{}
+		if _, ok := expectedWatchdogs[identity.IdentitySHA256]; !ok {
+			return errors.New("full restore plan watchdog identity is not owned")
+		}
+		watchdogIdentities[identity.IdentitySHA256] = struct{}{}
 	}
 	if len(watchdogIdentities) != len(plan.WatchdogTaskIdentities) {
 		return errors.New("full restore plan watchdog identities are not unique")
 	}
 	return nil
+}
+
+func expectedWatchdogTaskIdentitySet() map[string]struct{} {
+	return map[string]struct{}{
+		exactArtifactIdentity("scheduled-task", "", "remove", map[string]string{"task_name": "HomeGateway-P35-Recovery", "task_path": `\`}).SHA256:  {},
+		exactArtifactIdentity("scheduled-task", "", "remove", map[string]string{"task_name": "HomeGateway-P35-Reconcile", "task_path": `\`}).SHA256: {},
+	}
 }
 
 func (plan FullRestorePlan) ConfirmationChallenge(stateRoot string) string {
@@ -795,6 +837,14 @@ func (runtime *Runtime) EmergencyDisable(ctx context.Context) error {
 }
 
 func (runtime *Runtime) PlanFullRestore(ctx context.Context, journal apply.Journal) (FullRestorePlan, error) {
+	observer, ok := runtime.Backend.(WatchdogTaskObserver)
+	if !ok {
+		return FullRestorePlan{}, errors.New("bounded watchdog task observer is required")
+	}
+	watchdogTasks, err := observer.ObserveWatchdogTasks(ctx)
+	if err != nil {
+		return FullRestorePlan{}, errors.New("observe watchdog task identities")
+	}
 	snapshot, err := runtime.verifiedCurrentSnapshot(ctx)
 	if err != nil {
 		return FullRestorePlan{}, err
@@ -849,30 +899,27 @@ func (runtime *Runtime) PlanFullRestore(ctx context.Context, journal apply.Journ
 		}
 	}
 	plan := FullRestorePlan{
-		Schema:                    "home-gateway/windows-full-restore/v1",
-		StateRootIdentity:         StateRootIdentity(runtime.Root),
-		JournalState:              journal.State,
-		JournalFileSHA256:         requiredHashes["journal"],
-		OwnershipRegistrySHA256:   requiredHashes["ownership registry"],
-		RegistryVersion:           ArtifactVersion,
-		BootMarkerSHA256:          requiredHashes["boot marker"],
-		NonterminalMutation:       journal.State != apply.StateIdle && journal.State != apply.StateCommitted && journal.State != apply.StateRolledBack && journal.State != apply.StateRestored,
-		InstallSnapshotSHA256:     requiredHashes["install snapshot"],
-		CurrentManagedSHA256:      sha256JSON(managed),
-		PreservedForeignSHA256:    sha256JSON(foreignKeys(snapshot)),
-		FirewallEnforced:          snapshot.FirewallEnforced,
-		RemoveRouteIdentities:     removeRoutes,
-		RemoveSinkIdentities:      removeSinks,
-		RemoveFirewallIdentities:  removeFirewall,
-		RemoveNRPTIdentities:      removeNRPT,
-		RestoreRouteIdentities:    restoreRoutes,
-		RestoreSinkIdentities:     restoreSinks,
-		RestoreFirewallIdentities: restoreFirewall,
-		RestoreNRPTIdentities:     restoreNRPT,
-		WatchdogTaskIdentities: []artifactIdentity{
-			exactArtifactIdentity("scheduled-task", "", "remove", map[string]string{"task_name": "HomeGateway-P35-Recovery", "task_path": `\`}),
-			exactArtifactIdentity("scheduled-task", "", "remove", map[string]string{"task_name": "HomeGateway-P35-Reconcile", "task_path": `\`}),
-		},
+		Schema:                      "home-gateway/windows-full-restore/v1",
+		StateRootIdentity:           StateRootIdentity(runtime.Root),
+		JournalState:                journal.State,
+		JournalFileSHA256:           requiredHashes["journal"],
+		OwnershipRegistrySHA256:     requiredHashes["ownership registry"],
+		RegistryVersion:             ArtifactVersion,
+		BootMarkerSHA256:            requiredHashes["boot marker"],
+		NonterminalMutation:         journal.State != apply.StateIdle && journal.State != apply.StateCommitted && journal.State != apply.StateRolledBack && journal.State != apply.StateRestored,
+		InstallSnapshotSHA256:       requiredHashes["install snapshot"],
+		CurrentManagedSHA256:        sha256JSON(managed),
+		PreservedForeignSHA256:      sha256JSON(foreignKeys(snapshot)),
+		FirewallEnforced:            snapshot.FirewallEnforced,
+		RemoveRouteIdentities:       removeRoutes,
+		RemoveSinkIdentities:        removeSinks,
+		RemoveFirewallIdentities:    removeFirewall,
+		RemoveNRPTIdentities:        removeNRPT,
+		RestoreRouteIdentities:      restoreRoutes,
+		RestoreSinkIdentities:       restoreSinks,
+		RestoreFirewallIdentities:   restoreFirewall,
+		RestoreNRPTIdentities:       restoreNRPT,
+		WatchdogTaskIdentities:      watchdogTasks,
 		ProtectedConfigPathIdentity: StateRootIdentity(binding.ConfigPath),
 		CurrentConfigACLSHA256:      currentConfigACLSHA256,
 		BaselineConfigACLSHA256:     fmt.Sprintf("%x", baselineConfigACLDigest[:]),
@@ -892,17 +939,25 @@ func (runtime *Runtime) PlanFullRestore(ctx context.Context, journal apply.Journ
 	sortArtifactIdentities(plan.OwnedEntryIdentities)
 	for label, revision := range map[string]string{"active": journal.ActiveRevision, "lkg": journal.LastKnownGoodRevision, "pending": journal.PendingRevision, "recovery": journal.FailedRevision} {
 		hash := ""
+		present := revision != ""
 		if revision != "" {
-			hash = fileSHA256IfRegular(filepath.Join(runtime.Root, "revisions", revision, revisionManifestName))
+			hash, err = runtime.bindRevisionManifest(revision)
+			if err != nil {
+				return FullRestorePlan{}, fmt.Errorf("bind %s revision manifest: %w", label, err)
+			}
 		}
 		switch label {
 		case "active":
+			plan.ActiveRevisionPresent = present
 			plan.ActiveRevisionManifestSHA256 = hash
 		case "lkg":
+			plan.LKGRevisionPresent = present
 			plan.LKGRevisionManifestSHA256 = hash
 		case "pending":
+			plan.PendingRevisionPresent = present
 			plan.PendingRevisionManifestSHA256 = hash
 		case "recovery":
+			plan.RecoveryRevisionPresent = present
 			plan.RecoveryRevisionManifestSHA256 = hash
 		}
 	}
@@ -1933,6 +1988,76 @@ func (runtime *Runtime) readRevision(revision string) (artifactSet, error) {
 		return artifactSet{}, err
 	}
 	return parseArtifacts(revision, canonical[routesArtifactName], canonical[sinksArtifactName], canonical[firewallArtifactName], canonical[dnsArtifactName])
+}
+
+func readBoundedRegularFile(path string, limit int) ([]byte, error) {
+	for current := filepath.Dir(path); ; current = filepath.Dir(current) {
+		ancestor, err := os.Lstat(current)
+		if err != nil || !ancestor.IsDir() || ancestor.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("artifact path contains a reparse-backed directory")
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > int64(limit) {
+		return nil, errors.New("artifact is not one bounded regular file")
+	}
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Mode()&os.ModeSymlink != 0 || !os.SameFile(info, opened) {
+		return nil, errors.New("artifact file identity changed")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	if err != nil || len(data) == 0 || len(data) > limit {
+		return nil, errors.New("artifact exceeds its bound")
+	}
+	return data, nil
+}
+
+func (runtime *Runtime) bindRevisionManifest(revision string) (string, error) {
+	directory, err := runtime.revisionDirectory(revision)
+	if err != nil {
+		return "", err
+	}
+	canonical := make(map[string][]byte, len(windowsArtifactNames()))
+	for _, name := range windowsArtifactNames() {
+		data, readErr := readBoundedRegularFile(filepath.Join(directory, name), maxArtifactBytes)
+		if readErr != nil {
+			return "", fmt.Errorf("revision artifact %s is unavailable: %w", name, readErr)
+		}
+		canonical[name] = data
+	}
+	manifestData, err := readBoundedRegularFile(filepath.Join(directory, revisionManifestName), maxArtifactBytes)
+	if err != nil {
+		return "", errors.New("revision manifest is missing, reparse-backed, or unbounded")
+	}
+	var manifest revisionManifest
+	if err := decodeStrict(manifestData, &manifest); err != nil {
+		return "", errors.New("revision manifest schema differs")
+	}
+	if manifest.Version != ArtifactVersion || manifest.Revision != revision {
+		return "", errors.New("revision manifest header mismatch")
+	}
+	if err := verifyManifestEntries(manifest, canonical); err != nil {
+		return "", err
+	}
+	if _, err := parseArtifacts(revision, canonical[routesArtifactName], canonical[sinksArtifactName], canonical[firewallArtifactName], canonical[dnsArtifactName]); err != nil {
+		return "", errors.New("referenced revision artifacts are invalid")
+	}
+	digest := sha256.Sum256(manifestData)
+	return fmt.Sprintf("%x", digest[:]), nil
 }
 
 func (runtime *Runtime) writeSnapshot(name string, snapshot managedSnapshot, replace bool) error {

@@ -80,4 +80,51 @@ Describe 'bounded P3 Amnezia peer guard' {
         { Invoke-BoundedPeerGuard -Executable 'synthetic-ssh.exe' -Arguments @('arg') -ExpectedPayloadSHA256 $payloadHash `
             -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 20 -MaxOutputBytes 1024 -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut='{"payload_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","protocol_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ready_for_ui":true}';StdErr=''} } } | Should -Throw '*payload identity*'
     }
+
+    It 'executes the tracked Python automatic attestation protocol and rejects incompatible process output' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Launcher,[ref]$tokens,[ref]$errors)
+        $definitions = foreach ($name in @('Invoke-BoundedNativeProcess','Invoke-BoundedPeerGuard')) {
+            $definition = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+            },$true))
+            $definition.Count | Should -Be 1
+            $definition[0].Extent.Text
+        }
+        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
+        $python = (Get-Command python.exe).Source
+        $payloadHash = (Get-FileHash -LiteralPath $script:Payload -Algorithm SHA256).Hash.ToLowerInvariant()
+        $protocolHash = '79f5908e0c944d8076e2646595ca0342b192765a36288224a6cab071f59354c8'
+        $arguments = @($script:Payload,'--automatic','--json','--expected-payload-sha256',$payloadHash,'--expected-protocol-sha256',$protocolHash)
+
+        $receipt = Invoke-BoundedPeerGuard -Executable $python -Arguments $arguments -ExpectedPayloadSHA256 $payloadHash `
+            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096
+        $receipt.ready_for_ui | Should -BeTrue
+        [string]$receipt.payload_sha256 | Should -BeExactly $payloadHash
+        [string]$receipt.protocol_sha256 | Should -BeExactly $protocolHash
+
+        foreach ($badArguments in @(
+            @($script:Payload,'--unsupported'),
+            @($script:Payload,'--automatic','--json','--expected-payload-sha256',('0' * 64),'--expected-protocol-sha256',$protocolHash),
+            @($script:Payload,'--automatic','--json','--expected-payload-sha256',$payloadHash,'--expected-protocol-sha256',('0' * 64))
+        )) {
+            { Invoke-BoundedPeerGuard -Executable $python -Arguments $badArguments -ExpectedPayloadSHA256 $payloadHash `
+                -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw
+        }
+
+        $malformed = Join-Path $TestDrive 'malformed-receipt.py'
+        $extra = Join-Path $TestDrive 'extra-receipt.py'
+        $nonzero = Join-Path $TestDrive 'nonzero-receipt.py'
+        [IO.File]::WriteAllText($malformed,"print('not-json')",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($extra,"print('{`"payload_sha256`":`"$payloadHash`",`"protocol_sha256`":`"$protocolHash`",`"ready_for_ui`":true}');print('extra')",[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($nonzero,'raise SystemExit(7)',[Text.UTF8Encoding]::new($false))
+        { Invoke-BoundedPeerGuard -Executable $python -Arguments @($malformed) -ExpectedPayloadSHA256 $payloadHash `
+            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw
+        { Invoke-BoundedPeerGuard -Executable $python -Arguments @($extra) -ExpectedPayloadSHA256 $payloadHash `
+            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw
+        { Invoke-BoundedPeerGuard -Executable $python -Arguments @($nonzero) -ExpectedPayloadSHA256 $payloadHash `
+            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw '*transport failed*'
+    }
 }

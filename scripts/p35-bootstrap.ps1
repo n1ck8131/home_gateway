@@ -158,6 +158,80 @@ try {
     return $encoded
 }
 
+function Invoke-BoundedReadOnlyPlanChild([string]$FilePath, [string[]]$ArgumentList) {
+    $stdoutPath = [IO.Path]::GetTempFileName()
+    $stderrPath = [IO.Path]::GetTempFileName()
+    $process = $null
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $process = & {
+            $WhatIfPreference = $false
+            Microsoft.PowerShell.Management\Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WindowStyle Hidden -PassThru `
+                -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+        }
+        if ($null -eq $process) { throw 'P3.5 ACL plan child did not start' }
+        $process.EnableRaisingEvents = $true
+        while (-not $process.HasExited) {
+            if ($clock.Elapsed.TotalSeconds -ge 15) {
+                try { $process.Kill() } catch { }
+                throw 'P3.5 ACL plan child exceeded its time limit'
+            }
+            if (([IO.FileInfo]::new($stdoutPath)).Length + ([IO.FileInfo]::new($stderrPath)).Length -gt 65536) {
+                try { $process.Kill() } catch { }
+                throw 'P3.5 ACL plan child output exceeded its limit'
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        $process.WaitForExit()
+        if (([IO.FileInfo]::new($stdoutPath)).Length + ([IO.FileInfo]::new($stderrPath)).Length -gt 65536) { throw 'P3.5 ACL plan child output exceeded its limit' }
+        $strictUTF8 = [Text.UTF8Encoding]::new($false, $true)
+        $stdoutReader = [IO.StreamReader]::new([IO.File]::Open($stdoutPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None), $strictUTF8)
+        try { $stdout = $stdoutReader.ReadToEnd() } finally { $stdoutReader.Dispose() }
+        $stderrReader = [IO.StreamReader]::new([IO.File]::Open($stderrPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None), $strictUTF8)
+        try { $stderr = $stderrReader.ReadToEnd() } finally { $stderrReader.Dispose() }
+        if ($process.ExitCode -ne 0) { throw "P3.5 ACL plan child failed with exit code $($process.ExitCode)" }
+        if (-not [string]::IsNullOrEmpty($stderr)) { throw 'P3.5 ACL plan child emitted unexpected error output' }
+        if ([string]::IsNullOrWhiteSpace($stdout)) { throw 'P3.5 ACL plan child emitted no receipt' }
+        return $stdout.Trim()
+    } finally {
+        $clock.Stop()
+        if ($null -ne $process) { $process.Dispose() }
+        try { [IO.File]::Delete($stdoutPath) } catch { }
+        try { [IO.File]::Delete($stderrPath) } catch { }
+    }
+}
+
+function Assert-ExactPropertyNames([object]$Value, [string[]]$Expected, [string]$Label) {
+    if ($null -eq $Value -or -not ($Value -is [pscustomobject])) { throw "$Label must be one JSON object" }
+    $actual = @($Value.PSObject.Properties.Name)
+    if ([string]::Join([char]0, $actual) -cne [string]::Join([char]0, $Expected)) { throw "$Label schema differs" }
+}
+
+function Assert-RestoreConfigAclPlan([string]$JSON, [string]$ConfigPath, [string]$ConfigSHA256, [string]$DriverSHA256, [string]$PayloadSHA256, [string]$NetworkPlanSHA256) {
+    try { $plan = ConvertFrom-Json -InputObject $JSON -ErrorAction Stop } catch { throw 'P3.5 ACL plan child receipt must be one valid JSON object' }
+    Assert-ExactPropertyNames -Value $plan -Expected @('mode','live_mutation_performed','identity','acl_plan_sha256','confirmation_challenge') -Label 'P3.5 ACL plan receipt'
+    Assert-ExactPropertyNames -Value $plan.identity -Expected @('schema','protected_config_path_identity','current_acl_sha256','baseline_acl_sha256','config_sha256','bootstrap_driver_sha256','bootstrap_payload_sha256','network_restore_plan_sha256','operation') -Label 'P3.5 ACL plan identity'
+    if ([string]$plan.mode -cne 'restore-config-acl-plan' -or -not ($plan.live_mutation_performed -is [bool]) -or $plan.live_mutation_performed) { throw 'P3.5 ACL plan receipt mode differs' }
+    $identity = $plan.identity
+    if ([string]$identity.schema -cne 'home-gateway/windows-restore-config-acl/v1' -or [string]$identity.operation -cne 'restore-config-acl') { throw 'P3.5 ACL plan identity contract differs' }
+    foreach ($entry in @(
+        @{ Value = [string]$identity.protected_config_path_identity; Label = 'protected config path identity' },
+        @{ Value = [string]$identity.current_acl_sha256; Label = 'current ACL hash' },
+        @{ Value = [string]$identity.baseline_acl_sha256; Label = 'baseline ACL hash' },
+        @{ Value = [string]$plan.acl_plan_sha256; Label = 'ACL plan hash' }
+    )) { Assert-SHA256 -Value $entry.Value -Label $entry.Label }
+    if ([string]$identity.protected_config_path_identity -cne (Get-TextSHA256 -Value $ConfigPath.ToLowerInvariant()) -or
+        [string]$identity.config_sha256 -cne $ConfigSHA256 -or
+        [string]$identity.bootstrap_driver_sha256 -cne $DriverSHA256 -or
+        [string]$identity.bootstrap_payload_sha256 -cne $PayloadSHA256 -or
+        [string]$identity.network_restore_plan_sha256 -cne $NetworkPlanSHA256) { throw 'P3.5 ACL plan identity bindings differ' }
+    $expectedPlanHash = Get-TextSHA256 -Value (ConvertTo-Json -Compress -InputObject $identity)
+    if ([string]$plan.acl_plan_sha256 -cne $expectedPlanHash) { throw 'P3.5 ACL plan hash differs from its identity' }
+    $challengeHash = Get-TextSHA256 -Value ($ConfigPath.ToLowerInvariant() + [char]0 + $expectedPlanHash)
+    $expectedChallenge = 'P35-RESTORE-CONFIG-ACL-' + $challengeHash.Substring(0, 16).ToUpperInvariant()
+    if ([string]$plan.confirmation_challenge -cne $expectedChallenge) { throw 'P3.5 ACL plan confirmation challenge differs' }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'P3.5 bootstrap driver must run from a non-elevated session' }
@@ -245,6 +319,13 @@ if ($Action -cne 'RestoreConfigAclPlan' -and -not $PSCmdlet.ShouldProcess('prote
 $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $payloadCommandBase64)
 $commandLength = $trustedPowerShell.Length + 1 + (($arguments | ForEach-Object { [string]$_ }) -join ' ').Length
 if ($commandLength -ge 32767) { throw 'P3.5 bootstrap command exceeds CreateProcess command length budget' }
+if ($Action -ceq 'RestoreConfigAclPlan') {
+    $planJSON = Invoke-BoundedReadOnlyPlanChild -FilePath $trustedPowerShell -ArgumentList $arguments
+    Assert-RestoreConfigAclPlan -JSON $planJSON -ConfigPath $resolvedConfig -ConfigSHA256 $ExpectedConfigSHA256 `
+        -DriverSHA256 $ExpectedDriverSHA256 -PayloadSHA256 $ExpectedPayloadSHA256 -NetworkPlanSHA256 $NetworkRestorePlanSHA256
+    Write-Output $planJSON
+    return
+}
 $process = Start-Process -FilePath $trustedPowerShell -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
 if ($null -eq $process -or $process.ExitCode -ne 0) { throw "P3.5 elevated bootstrap failed with exit code $($process.ExitCode)" }
 Write-Output (ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{

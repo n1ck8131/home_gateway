@@ -70,6 +70,7 @@ type nativeExecMutationRunner struct{}
 type nativeMutationBackend struct {
 	root                string
 	command             nativeMutationCommand
+	watchdogCommand     nativeMutationCommand
 	runner              nativeMutationRunner
 	validateRoot        func(string) error
 	bootID              func() (string, error)
@@ -80,6 +81,7 @@ type nativeMutationBackend struct {
 
 var _ MutationBackend = (*nativeMutationBackend)(nil)
 var _ FirewallBatchMutationBackend = (*nativeMutationBackend)(nil)
+var _ WatchdogTaskObserver = (*nativeMutationBackend)(nil)
 
 // NewNativeMutationBackend creates the privileged Windows adapter. The caller
 // must pass the same absolute, protected root used by Runtime so native route
@@ -106,12 +108,17 @@ func newNativeMutationBackend(root string, paths nativeInventoryPaths, runner na
 	if runner == nil || validateRoot == nil {
 		return nil, errors.New("native Windows mutation runner and root validator are required")
 	}
+	watchdogCommand, err := buildCanaryWatchdogCommand(paths)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateRoot(root); err != nil {
 		return nil, err
 	}
 	backend := &nativeMutationBackend{
 		root:                root,
 		command:             command,
+		watchdogCommand:     watchdogCommand,
 		runner:              runner,
 		validateRoot:        validateRoot,
 		bootID:              readNativeBootIdentifier,
@@ -122,6 +129,10 @@ func newNativeMutationBackend(root string, paths nativeInventoryPaths, runner na
 		return nil, err
 	}
 	return backend, nil
+}
+
+func (backend *nativeMutationBackend) ObserveWatchdogTasks(ctx context.Context) ([]WatchdogTaskIdentity, error) {
+	return observeWatchdogTasks(ctx, backend.root, canaryInstalledExecutable(backend.root), backend.watchdogCommand, backend.runner)
 }
 
 type nativeBootEnvironmentInformation struct {

@@ -2,6 +2,8 @@
 
 This runbook is an operator-only gate. It does not authorize cloud creation, SSH, profile activation, or Windows network changes.
 
+The protected profile staging, sanitized Windows observation schema and distinct server/client rollback workflow are defined in [P3_WINDOWS_CLIENT_ACTIVATION.md](P3_WINDOWS_CLIENT_ACTIVATION.md). Before peer creation, require a source-pinned AmneziaVPN `5.0.1.5` capability mapping and a read-only UI check proving the exact one-peer removal control exists; otherwise stop before creation.
+
 1. Before any peer action, perform a bounded read-only reconciliation of the expected container, Docker/host/Cloud Firewall public ingress union and baseline peer-set identity. Stop on any mismatch.
 2. Use the pinned Windows AmneziaVPN 5.0.1.5 client through its supported **Self-hosted VPN** GUI flow and select **AmneziaWG only**. Do not call internal Amnezia shell scripts as a stable API.
 3. Preserve the pre-existing baseline Admin peer unchanged. After a separate exact approval, add exactly one `homegateway` management Admin peer. Accept only the exact candidate delta and retain a candidate-specific rollback receipt.

@@ -10,13 +10,15 @@ On 2026-08-27 the owner decided to stop treating RedShield as the target provide
 
 ## Decision
 
-P3 will bootstrap one self-hosted AmneziaWG server on a manually created DigitalOcean Droplet and use one static Windows PC peer for `pc-core-ready` qualification. The supported P3 installation path is the official AmneziaVPN 5.0.1.5 `Self-hosted VPN` GUI flow, installing only AmneziaWG and exporting one guest in native format.
+P3 bootstraps one self-hosted AmneziaWG server on a manually created DigitalOcean Droplet and uses one static Windows PC Guest for `pc-core-ready` qualification. The accepted terminal server topology retains the pre-existing baseline Admin peer unchanged, adds exactly one `homegateway` management Admin peer, and adds exactly one static PC Guest. The supported path is the official AmneziaVPN 5.0.1.5 `Self-hosted VPN` GUI flow with AmneziaWG only and native Guest export.
 
 The initial baseline is `ams3` (`fra1` fallback), Ubuntu 24.04 LTS x64, the $6 Basic Regular size, IPv6 and monitoring enabled, SSH restricted to the current owner management IPv4 `/32` and available IPv6 `/128`, and one public UDP tunnel port. The first Droplet is created through the DigitalOcean UI with a dedicated SSH public key. Initial key-only root access is replaced after bootstrap by the `homegateway` passwordless-sudo operator with root SSH disabled. No DigitalOcean API token or `doctl` is required. Cloud and host firewalls expose no web panel, public proxy or recursive DNS service.
 
 The Windows installer asset is pinned by SHA-256, but the tagged Amnezia server Dockerfile references `amneziavpn/amneziawg-go:latest`. P3 records the actually installed container image ID/digest and stops if it cannot establish that identity; it does not claim an official pinned noninteractive bootstrap. P8 owns digest-pinned automation and reconciliation.
 
 P3 owns only the supported manual bootstrap with recorded provenance, protected static profile, provider-neutral Windows integration and complete live safety/recovery matrix. P8 retains digest-pinned provisioning automation, restricted `server-agent`, operational lifecycle, mobile peer management and telemetry. P9 retains the second VPS and failover.
+
+The supported Admin rollback removes only the exact candidate peer through the official Amnezia UI. The reviewed candidate-bound direct rollback is emergency-only. Removing the static Guest is a separate server mutation and is never implied by removing or rolling back the local client profile.
 
 RedShield is retired as the required/target backend but is not disconnected, reconfigured or deleted by this decision. Its code and evidence remain historical compatibility assets. Any live RedShield change requires a later explicit authorization.
 
@@ -34,6 +36,7 @@ The existing P3.5 RedShield pre-mutation block remains historical evidence. It d
 - The $6 size is accepted only after measured capacity evidence; powered-off billing and transfer overage are operational considerations.
 - Initial backups stay disabled for the disposable canary unless separately approved because snapshots replicate secret-bearing server state.
 - `pc-core-ready` remains open until observed handshake/egress, the complete Windows safety matrix, restart/recovery and a terminal journaled `FullRestore` pass.
+- Terminal restoration retains journal state `restored`, an empty ownership registry, the install snapshot and terminal receipt for audit. Active/LKG/pending/recovery revisions are empty and project-owned routes, sinks, firewall, NRPT and tasks are zero.
 
 ## Verification
 

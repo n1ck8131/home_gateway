@@ -22,7 +22,7 @@ P3 will use one minimal, manually created DigitalOcean Droplet as the live Windo
 | Region | `ams3`; use `fra1` only if availability or a bounded latency check makes it preferable |
 | Size | Basic Regular, 1 shared vCPU, 1 GiB RAM, 25 GiB SSD, 1,000 GiB transfer |
 | Image | Ubuntu 24.04 LTS x64, slug `ubuntu-24-04-x64` |
-| Tunnel | Official AmneziaVPN 5.0.1.5 `Self-hosted VPN` GUI path, current AWG 3.1; one exported AmneziaWG guest peer |
+| Tunnel | Official AmneziaVPN 5.0.1.5 `Self-hosted VPN` GUI path, current AWG 3.1; preserve the baseline Admin, add one `homegateway` Admin, and export one static PC Guest |
 | Public ingress | SSH restricted to the current owner management IPv4 `/32` and, when available, IPv6 `/128`; one selected UDP tunnel port available to VPN clients |
 | Access | Dedicated project SSH key; no password authentication; initial key-only root bootstrap followed by a `homegateway` passwordless-sudo operator and disabled root SSH |
 | Network controls | DigitalOcean Cloud Firewall plus matching host firewall; IPv6 and monitoring enabled |
@@ -46,6 +46,8 @@ The official supported server installation path is interactive through AmneziaVP
 
 P8 no longer means “create the first own VPS”. It operationalizes and automates the already qualified self-hosted server, adds the restricted management boundary and implements mobile peer lifecycle. P9 continues to own multi-server failover.
 
+The accepted P3 terminal peer topology is exact: the pre-existing baseline Admin remains unchanged, exactly one `homegateway` management Admin is added, and exactly one static PC Guest is added. Supported Admin rollback is official-UI removal of only the candidate peer. The reviewed candidate-bound direct rollback is emergency-only. Guest removal is a separately approved server mutation and is never implied by client-profile rollback.
+
 ## Security and secret handling
 
 - The user never sends a private SSH key, VPN private key, password, recovery code or DigitalOcean API token through chat.
@@ -63,7 +65,7 @@ P8 no longer means “create the first own VPS”. It operationalizes and automa
 2. **Local credential gate** — generate a dedicated SSH key locally and record only the public-key fingerprint. This requires a separate execution step but no network mutation.
 3. **Billable create gate** — the owner explicitly authorizes creation and billing immediately before clicking **Create Droplet**.
 4. **Bootstrap gate** — verify immutable Droplet metadata and SSH host key, then use the hash-pinned AmneziaVPN 5.0.1.5 GUI `Self-hosted VPN` flow to install only AmneziaWG. Capture the observed container image ID/digest and selected UDP port; do not treat internal Amnezia shell scripts as a supported API. This requires separate authorization for the first SSH/server mutation.
-5. **Profile creation gate** — separately authorize the server-mutating creation of one `Guest access`, export `AmneziaWG native format`, store it locally with restrictive ACLs and validate it through the provider-neutral importer without exposing secrets.
+5. **Peer/profile gate** — after current Gate 6.4 state is reconciled, separately authorize exactly one `homegateway` Admin discovery and exactly one static PC `Guest access`. Export `AmneziaWG native format`, store it locally with restrictive ACLs and validate it through the provider-neutral importer without exposing secrets.
 6. **Client activation gate** — present the exact profile hash, supported Windows client and profile-only rollback; separately authorize import/connection, then prove adapter identity, handshake and egress without changing RedShield or Cisco.
 7. **Windows plan gate** — collect a fresh inventory and exact Plan. Any endpoint, DNS/Cisco overlap, IPv4/IPv6, adapter or sink ambiguity blocks before mutation.
 8. **Live canary gate** — separately authorize exact Apply/Confirm. Run direct/self-hosted/Cisco, DNS, leak, MTU, TCP/UDP/QUIC and tunnel-loss assertions; roll back on any anomaly.
@@ -91,7 +93,8 @@ The transition is accepted only when:
 - direct and Cisco paths remain available and unmodified;
 - VPN-class traffic is fail-closed for both IPv4 and IPv6 during tunnel loss;
 - restart/reconcile and anomaly rollback pass;
-- terminal journaled `FullRestore` restores the exact pre-Apply project-owned network state and approved protected-config baseline without removing the source profile or Amnezia client profile;
+- terminal journaled `FullRestore` leaves journal state `restored`, active/LKG/pending/recovery revisions empty, the ownership registry present but empty, and project-owned routes/sinks/firewall/NRPT/tasks at zero while retaining the install snapshot and terminal receipt for audit;
+- protected-config ACL restoration is a separate independently candidate-bound operation after network `FullRestore`, and neither operation removes the source profile, local client profile or server Guest;
 - evidence contains no secret or raw profile content.
 
 ## Non-goals

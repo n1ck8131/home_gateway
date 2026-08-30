@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-27-p3-self-hosted-digitalocean-transition-design.md`
 
+**Reconciliation baseline:** [Gate 6.4/6.5C reconciliation](../../reports/2026-08-30-p3-gate64-65c-reconciliation.md) records Gates 6.1-6.3 passed, Gate 6.4 current state pending read-only reconciliation, Gate 6.5C `rollback-complete`, protected profile absent, and all Windows field gates open.
+
 ## Global Constraints
 
 - Do not disconnect, restart, reconfigure, or remove RedShield or Cisco without a separately named approval.
@@ -45,11 +47,11 @@
 - Consumes: sanitized Gate 6.3 tracked report and ignored Gate 6.4/6.5 runtime evidence.
 - Produces: one non-secret current baseline and the accepted terminal-journal contract used by Tasks 5–9.
 
-- [ ] **Step 1: Write the reconciliation report from exact sanitized evidence**
+- [x] **Step 1: Write the reconciliation report from exact sanitized evidence**
 
   Record Gate 6.4 host-policy and Cloud Firewall facts as `confirmed`, `owner-observed`, or `needs-read-only-recheck`; do not infer missing evidence. Record Gate 6.5C as `rollback-complete`, including exactly one removed Admin peer, exactly one rollback `syncconf`, baseline peer-set hash restored, container restart delta zero, firewall unchanged, and SSH exit zero.
 
-- [ ] **Step 2: Correct the terminal restore contract**
+- [x] **Step 2: Correct the terminal restore contract**
 
   Replace the physical-absence requirement for `journal.json` and the ownership registry with this exact acceptance rule:
 
@@ -63,19 +65,19 @@
   install snapshot and terminal receipt = retained for audit
   ```
 
-- [ ] **Step 3: Record the accepted peer topology and supported rollback paths**
+- [x] **Step 3: Record the accepted peer topology and supported rollback paths**
 
   Update the ADR, accepted design, bootstrap plan, and GUI runbook so they all name the same P3 terminal topology: retain the pre-existing baseline Admin peer, add exactly one `homegateway` management Admin peer, and add exactly one static PC Guest. The supported Admin rollback is exact one-peer removal through the official Amnezia UI; the reviewed candidate-bound direct rollback is emergency-only. Guest removal is a separate server mutation and is never implied by client-profile rollback.
 
-- [ ] **Step 4: Define the local runtime-evidence boundary**
+- [x] **Step 4: Define the local runtime-evidence boundary**
 
   Add the exact root-only `.p35-run/` runtime directory to `.gitignore`, matching the existing `.p3-vps-run/` policy. Preserve all existing files in both directories; never clean, move, stage, or rewrite them. Tracked reports may contain only reviewed sanitized extracts.
 
-- [ ] **Step 5: Synchronize status and security documentation**
+- [x] **Step 5: Synchronize status and security documentation**
 
   Mark Gates 6.1–6.3 passed, Gate 6.4 pending read-only reconciliation where evidence is not tracked, Gate 6.5C rolled back, protected profile absent, and all Windows field gates open. Remove stale claims that the native backend is unavailable.
 
-- [ ] **Step 6: Validate documentation consistency**
+- [x] **Step 6: Validate documentation consistency**
 
   Run:
 

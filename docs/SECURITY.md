@@ -24,7 +24,7 @@ The project treats the following as explicit threats:
 - `routerd` policy and status code is separated from the privileged apply adapter.
 - Router-to-VPS operations cross an authenticated remote boundary and use scoped, allowlisted operations.
 - `cisco-discovery` is a read-only Windows observer with a scoped token and an offline queue.
-- The imported RedShield config is an external provider secret. P3 inspection is local and read-only; provider-side credentials and server management are outside the project trust boundary.
+- Every imported tunnel config is an external provider secret. P3 inspection and protected staging are local; provider-side credentials and server management cross a separately approved trust boundary. RedShield remains historical compatibility state and is never modified by the self-hosted workflow.
 - External list sources and downloaded artifacts are untrusted until pinned, bounded and verified.
 - Backup destinations are untrusted storage; backup confidentiality comes from `age` encryption.
 
@@ -33,7 +33,8 @@ The project treats the following as explicit threats:
 - Router secret bytes live only under `/etc/routerd/secrets/`; the directory is mode `0700` and files are mode `0600`.
 - Per-server SSH keys are separate credentials and are never embedded in inventory files.
 - Windows enrollment material uses Windows-protected storage rather than repository or configuration files.
-- The source RedShield `.conf` remains outside the repository. Local preflight metadata may contain normalized endpoint/address/DNS properties, but excludes the source path, keys and raw obfuscation values; support evidence redacts endpoint/address values. Later unattended use must copy secret bytes only into Windows-protected storage with a separately tested removal path.
+- Source and exported `.conf` files remain outside the repository. The installed self-hosted profile is `secrets\tunnel.conf` under the protected runtime root and is pinned by lowercase SHA-256; evidence excludes source paths, keys, endpoints, addresses, DNS values and raw obfuscation values.
+- Real infrastructure pins and transcripts remain only under root-ignored `.p3-vps-run/`; local Windows runtime evidence remains only under root-ignored `.p35-run/`. Tracked reports contain reviewed sanitized hashes, counts, booleans and classifications only.
 - The interactive importer rejects UNC/device namespaces, remote or unknown Windows volumes, symlink/reparse traversal and unstable leaf snapshots. Before privileged or unattended consumption it additionally requires restrictive ACLs and handle-based final volume/file identity so snapshot races are outside the service threat boundary.
 - Mobile private keys are one-time delivery material; only public keys and metadata persist.
 - Logs, support bundles, command lines, process lists and Git must not contain secret bytes.
@@ -42,7 +43,9 @@ The project treats the following as explicit threats:
 
 The P3 read-only collector uses `exec.CommandContext` with a fixed script and no caller-supplied executable or arguments. Windows APIs resolve the trusted Windows and System32 directories; Windows PowerShell and inbox module manifests use absolute paths, and the process receives a minimal sanitized environment with bounded output. Shell command strings must never be constructed from domains, comments, source URLs or other user-controlled input. Physical adapters require the authoritative Windows hardware marker, while routes and future operations bind to stable interface GUIDs.
 
-P3.4 adds an offline mutation runtime, not a live executor. It accepts only strict bounded JSON artifacts, binds every provider endpoint to an independently qualified host-prefix set, rejects virtual or unstable default paths, and calls an injected structured `MutationBackend`. Project routes use reserved ownership metadata, firewall identities are revision-qualified and content-addressed, and generated NRPT identities are journaled exactly. Immutable revisions have SHA-256 manifests; recovery snapshots are hashed and semantically checked against those revisions before any replay. Foreign, Cisco and OS-owned state is neither persisted in recovery snapshots nor eligible for removal. The runtime package contains no shell, PowerShell, executable or native Windows mutation implementation; live integration remains separately gated.
+P3 accepts only strict bounded JSON artifacts, binds every provider endpoint to an independently qualified host-prefix set, rejects virtual or unstable default paths, and exposes a native Windows `MutationBackend` behind offline-tested preflight, ownership, commit-confirm and recovery contracts. Project routes use reserved ownership metadata, firewall identities are revision-qualified and content-addressed, and generated NRPT identities are journaled exactly. Immutable revisions have SHA-256 manifests; recovery snapshots are hashed and semantically checked before replay. Foreign, Cisco and OS-owned state is neither persisted as project-owned nor eligible for removal. Native live use remains separately candidate-bound and gated.
+
+Terminal restoration is monotonic rather than falsely atomic: exact network `FullRestore` completes first, then protected-config ACL restoration runs under its own plan hash and confirmation challenge. Terminal evidence retains journal state `restored`, an empty ownership registry, the install snapshot and receipt; active/LKG/pending/recovery revisions are empty and project-owned routes, sinks, firewall, NRPT and tasks are zero.
 
 ## Supply chain controls
 

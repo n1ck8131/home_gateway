@@ -318,11 +318,13 @@ After installation, use a separately approved read-only SSH observation to recor
 
 **Gate 6.4: Firewall publication**
 
-Obtain approval to add exactly the observed UDP port to the DigitalOcean Cloud Firewall and matching host policy. Audit Docker/host firewall union; SSH and that UDP port are the only public inbound services.
+Current state: pending bounded read-only reconciliation. The Gate 6.3 tracked checkpoint proves the then-current SSH-only Cloud Firewall and observed container UDP publication, but later ignored runtime evidence is not promoted to a current tracked claim. Before any peer action, recheck the expected container/publication, persistent host policy, IPv4/IPv6 Cloud Firewall rules and complete public ingress union. Any later mutation still requires its own approval.
 
 **Gate 6.5: Guest profile creation and protected bootstrap**
 
-Obtain a separate approval for the server-mutating `Guest access` operation and exact protected destination. Create exactly one guest, export `AmneziaWG native format` directly to a protected local file, and bootstrap it into `C:\ProgramData\HomeGateway\p35\secrets\tunnel.conf`. Do not paste or attach it. Run `hgctl tunnel inspect` and capture only schema, provider, transport, family flags, counts and hashes.
+Gate 6.5C status: `rollback-complete`. Exactly one candidate Admin peer was removed with exactly one rollback `syncconf`; the baseline peer-set hash was restored, container restart delta was zero, firewall state was unchanged, and SSH exited `0`. No protected PC profile exists.
+
+After fresh reconciliation and approval, retain the pre-existing baseline Admin unchanged, add exactly one `homegateway` management Admin, and add exactly one static PC Guest. Use the official UI for supported exact one-peer Admin rollback; the reviewed candidate-bound direct rollback is emergency-only. Export `AmneziaWG native format` directly to a protected local file and bootstrap it into `C:\ProgramData\HomeGateway\p35\secrets\tunnel.conf`. Guest removal is a separate server mutation and is never implied by client-profile rollback.
 
 **Gate 6.6: Windows client import and activation**
 
@@ -357,19 +359,16 @@ Verify direct, self-hosted and Cisco paths; DNS; IPv4/IPv6 leak behavior; MTU; T
 
 Before execution, present the exact restore candidate/hash and the exhaustive set of project-owned routes, sinks, firewall/NRPT rules, tasks, journal/ownership state and config ACL changes that will be removed or reverted. Obtain a fresh explicit approval for that exact `FullRestore`; approval for Apply/Confirm does not authorize it. Do not remove the source profile, the Amnezia client/profile or any RedShield/Cisco state without another separate authorization.
 
-Run the approved journaled `FullRestore`, then prove no lock, journal, ownership registry, active revision, project route/sink/firewall/NRPT/task or changed config ACL remains. RedShield and Cisco must remain in their pre-gate state.
+Run the approved journaled network `FullRestore`, then the independently candidate-bound protected-config ACL restore. Require journal state `restored`; active/LKG/pending/recovery revisions empty; ownership registry present but empty; project-owned routes/sinks/firewall/NRPT/tasks zero; install snapshot and terminal receipt retained for audit; RedShield and Cisco unchanged. A failed ACL restore after successful network restore leaves the safer network-restored state in place and retries only ACL from a fresh exact plan and approval.
 
 Create the final redacted field report, update `STATUS.md` and `docs/ACCEPTANCE_MATRIX.md`, rerun `git diff --check`, and commit only repository docs/evidence. Close `pc-core-ready` only if every required field assertion and terminal restore passes.
 
 ## User action summary
 
-The owner should not create the Droplet yet. The next owner action occurs only after Tasks 1-5 pass review:
+The Droplet and Gates 6.1-6.3 already exist as tracked field evidence; Gate 6.5C rolled back. The next owner action occurs only after the current offline completion package passes review:
 
-1. approve generation of the dedicated local SSH key;
-2. upload only its `.pub` half to DigitalOcean;
-3. confirm the $6 baseline and possible overage immediately before creating the Droplet;
-4. create the exact UI configuration and return only public Droplet metadata;
-5. approve first SSH/official Amnezia installation;
-6. separately approve creation of one server-side guest, keep the exported `.conf` local and provide only its protected path;
-7. approve import/activation of the exact hashed profile after reviewing its profile-only rollback;
-8. approve the exact Windows Plan, then separately approve Apply/Confirm and the exact terminal `FullRestore` candidate.
+1. approve a bounded read-only Gate 6.4/peer-baseline reconciliation;
+2. separately approve exactly one `homegateway` Admin and exactly one static PC Guest after reviewing candidate-specific rollbacks;
+3. keep the exported `.conf` local and provide only its protected path;
+4. approve import/activation of the exact hashed profile after reviewing profile-only rollback;
+5. approve the exact Windows Plan, then separately approve Apply/Confirm, network `FullRestore`, and protected-config ACL restore candidates.

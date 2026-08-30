@@ -18,3 +18,4 @@ inventory.local.yaml
 routerd.local.yaml
 secrets.local/
 .p3-vps-run/
+/.p35-run/

@@ -1,6 +1,6 @@
 # P3 self-hosted Windows pilot implementation plan
 
-Status: Active — P3.1 through the existing P3.5 offline/software scope are complete; the 2026-08-26 RedShield live sub-batch remains historical pre-mutation evidence; ADR-0016 now makes one self-hosted DigitalOcean server the P3 live target, and `pc-core-ready` remains open
+Status: Active — P3.1 through the existing P3.5 offline/software scope are complete; Gates 6.1-6.3 of the self-hosted bootstrap passed, Gate 6.4 needs current read-only reconciliation, Gate 6.5C rolled back, and `pc-core-ready` remains open
 
 ## Goal
 
@@ -54,7 +54,7 @@ Provider handshake and egress health are deliberately separate from local Window
 
 ### P3.4 Fail-closed apply and rollback
 
-Status: complete for the offline software scope on 2026-08-25. Strict route/firewall/NRPT artifacts, qualified endpoint binding, exact ownership, additive-first ordering, commit-confirm, LKG rollback, durable disable/restore intent and crash recovery passed fault injection and the full repository verification gate. The runtime has only an injected structured backend; native/live apply remains unavailable.
+Status: complete for the offline software scope on 2026-08-25. Strict route/firewall/NRPT artifacts, qualified endpoint binding, exact ownership, additive-first ordering, commit-confirm, LKG rollback, durable disable/restore intent and crash recovery passed fault injection and the full repository verification gate. A native Windows backend now exists and is offline-tested; live apply remains separately exact-candidate gated.
 
 - Implement project-owned Windows route/firewall/DNS operations with explicit ownership.
 - Preserve the RedShield endpoint and protected Cisco/system routes on direct paths.
@@ -64,7 +64,7 @@ Exit: offline mutation tests and rollback fault injection pass. A live canary st
 
 ### P3.5 Current-PC safety matrix
 
-Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 Pester contracts, direct gitleaks and the full `verify` gate. The imported-DNS/Cisco overlap diagnostic gap is now implemented offline with bounded redacted block classification; the imported-DNS/Cisco prerequisite and `pc-core-ready` remain open. The separately authorized bounded live sub-batch passed the fresh elevated sink preflight and protected bootstrap, then exact Plan failed closed before candidate/challenge creation because the imported DNS target overlaps a Cisco protected prefix. Apply/Confirm and recovery mutation were not invoked. Product `RestoreConfigAcl` passed, and terminal inventory/preflight proved no journal, lock, ownership registry, revision or owned network artifacts; RedShield and Cisco remained Up.
+Status: offline implementation complete on 2026-08-26. Persistent fail-closed sinks, effective-route resolution, redacted CLI evidence and watchdog semantics passed focused Go tests, exact PowerShell 5.1/7 Pester contracts, direct gitleaks and the full `verify` gate. The imported-DNS/Cisco overlap diagnostic gap is implemented offline; the imported-DNS/Cisco prerequisite and `pc-core-ready` remain open. The separately authorized historical RedShield sub-batch stopped before candidate creation on the DNS/Cisco overlap. Apply/Confirm and recovery mutation were not invoked; terminal inventory showed that journal/registry/revision state had never been created, owned network artifacts were zero, and RedShield/Cisco remained Up.
 
 - Run a bounded live canary, then direct/RedShield/Cisco, DNS, IPv4/IPv6, MTU, TCP/UDP/QUIC and tunnel-down assertions.
 - Test adapter loss, daemon crash, OS restart, recovery and emergency disable.
@@ -74,15 +74,16 @@ Historical result: the RedShield candidate remains blocked and must not be reviv
 
 ### P3.6 Minimal self-hosted DigitalOcean bootstrap and transition
 
-Status: planned and design-approved; no resource or live change has been made
+Status: Gates 6.1-6.3 passed; Gate 6.4 current state needs read-only reconciliation; Gate 6.5C is `rollback-complete`; protected profile and all Windows field gates remain open
 
 - Follow [ADR-0016](../../adr/ADR-0016-p3-self-hosted-digitalocean-bootstrap.md) and the [detailed bootstrap plan](2026-08-27-p3-self-hosted-digitalocean-bootstrap.md).
 - Generalize the protected config importer, CLI and Windows planner from a RedShield identity to a qualified provider-neutral AmneziaWG tunnel without weakening redaction, file identity or Cisco/DNS overlap guards.
 - Produce a deterministic non-secret create checklist; pin the official AmneziaVPN 5.0.1.5 Windows installer hash, use its supported GUI server flow, capture the installed container image identity, and document clear-server/rebuild limitations without claiming a supported headless bootstrap.
 - Generate one protected static PC peer profile outside Git and observe handshake/egress before any Windows mutation.
+- Preserve the baseline Admin peer, add exactly one `homegateway` management Admin and exactly one static PC Guest. Official-UI exact one-peer removal is the supported Admin rollback; direct rollback is emergency-only, and client rollback never implies server Guest removal.
 - Run exact Plan, then separately authorize bounded Apply/Confirm, the complete safety matrix and terminal journaled `FullRestore`.
 
-Exit: `pc-core-ready`; one own VPS is required, but P8 automation/mobile scope and Flint 2 are not. The exit remains open until the self-hosted server and profile are qualified, the live matrix passes, and terminal `FullRestore` field evidence passes after an actual journaled canary.
+Exit: `pc-core-ready`; one own VPS is required, but P8 automation/mobile scope and Flint 2 are not. The exit remains open until the self-hosted server and profile are qualified, the live matrix passes, and terminal evidence retains journal state `restored`, empty active/LKG/pending/recovery revisions, a present-but-empty ownership registry, zero project-owned network artifacts, and the install snapshot/receipt for audit.
 
 ### P3.7 Minimal operator flow
 

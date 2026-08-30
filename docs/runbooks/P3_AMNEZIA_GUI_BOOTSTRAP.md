@@ -2,8 +2,11 @@
 
 This runbook is an operator-only gate. It does not authorize cloud creation, SSH, profile activation, or Windows network changes.
 
-1. After the separately approved Droplet and SSH gates, install the pinned Windows AmneziaVPN 5.0.1.5 client through its supported **Self-hosted VPN** GUI flow.
-2. Select **AmneziaWG only**. Do not select an additional transport and do not call internal Amnezia shell scripts: they are not a stable supported API.
-3. After the separate guest-creation approval, use **Guest access** and export the guest in native AmneziaWG format directly to the approved protected local path. Do not paste its content into a terminal, ticket, or repository.
-4. Removing the profile from the app is limited client-side rollback. **Clear server from Amnezia software** is a separate broad/destructive server action and always needs fresh approval; recovery is to rebuild a new server/profile through the approved GUI gates, never to reuse an old profile or automate an internal shell path.
-5. Record only the observed immutable server image ID/digest after installation. The tagged client references `amneziavpn/amneziawg-go:latest`, so no pre-install digest is implied by this lock.
+1. Before any peer action, perform a bounded read-only reconciliation of the expected container, Docker/host/Cloud Firewall public ingress union and baseline peer-set identity. Stop on any mismatch.
+2. Use the pinned Windows AmneziaVPN 5.0.1.5 client through its supported **Self-hosted VPN** GUI flow and select **AmneziaWG only**. Do not call internal Amnezia shell scripts as a stable API.
+3. Preserve the pre-existing baseline Admin peer unchanged. After a separate exact approval, add exactly one `homegateway` management Admin peer. Accept only the exact candidate delta and retain a candidate-specific rollback receipt.
+4. Supported Admin rollback removes only that exact peer through the official Amnezia UI. The reviewed candidate-bound direct rollback is emergency-only and requires its own exact guard and approval.
+5. After the separate Guest-creation approval, add exactly one static PC Guest through **Guest access** and export it in native AmneziaWG format directly to the approved protected local path. Do not paste its content into a terminal, ticket, or repository.
+6. The accepted terminal topology is exactly the preserved baseline Admin, one `homegateway` management Admin and one static PC Guest. Any other delta stops the gate.
+7. Removing the local profile from the app is client-only rollback and must preserve the server Guest. Guest removal is a separate server mutation. **Clear server from Amnezia software** is a broad/destructive action requiring fresh approval.
+8. Record only the observed immutable server image identity after installation. The tagged client references `amneziavpn/amneziawg-go:latest`, so no pre-install digest is implied by this lock.

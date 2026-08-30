@@ -7,17 +7,17 @@ This runbook is an offline-prepared field contract. It does not authorize an Amn
 - Use only a protected runtime pin set. Never copy a host, address, public key, private-key path, profile field, or raw egress value into tracked files or evidence.
 - Pin the exported profile SHA-256 and AmneziaVPN `5.0.1.5` file version, Authenticode signer result, and binary SHA-256.
 - Pin the expected Guest peer fingerprint SHA-256 from the sanitized Gate 6.5 receipt and the expected self-hosted egress identity SHA-256 from protected runtime state.
-- The runtime Gate 6.5 guard pins the local payload, remote payload/protocol identities, known-hosts file and current public `/32`. It requires three bounded HTTPS observations to agree before bounded SSH, and accepts only a bounded attestation matching both remote identities before printing `READY_FOR_UI=YES`.
+- The protected runtime pins the local payload, remote payload/protocol identities, known-hosts file, three HTTPS authority hashes and current public `/32` hash. The client gate calls the same tracked launcher `ClientObserve` action through its fixed child boundary; it does not contain a second server observer.
 - Stop if RedShield or Cisco baseline collection is incomplete, a self-hosted adapter already exists, any pin is stale, or a requested action would affect another profile/adapter.
 
 ## Ordered client gate
 
 1. Run `p3-profile-stage.ps1 -Action Prepare` with exact driver/payload hashes. In the official UI, export exactly one new profile to the prepared `profile-export.conf` target. Do not import or connect yet.
 2. Run `p3-profile-stage.ps1 -Action Verify`. It exclusively locks and hashes that export, performs pinned `hgctl tunnel inspect`, and installs the provider-neutral protected copy and pin. `Cleanup` may remove only marker-owned temporary metadata; it never deletes the export or installed profile.
-3. Run `p3-client-gate.ps1 -Action Preflight` against a bounded observation record. Require mandatory exact profile, client and known-hosts hashes plus the signature, RedShield/Cisco class snapshots, and zero self-hosted adapters.
+3. At separately approved **Gate 6.6**, run production `p3-client-gate.ps1 -Action Preflight`. Production never accepts `ObservationPath`; that input is restricted to explicit `TestOnlyFixture` mode under an injected test root. Require current exact profile, client and known-hosts hashes, the Authenticode result, current RedShield/Cisco class hashes and counts, and zero self-hosted adapters. Write the protected PRE receipt for later equality checks.
 4. Only after a separate live approval, import and connect the one new self-hosted profile through the official Amnezia UI.
-5. Run `PostConnect`. Require exactly one self-hosted adapter; route attribution to that adapter; selected Guest fingerprint match; fresh handshake and RX/TX delta; and three agreeing HTTPS observations matching the protected egress identity hash.
-6. On client anomaly, remove only the new local Amnezia client profile through the official UI. Preserve the server Guest peer until a separate server cleanup approval. Run `PostRollback` and require profile/adapter absence plus RedShield/Cisco equality to PRE.
+5. Run production `PostConnect`. It collects current client, adapter, route and three-HTTPS state, generates one cryptographically random nonce and passes it through the tracked `p3-amnezia-peer-guard.ps1 -Action ClientObserve` launcher. Require exact payload/protocol and nonce hashes, selected Guest match, fresh handshake, expected before/after counter hashes, traffic delta and bounded observation duration, plus exactly one self-hosted adapter, route attribution and the protected egress identity hash.
+6. On client anomaly, remove only the new local Amnezia client profile through the official UI. Preserve the server Guest peer until a separate server cleanup approval. Run production `PostRollback`; it collects current state and computes RedShield/Cisco equality from the protected PRE receipt itself. Require profile/adapter absence and exact equality.
 
 All evidence is sanitized: schema/version, hashes, counts, freshness booleans, adapter-class hashes, and equality flags only. Never retain raw keys, epochs, addresses, routes, adapter names, DNS values, or profile contents.
 
@@ -28,3 +28,5 @@ All evidence is sanitized: schema/version, hashes, counts, freshness booleans, a
 - `Clear server from Amnezia software` is prohibited.
 
 `PostRollback` requires a sanitized `profile_absent=true` observation and never hashes an expected-absent profile path. P3 is not terminal until the network `FullRestore` and the separately planned/approved, network-plan-bound `RestoreConfigAcl` both pass.
+
+The remote helper stays installed but inert throughout P3. `AgentStop` is mandatory at every terminal success, failure, cancellation and rollback path. Gate 6.6 approval does not authorize Gate 7.2, adapter-loss recovery, reboot recovery, Gate 7.3, helper removal or emergency rollback; each remains separately candidate-bound.

@@ -1,130 +1,232 @@
-BeforeAll {
-    $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $script:Launcher = Join-Path $script:Root 'scripts/p3-amnezia-peer-guard.ps1'
-    $script:Payload = Join-Path $script:Root 'scripts/p3-amnezia-peer-guard.py'
-}
+$ErrorActionPreference = 'Stop'
 
-Describe 'bounded P3 Amnezia peer guard' {
-    It 'parses and contains only runtime-injected trust and candidate inputs' {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Launcher,[ref]$tokens,[ref]$errors)
-        $errors | Should -BeNullOrEmpty
-        $text = $ast.Extent.Text
-        $text | Should -Match 'gate65-pins\.json'
-        $text | Should -Match 'SSH_AUTH_SOCK'
-        $text | Should -Match 'StrictHostKeyChecking=yes'
-        $text | Should -Match 'IdentitiesOnly=yes'
-        $text | Should -Match 'READY_FOR_UI=YES'
-        $text | Should -Match 'ValidateOnly'
-        $text | Should -Not -Match 'IdentityAgent=none|BEGIN (RSA|OPENSSH|PRIVATE) KEY|ARM|VERIFY'
-    }
+Describe 'P3 local pre-live reconciliation and streaming guard' {
+    BeforeAll {
+        $script:Launcher = Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1'
+        . $script:Launcher
 
-    It 'ValidateOnly performs payload checks without SSH or mutation' {
-        $pins = Join-Path $TestDrive 'gate65-pins.json'
-        $body = [pscustomobject][ordered]@{schema='home-gateway/p3-peer-guard-pins/v1';local_payload_sha256=(Get-FileHash -LiteralPath $script:Payload -Algorithm SHA256).Hash.ToLowerInvariant()}
-        [IO.File]::WriteAllText($pins,(ConvertTo-Json -Compress -InputObject $body),[Text.UTF8Encoding]::new($false))
-        & $script:Launcher -ValidateOnly -PinsPath $pins -PythonPath (Get-Command python.exe).Source -PayloadPath $script:Payload
-        $LASTEXITCODE | Should -Be 0
-    }
-
-    It 'rejects a corrupted transport pin before SSH' {
-        $knownHosts = Join-Path $TestDrive 'known_hosts'
-        [IO.File]::WriteAllText($knownHosts,'synthetic-host-pin',[Text.Encoding]::ASCII)
-        $pins = Join-Path $TestDrive 'gate65-live-pins.json'
-        $body = [pscustomobject][ordered]@{
-            schema='home-gateway/p3-peer-guard-pins/v1';ssh_host='host.invalid';ssh_user='operator'
-            known_hosts_path=$knownHosts;known_hosts_sha256=('0' * 64);current_egress_cidr_sha256=('1' * 64)
-            expected_source_prefix_length=32;local_payload_sha256=(Get-FileHash -LiteralPath $script:Payload -Algorithm SHA256).Hash.ToLowerInvariant()
-            remote_payload_sha256=('2' * 64);remote_protocol_sha256=('3' * 64)
-            egress_https_endpoints=@('https://one.invalid','https://two.invalid','https://three.invalid')
-        }
-        [IO.File]::WriteAllText($pins,(ConvertTo-Json -Compress -InputObject $body),[Text.UTF8Encoding]::new($false))
-        $previousAgent = $env:SSH_AUTH_SOCK
-        try {
-            $env:SSH_AUTH_SOCK = 'memory-agent-test-sentinel'
-            { & $script:Launcher -PinsPath $pins -PythonPath (Get-Command python.exe).Source -PayloadPath $script:Payload } | Should -Throw '*known-hosts hash differs*'
-        } finally { $env:SSH_AUTH_SOCK = $previousAgent }
-    }
-
-    It 'verifies bounded current egress and remote payload/protocol identity through injected runners' {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Launcher,[ref]$tokens,[ref]$errors)
-        $definitions = foreach ($name in @('Get-TextSHA256','Test-CurrentEgress','Invoke-BoundedPeerGuard')) {
-            $definition = @($ast.FindAll({
-                param($node)
-                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
-            },$true))
-            $definition.Count | Should -Be 1
-            $definition[0].Extent.Text
-        }
-        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
-        $expectedCIDR = Get-TextSHA256 '198.51.100.7/32'
-        (Test-CurrentEgress -Endpoints @('https://one.invalid','https://two.invalid','https://three.invalid') `
-            -ExpectedCIDRSHA256 $expectedCIDR -Runner { param($endpoint) '198.51.100.7' }) | Should -BeExactly $expectedCIDR
-        { Test-CurrentEgress -Endpoints @('https://one.invalid','https://two.invalid','https://three.invalid') `
-            -ExpectedCIDRSHA256 $expectedCIDR -Runner { param($endpoint) if ($endpoint -match 'two') {'198.51.100.8'} else {'198.51.100.7'} } } | Should -Throw '*consensus*'
-
-        $payloadHash = 'a' * 64
-        $protocolHash = 'b' * 64
-        $result = Invoke-BoundedPeerGuard -Executable 'synthetic-ssh.exe' -Arguments @('arg') -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 20 -MaxOutputBytes 1024 -Runner {
-                [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut=(ConvertTo-Json -Compress -InputObject ([pscustomobject]@{payload_sha256=('a' * 64);protocol_sha256=('b' * 64);ready_for_ui=$true}));StdErr=''}
+        function New-TestContext {
+            $now = [DateTime]::UtcNow
+            return [pscustomobject]@{
+                ManifestSHA256 = ('1' * 64)
+                PayloadSHA256 = ('2' * 64)
+                ProtocolSHA256 = ('3' * 64)
+                InstallReceiptSHA256 = ('4' * 64)
+                ExpectedServerBaselineSHA256 = ('5' * 64)
+                ExpectedCloudFirewallSHA256 = ('6' * 64)
+                ExpectedContainerIdentitySHA256 = ('7' * 64)
+                ExpectedImageIdentitySHA256 = ('8' * 64)
+                ExpectedUdpPublicationSHA256 = ('9' * 64)
+                ExpectedListenerIdentitySHA256 = ('a' * 64)
+                ExpectedHostPolicySHA256 = ('b' * 64)
+                ExpectedPeerCount = 1
+                ExpectedPeerSetSHA256 = ('c' * 64)
+                Trust = [pscustomobject]@{
+                    ssh_user = 'homegateway'; ssh_host = '192.0.2.10'; known_hosts_path = 'C:\synthetic\known_hosts'
+                    git_ssh_path = 'C:\synthetic\Git\usr\bin\ssh.exe'; management_source_cidr_sha256 = ('d' * 64)
+                    egress = @(
+                        [pscustomobject]@{ authority_sha256 = ('e' * 64); source_cidr_sha256 = ('d' * 64) },
+                        [pscustomobject]@{ authority_sha256 = ('f' * 64); source_cidr_sha256 = ('d' * 64) },
+                        [pscustomobject]@{ authority_sha256 = ('0' * 64); source_cidr_sha256 = ('d' * 64) }
+                    )
+                }
+                Agent = [pscustomobject]@{
+                    agent_pid = 4242; socket = '/tmp/ssh-synthetic/agent.4242'; loaded_key_count = 1
+                    expected_key_match = $true; toolchain_match = $true; manifest_sha256 = ('1' * 64)
+                }
+                Install = [pscustomobject]@{
+                    schema = 'home-gateway/p3-remote-helper-install-receipt/v1'; target_state = 'exact'
+                    payload_sha256 = ('2' * 64); owner_match = $true; group_match = $true; mode_match = $true
+                    installed_by_gate = $true; preinstall_state = 'absent'; temporary_leftover_count = 0
+                }
+                CloudFirewall = [pscustomobject]@{
+                    schema = 'home-gateway/p3-prelive-cloud-firewall-receipt/v1'; cloud_firewall_identity_sha256 = ('6' * 64)
+                    management_source_cidr_sha256 = ('d' * 64); droplet_association_count = 1; inbound_rule_count = 2
+                    observed_at_utc = $now.AddSeconds(-30).ToString('o'); owner_observed = $true
+                    server_confirmed = $false; live_mutation_performed = $false
+                }
+                LocalBaseline = [pscustomobject]@{
+                    schema = 'home-gateway/p3-prelive-local-baseline-receipt/v1'; protected_profile_absent = $true
+                    selfhosted_adapter_count = 0; redshield_class_count = 1; cisco_class_count = 0
+                    adapter_class_set_sha256 = ('f' * 64); observed_at_utc = $now.AddSeconds(-20).ToString('o')
+                    live_mutation_performed = $false
+                }
             }
-        $result.ready_for_ui | Should -BeTrue
-        { Invoke-BoundedPeerGuard -Executable 'synthetic-ssh.exe' -Arguments @('arg') -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 20 -MaxOutputBytes 1024 -Runner { [pscustomobject]@{ExitCode=-1;TimedOut=$true;StdOut='';StdErr=''} } } | Should -Throw '*timed out*'
-        { Invoke-BoundedPeerGuard -Executable 'synthetic-ssh.exe' -Arguments @('arg') -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 20 -MaxOutputBytes 256 -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut=('x' * 257);StdErr=''} } } | Should -Throw '*output exceeds*'
-        { Invoke-BoundedPeerGuard -Executable 'synthetic-ssh.exe' -Arguments @('arg') -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 20 -MaxOutputBytes 1024 -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut='{"payload_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","protocol_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ready_for_ui":true}';StdErr=''} } } | Should -Throw '*payload identity*'
+        }
+
+        function New-ReconcileReceipt([object]$Context, [string]$NonceSHA256) {
+            return [ordered]@{
+                schema = 'home-gateway/p3-peer-reconcile-receipt/v2'; payload_sha256 = $Context.PayloadSHA256
+                protocol_sha256 = $Context.ProtocolSHA256; manifest_sha256 = $Context.ManifestSHA256
+                install_receipt_sha256 = $Context.InstallReceiptSHA256; nonce_sha256 = $NonceSHA256
+                container_count = 1; container_running = $true; container_identity_sha256 = $Context.ExpectedContainerIdentitySHA256
+                image_identity_sha256 = $Context.ExpectedImageIdentitySHA256; container_restart_count_sha256 = ('b' * 64)
+                udp_publication_count = 1; udp_publication_sha256 = $Context.ExpectedUdpPublicationSHA256
+                public_listener_class_count = 2; listener_identity_sha256 = $Context.ExpectedListenerIdentitySHA256
+                host_policy_loaded = $true; host_policy_sha256 = $Context.ExpectedHostPolicySHA256; ipv6_non_mutation = $true
+                peer_count = $Context.ExpectedPeerCount; peer_set_sha256 = $Context.ExpectedPeerSetSHA256
+                candidate_leftover_count = 0; temporary_leftover_count = 0; atomic_leftover_count = 0
+                server_baseline_sha256 = $Context.ExpectedServerBaselineSHA256
+            }
+        }
+
+        function New-ReadyEvent([object]$Context, [string]$Operation, [string]$NonceSHA256) {
+            return [ordered]@{
+                event = 'ready_for_ui'; schema = 'home-gateway/p3-peer-guard-event/v2'; operation = $Operation
+                payload_sha256 = $Context.PayloadSHA256; protocol_sha256 = $Context.ProtocolSHA256
+                nonce_sha256 = $NonceSHA256; pre_peer_count = 1; pre_peer_set_sha256 = $Context.ExpectedPeerSetSHA256
+                reconcile_sha256 = ('1' * 64)
+            } | ConvertTo-Json -Compress
+        }
+
+        function New-CandidateEvent([object]$Context, [string]$Operation, [string]$NonceSHA256) {
+            return [ordered]@{
+                event = 'candidate'; schema = 'home-gateway/p3-peer-guard-event/v2'; operation = $Operation
+                payload_sha256 = $Context.PayloadSHA256; protocol_sha256 = $Context.ProtocolSHA256
+                nonce_sha256 = $NonceSHA256; candidate_count = 1; candidate_fingerprint_sha256 = ('e' * 64)
+                pre_peer_set_sha256 = $Context.ExpectedPeerSetSHA256; post_peer_set_sha256 = ('f' * 64)
+                persistent_live_metadata_equal = $true; semantic_transition_count = 1; container_restart_delta = 0
+                firewall_equal = $true; listeners_equal = $true; official_ui_rollback_ready = $true
+                emergency_rollback_ready = $true
+            } | ConvertTo-Json -Compress
+        }
     }
 
-    It 'executes the tracked Python automatic attestation protocol and rejects incompatible process output' {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Launcher,[ref]$tokens,[ref]$errors)
-        $definitions = foreach ($name in @('New-PeerGuardAutomaticArguments','Invoke-BoundedNativeProcess','Invoke-BoundedPeerGuard')) {
-            $definition = @($ast.FindAll({
-                param($node)
-                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
-            },$true))
-            $definition.Count | Should -Be 1
-            $definition[0].Extent.Text
+    BeforeEach {
+        $script:Context = New-TestContext
+    }
+
+    It 'accepts only a fresh complete three-source pre-live context' {
+        $receipt = Test-P3PreliveInputs -Context $script:Context -NowUtc ([DateTime]::UtcNow)
+        $receipt.prelive_inputs_valid | Should -BeTrue
+        $receipt.live_mutation_performed | Should -BeFalse
+
+        $cases = @(
+            @{ Name = 'Cloud Firewall'; Change = { $script:Context.CloudFirewall.observed_at_utc = '2000-01-01T00:00:00Z' } },
+            @{ Name = 'local baseline'; Change = { $script:Context.LocalBaseline.selfhosted_adapter_count = 1 } },
+            @{ Name = 'agent'; Change = { $script:Context.Agent.loaded_key_count = 2 } },
+            @{ Name = 'install'; Change = { $script:Context.Install.target_state = 'conflict' } },
+            @{ Name = 'egress'; Change = { $script:Context.Trust.egress[0].source_cidr_sha256 = ('0' * 64) } }
+        )
+        foreach ($case in $cases) {
+            $script:Context = New-TestContext
+            & $case.Change
+            { Test-P3PreliveInputs -Context $script:Context -NowUtc ([DateTime]::UtcNow) } | Should -Throw "*$($case.Name)*"
         }
-        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
-        $python = (Get-Command python.exe).Source
-        $payloadHash = (Get-FileHash -LiteralPath $script:Payload -Algorithm SHA256).Hash.ToLowerInvariant()
-        $protocolHash = '79f5908e0c944d8076e2646595ca0342b192765a36288224a6cab071f59354c8'
-        $arguments = New-PeerGuardAutomaticArguments -Payload $script:Payload -ExpectedPayloadSHA256 $payloadHash -ExpectedProtocolSHA256 $protocolHash
+    }
 
-        $receipt = Invoke-BoundedPeerGuard -Executable $python -Arguments $arguments -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096
-        $receipt.ready_for_ui | Should -BeTrue
-        [string]$receipt.payload_sha256 | Should -BeExactly $payloadHash
-        [string]$receipt.protocol_sha256 | Should -BeExactly $protocolHash
+    It 'builds only fixed strict protocol v2 requests' {
+        $nonce = 'A' * 64
+        $request = New-P3RemoteRequest -Context $script:Context -Mode 'guard' -Operation 'guest' -Nonce $nonce
+        $request.schema | Should -BeExactly 'home-gateway/p3-peer-guard-request/v2'
+        $request.mode | Should -BeExactly 'guard'
+        $request.operation | Should -BeExactly 'guest'
+        $request.nonce | Should -BeExactly ('a' * 64)
+        $request.PSObject.Properties.Name | Should -Not -Contain 'ssh_host'
+        { New-P3RemoteRequest -Context $script:Context -Mode 'arbitrary' -Operation '' -Nonce $nonce } | Should -Throw '*mode*'
+    }
 
-        foreach ($badArguments in @(
-            @($script:Payload,'--unsupported'),
-            @($script:Payload,'--automatic','--json','--expected-payload-sha256',('0' * 64),'--expected-protocol-sha256',$protocolHash),
-            @($script:Payload,'--automatic','--json','--expected-payload-sha256',$payloadHash,'--expected-protocol-sha256',('0' * 64))
+    It 'accepts one exact bounded reconcile receipt and rejects transport ambiguity' {
+        $request = New-P3RemoteRequest -Context $script:Context -Mode 'reconcile' -Operation '' -Nonce ('a' * 64)
+        $nonceHash = Get-P3GuardTextSHA256 $request.nonce
+        $receipt = Invoke-P3BoundedJsonSsh -Context $script:Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner {
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdOut = (New-ReconcileReceipt $script:Context $nonceHash | ConvertTo-Json -Compress); StdErr = '' }
+        }
+        $receipt.server_baseline_sha256 | Should -BeExactly $script:Context.ExpectedServerBaselineSHA256
+        foreach ($bad in @(
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdOut = (New-ReconcileReceipt $script:Context $nonceHash | ConvertTo-Json -Compress); StdErr = 'warning' },
+            [pscustomobject]@{ ExitCode = 1; TimedOut = $false; Oversized = $false; StdOut = ''; StdErr = '' },
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $true; Oversized = $false; StdOut = ''; StdErr = '' }
         )) {
-            { Invoke-BoundedPeerGuard -Executable $python -Arguments $badArguments -ExpectedPayloadSHA256 $payloadHash `
-                -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw
+            { Invoke-P3BoundedJsonSsh -Context $script:Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner { $bad }.GetNewClosure() } | Should -Throw
         }
+    }
 
-        $malformed = Join-Path $TestDrive 'malformed-receipt.py'
-        $extra = Join-Path $TestDrive 'extra-receipt.py'
-        $nonzero = Join-Path $TestDrive 'nonzero-receipt.py'
-        [IO.File]::WriteAllText($malformed,"print('not-json')",[Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText($extra,"print('{`"payload_sha256`":`"$payloadHash`",`"protocol_sha256`":`"$protocolHash`",`"ready_for_ui`":true}');print('extra')",[Text.UTF8Encoding]::new($false))
-        [IO.File]::WriteAllText($nonzero,'raise SystemExit(7)',[Text.UTF8Encoding]::new($false))
-        { Invoke-BoundedPeerGuard -Executable $python -Arguments @($malformed) -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw
-        { Invoke-BoundedPeerGuard -Executable $python -Arguments @($extra) -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw
-        { Invoke-BoundedPeerGuard -Executable $python -Arguments @($nonzero) -ExpectedPayloadSHA256 $payloadHash `
-            -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096 } | Should -Throw '*transport failed*'
+    It 'emits READY only after validated ready event while the child is alive then accepts one candidate' {
+        $script:Captured = @()
+        $result = Invoke-P3GuardStream -Context $script:Context -Operation 'guest' -Nonce ('a' * 64) -Runner {
+            param($Executable, $Arguments, $InputJson, $OnEvent, $TimeoutSeconds, $MaximumBytes)
+            $request = $InputJson | ConvertFrom-Json
+            $nonceHash = Get-P3GuardTextSHA256 $request.nonce
+            & $OnEvent (New-ReadyEvent $script:Context 'guest' $nonceHash) $true
+            & $OnEvent (New-CandidateEvent $script:Context 'guest' $nonceHash) $true
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''; PartialLine = $false }
+        }
+        $result.ready_emitted | Should -BeTrue
+        $result.candidate_received | Should -BeTrue
+        $result.candidate_fingerprint_sha256 | Should -BeExactly ('e' * 64)
+    }
+
+    It 'never invokes a stream runner when a pre-live receipt is stale' {
+        $script:Context.CloudFirewall.observed_at_utc = '2000-01-01T00:00:00Z'
+        $calls = 0
+        { Invoke-P3GuardStream -Context $script:Context -Operation 'admin' -Nonce ('a' * 64) -Runner { $calls++ } } |
+            Should -Throw '*Cloud Firewall*'
+        $calls | Should -Be 0
+    }
+
+    It 'fails closed on malformed order duplicate stopped partial stderr timeout and overflow' {
+        $factory = {
+            param([string[]]$Events, [object]$Terminal)
+            return {
+                param($Executable, $Arguments, $InputJson, $OnEvent, $TimeoutSeconds, $MaximumBytes)
+                foreach ($event in $Events) { & $OnEvent $event $true }
+                return $Terminal
+            }.GetNewClosure()
+        }
+        $request = New-P3RemoteRequest -Context $script:Context -Mode 'guard' -Operation 'admin' -Nonce ('a' * 64)
+        $nonceHash = Get-P3GuardTextSHA256 $request.nonce
+        $ready = New-ReadyEvent $script:Context 'admin' $nonceHash
+        $candidate = New-CandidateEvent $script:Context 'admin' $nonceHash
+        $terminal = [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''; PartialLine = $false }
+        $cases = @(
+            @{ Events = @($candidate); Terminal = $terminal },
+            @{ Events = @($ready, $ready); Terminal = $terminal },
+            @{ Events = @('not-json'); Terminal = $terminal },
+            @{ Events = @($ready, '{"event":"stopped","schema":"home-gateway/p3-peer-guard-event/v2","operation":"admin","payload_sha256":"' + ('2' * 64) + '","protocol_sha256":"' + ('3' * 64) + '","nonce_sha256":"' + $nonceHash + '","reason":"TIMEOUT"}'); Terminal = $terminal },
+            @{ Events = @($ready, $candidate); Terminal = [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''; PartialLine = $true } },
+            @{ Events = @($ready, $candidate); Terminal = [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = 'warning'; PartialLine = $false } },
+            @{ Events = @($ready, $candidate); Terminal = [pscustomobject]@{ ExitCode = 1; TimedOut = $true; Oversized = $false; StdErr = ''; PartialLine = $false } },
+            @{ Events = @($ready, $candidate); Terminal = [pscustomobject]@{ ExitCode = 1; TimedOut = $false; Oversized = $true; StdErr = ''; PartialLine = $false } }
+        )
+        foreach ($case in $cases) {
+            { Invoke-P3GuardStream -Context $script:Context -Operation 'admin' -Nonce ('a' * 64) -Runner (& $factory $case.Events $case.Terminal) } |
+                Should -Throw
+        }
+    }
+
+    It 'routes ClientObserve through the same helper and validates exact nonce-bound receipt' {
+        $request = New-P3RemoteRequest -Context $script:Context -Mode 'client-observe' -Operation '' -Nonce ('a' * 64) `
+            -SelectedGuestFingerprintSHA256 ('e' * 64) -PreviousNonceSHA256 ('f' * 64) `
+            -ExpectedBeforeCounterSHA256 ('1' * 64) -ExpectedAfterCounterSHA256 ('2' * 64)
+        $nonceHash = Get-P3GuardTextSHA256 $request.nonce
+        $context = $script:Context
+        $receipt = Invoke-P3BoundedJsonSsh -Context $script:Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner {
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''; StdOut = ([ordered]@{
+                schema = 'home-gateway/p3-peer-client-observe/v2'; payload_sha256 = $context.PayloadSHA256
+                protocol_sha256 = $context.ProtocolSHA256; nonce_sha256 = $nonceHash; selected_guest_match = $true
+                handshake_fresh = $true; before_counter_sha256 = ('1' * 64); after_counter_sha256 = ('2' * 64)
+                traffic_delta = $true; observation_duration_seconds = 10
+            } | ConvertTo-Json -Compress) }
+        }.GetNewClosure()
+        $receipt.traffic_delta | Should -BeTrue
+    }
+
+    It 'keeps emergency rollback plan read-only and apply challenge-bound' {
+        $candidate = [pscustomobject]@{ candidate_fingerprint_sha256 = ('e' * 64); post_peer_set_sha256 = ('f' * 64); pre_peer_set_sha256 = ('c' * 64) }
+        $current = [pscustomobject]@{ candidate_fingerprint_sha256 = ('e' * 64); post_peer_set_sha256 = ('f' * 64); exact_plus_one = $true }
+        $plan = New-P3EmergencyRollbackPlan -Context $script:Context -CandidateReceipt $candidate -CurrentReceipt $current
+        $plan.plan_sha256 | Should -Match '^[0-9a-f]{64}$'
+        $plan.confirmation_challenge | Should -Match '^P3-EMERGENCY-ROLLBACK-[0-9A-F]{16}$'
+        $calls = 0
+        { Invoke-P3EmergencyRollback -Context $script:Context -Plan $plan -ExpectedPlanSHA256 ('0' * 64) `
+            -Confirmation $plan.confirmation_challenge -Runner { $calls++ } } | Should -Throw '*approval*'
+        $calls | Should -Be 0
+    }
+
+    It 'contains no legacy automatic observer or Windows OpenSSH production path' {
+        $text = Get-Content -LiteralPath $script:Launcher -Raw
+        $text | Should -Not -Match 'home-gateway-p3-peer-observe|--automatic|System32.{1,4}OpenSSH'
+        $text | Should -Match "ClientObserve"
     }
 }

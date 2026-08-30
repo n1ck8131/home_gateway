@@ -6,6 +6,12 @@ Describe 'P3 protected pre-live runtime' {
         $script:Root = Join-Path $TestDrive 'protected-v1'
         . $script:Runtime
 
+        function Get-TestTextSHA256([string]$Text) {
+            $sha = [Security.Cryptography.SHA256]::Create()
+            try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).Replace('-', '').ToLowerInvariant() }
+            finally { $sha.Dispose() }
+        }
+
         function New-TrustFixture {
             param([string]$Root)
             $files = @{}
@@ -14,6 +20,8 @@ Describe 'P3 protected pre-live runtime' {
                 [IO.File]::WriteAllText($path, "synthetic-$name", [Text.UTF8Encoding]::new($false))
                 $files[$name] = $path
             }
+            $payloadHash = (Get-FileHash -LiteralPath $files.'guard.py' -Algorithm SHA256).Hash.ToLowerInvariant()
+            $peerSetHash = Get-TestTextSHA256 ((ConvertTo-Json -Compress -InputObject @(('8' * 64))))
             return [ordered]@{
                 schema = 'home-gateway/p3-prelive-trust-input/v1'
                 ssh_host = '192.0.2.10'
@@ -28,10 +36,26 @@ Describe 'P3 protected pre-live runtime' {
                 git_ssh_path = $files.'ssh.exe'
                 git_scp_path = $files.'scp.exe'
                 local_payload_path = $files.'guard.py'
-                remote_payload_sha256 = ('3' * 64)
+                remote_payload_sha256 = $payloadHash
                 protocol_sha256 = ('4' * 64)
-                accepted_server_baseline_sha256 = ('5' * 64)
+                accepted_server_baseline = [ordered]@{
+                    container_count = 1; container_running = $true; container_identity_sha256 = ('3' * 64)
+                    image_identity_sha256 = ('4' * 64); container_restart_count = 0
+                    udp_publication_count = 1; udp_publication_sha256 = ('5' * 64)
+                    public_listener_class_count = 2; listener_identity_sha256 = ('6' * 64)
+                    host_policy_loaded = $true; host_policy_sha256 = ('7' * 64); ipv6_non_mutation = $true
+                    peer_fingerprint_sha256 = @(('8' * 64)); persistent_peer_set_sha256 = $peerSetHash
+                    live_peer_set_sha256 = $peerSetHash; metadata_peer_set_sha256 = $peerSetHash
+                    candidate_leftover_count = 0; temporary_leftover_count = 0; atomic_leftover_count = 0
+                    firewall_identity_sha256 = ('a' * 64); payload_sha256 = $payloadHash; protocol_sha256 = ('4' * 64)
+                }
                 accepted_cloud_firewall_sha256 = ('6' * 64)
+                rollback_paths = [ordered]@{
+                    persistent_config_path = '/opt/amnezia/awg/wg0.conf'
+                    metadata_path = '/opt/amnezia/awg/peers.json'
+                    temporary_path = '/run/home-gateway-p3-peer-guard/candidate.tmp'
+                    syncconf_path = '/run/home-gateway-p3-peer-guard/awg.conf'
+                }
                 egress_authority_sha256 = @(('7' * 64), ('8' * 64), ('9' * 64))
             }
         }
@@ -54,6 +78,7 @@ Describe 'P3 protected pre-live runtime' {
         $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
         $plan.schema | Should -BeExactly 'home-gateway/p3-prelive-runtime-plan/v1'
         $plan.manifest_sha256 | Should -Match '^[0-9a-f]{64}$'
+        $plan.manifest.accepted_server_baseline_sha256 | Should -Match '^[0-9a-f]{64}$'
         $plan.confirmation_challenge | Should -Match '^P3-PRELIVE-RUNTIME-[0-9A-F]{16}$'
         $plan.manifest.PSObject.Properties.Name | Should -Be @(
             'accepted_cloud_firewall_sha256', 'accepted_server_baseline_sha256',

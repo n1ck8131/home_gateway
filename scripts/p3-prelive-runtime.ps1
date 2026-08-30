@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'PreparePlan', 'Prepare', 'Validate', 'RecordCloudFirewall', 'ObserveLocalBaseline', 'CleanupPlan', 'Cleanup')]
+    [ValidateSet('', 'PreparePlan', 'Prepare', 'Validate', 'RecordCloudFirewall', 'RecordEgress', 'ObserveLocalBaseline', 'CleanupPlan', 'Cleanup')]
     [string]$Action = '',
     [string]$RuntimeRoot,
     [string]$ExpectedManifestSHA256,
     [string]$ExpectedPlanSHA256,
     [string]$Confirmation,
-    [string]$ProtectedProfilePath
+    [string]$ProtectedProfilePath,
+    [string[]]$EgressEndpoint
 )
 
 Set-StrictMode -Version Latest
@@ -18,6 +19,7 @@ $script:P3RuntimeFiles = @(
     'trust.json',
     'manifest.json',
     'cloud-firewall-receipt.json',
+    'egress-receipt.json',
     'local-baseline-receipt.json',
     'agent-receipt.json',
     'remote-install-receipt.json',
@@ -33,9 +35,11 @@ $script:P3ServerBaselineProperties = @(
     'atomic_leftover_count', 'candidate_leftover_count', 'container_count', 'container_identity_sha256',
     'container_restart_count', 'container_running', 'firewall_identity_sha256', 'host_policy_loaded',
     'host_policy_sha256', 'image_identity_sha256', 'ipv6_non_mutation', 'listener_identity_sha256',
+    'ipv6_policy_sha256', 'metadata_sha256', 'persistent_config_sha256', 'prepared_syncconf_sha256',
     'live_peer_set_sha256', 'metadata_peer_set_sha256', 'payload_sha256', 'peer_fingerprint_sha256',
     'persistent_peer_set_sha256', 'protocol_sha256', 'public_listener_class_count',
-    'temporary_leftover_count', 'udp_publication_count', 'udp_publication_sha256'
+    'runtime_identity_sha256', 'temporary_leftover_count', 'temporary_state_sha256',
+    'udp_publication_count', 'udp_publication_sha256'
 )
 $script:P3RollbackPathProperties = @('metadata_path', 'persistent_config_path', 'syncconf_path', 'temporary_path')
 $script:P3ManifestProperties = @(
@@ -43,6 +47,28 @@ $script:P3ManifestProperties = @(
     'git_scp_sha256', 'git_ssh_add_sha256', 'git_ssh_agent_sha256', 'git_ssh_sha256',
     'known_hosts_sha256', 'local_payload_sha256', 'management_source_cidr_sha256',
     'protocol_sha256', 'public_key_fingerprint_sha256', 'remote_payload_sha256', 'schema', 'trust_sha256'
+)
+$script:P3CloudFirewallReceiptProperties = @(
+    'cloud_firewall_identity_sha256', 'droplet_association_count', 'inbound_rule_count',
+    'live_mutation_performed', 'management_source_cidr_sha256', 'observed_at_utc',
+    'owner_observed', 'schema', 'server_confirmed'
+)
+$script:P3LocalBaselineReceiptProperties = @(
+    'adapter_class_set_sha256', 'cisco_class_count', 'live_mutation_performed', 'observed_at_utc',
+    'protected_profile_absent', 'redshield_class_count', 'schema', 'selfhosted_adapter_count'
+)
+$script:P3EgressReceiptProperties = @(
+    'live_mutation_performed', 'management_source_cidr_sha256', 'observations', 'observed_at_utc', 'schema'
+)
+$script:P3EgressObservationProperties = @('authority_sha256', 'observed_at_utc', 'source_cidr_sha256')
+$script:P3CombinedAgentReceiptProperties = @(
+    'agent_executable_path', 'agent_executable_sha256', 'agent_pid', 'agent_pid_match',
+    'expected_fingerprint_sha256', 'expected_key_match', 'loaded_key_count', 'manifest_sha256',
+    'schema', 'socket', 'started_at_utc', 'toolchain_match'
+)
+$script:P3InstallReceiptProperties = @(
+    'group_match', 'installed_by_gate', 'mode_match', 'owner_match', 'payload_sha256',
+    'preinstall_state', 'schema', 'target_state', 'temporary_leftover_count'
 )
 
 if (-not ('HomeGateway.P3.NativeFileIdentity' -as [type])) {
@@ -314,6 +340,8 @@ function Assert-P3ProtectedRuntimeRoot([string]$Path, [Security.Principal.Securi
     if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'protected runtime root differs' }
     $acl = Get-Acl -LiteralPath $resolved -ErrorAction Stop
     if (-not $acl.AreAccessRulesProtected) { throw 'runtime ACL inherits access' }
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -eq $owner -or $owner.Value -cne $CurrentSID.Value) { throw 'runtime ACL owner differs' }
     $expectedSids = @('S-1-5-18', 'S-1-5-32-544', $CurrentSID.Value)
     $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
     if ($rules.Count -ne 3) { throw 'runtime ACL differs' }
@@ -400,12 +428,34 @@ function Invoke-P3RuntimeValidate([string]$RuntimeRoot, [string]$ExpectedManifes
     }
 }
 
-function New-P3CloudFirewallReceipt([object]$Observation, [string]$ExpectedIdentitySHA256, [DateTime]$NowUtc) {
+function Get-P3CloudFirewallIdentitySHA256([object]$Observation) {
     $properties = @('droplet_association_count', 'extra_inbound_rule_count', 'management_source_cidr_sha256', 'observed_at_utc', 'schema', 'tcp_22_management_source_count', 'udp_38556_all_ipv4_count', 'udp_ipv6_count')
     Assert-P3ExactProperties -Value $Observation -ExpectedProperties $properties -Label 'Cloud Firewall observation'
-    Assert-P3SHA256 -Value $ExpectedIdentitySHA256 -Label 'Cloud Firewall identity'
     Assert-P3SHA256 -Value ([string]$Observation.management_source_cidr_sha256) -Label 'management source CIDR'
     if ([string]$Observation.schema -cne 'home-gateway/p3-prelive-cloud-firewall-observation/v1') { throw 'Cloud Firewall schema differs' }
+    $identity = [pscustomobject][ordered]@{
+        schema = 'home-gateway/p3-prelive-cloud-firewall-identity/v1'
+        droplet_association_count = [int]$Observation.droplet_association_count
+        tcp_22_management_source_count = [int]$Observation.tcp_22_management_source_count
+        management_source_cidr_sha256 = [string]$Observation.management_source_cidr_sha256
+        udp_38556_all_ipv4_count = [int]$Observation.udp_38556_all_ipv4_count
+        udp_ipv6_count = [int]$Observation.udp_ipv6_count
+        extra_inbound_rule_count = [int]$Observation.extra_inbound_rule_count
+    }
+    return Get-P3SHA256Bytes -Bytes (ConvertTo-P3CanonicalJson -Value $identity)
+}
+
+function New-P3CloudFirewallReceipt(
+    [object]$Observation,
+    [string]$ExpectedIdentitySHA256,
+    [string]$ExpectedManagementSourceCIDRSHA256,
+    [DateTime]$NowUtc
+) {
+    Assert-P3SHA256 -Value $ExpectedIdentitySHA256 -Label 'Cloud Firewall identity'
+    Assert-P3SHA256 -Value $ExpectedManagementSourceCIDRSHA256 -Label 'expected management source CIDR'
+    $actualIdentity = Get-P3CloudFirewallIdentitySHA256 -Observation $Observation
+    if ($actualIdentity -cne $ExpectedIdentitySHA256) { throw 'Cloud Firewall identity differs' }
+    if ([string]$Observation.management_source_cidr_sha256 -cne $ExpectedManagementSourceCIDRSHA256) { throw 'Cloud Firewall management source differs' }
     if ([int]$Observation.droplet_association_count -ne 1) { throw 'Cloud Firewall Droplet association differs' }
     if ([int]$Observation.tcp_22_management_source_count -ne 1) { throw 'Cloud Firewall management SSH union differs' }
     if ([int]$Observation.udp_38556_all_ipv4_count -ne 1 -or [int]$Observation.udp_ipv6_count -ne 0) { throw 'Cloud Firewall UDP union differs' }
@@ -415,7 +465,7 @@ function New-P3CloudFirewallReceipt([object]$Observation, [string]$ExpectedIdent
     if ($age -lt 0 -or $age -gt 900) { throw 'Cloud Firewall observation is stale' }
     return [pscustomobject][ordered]@{
         schema = 'home-gateway/p3-prelive-cloud-firewall-receipt/v1'
-        cloud_firewall_identity_sha256 = $ExpectedIdentitySHA256
+        cloud_firewall_identity_sha256 = $actualIdentity
         management_source_cidr_sha256 = [string]$Observation.management_source_cidr_sha256
         droplet_association_count = 1
         inbound_rule_count = 2
@@ -426,10 +476,57 @@ function New-P3CloudFirewallReceipt([object]$Observation, [string]$ExpectedIdent
     }
 }
 
+function New-P3EgressReceipt(
+    [string[]]$ExpectedAuthoritySHA256,
+    [string]$ExpectedManagementSourceCIDRSHA256,
+    [DateTime]$NowUtc,
+    [scriptblock]$HttpsRunner
+) {
+    Assert-P3SHA256 -Value $ExpectedManagementSourceCIDRSHA256 -Label 'expected egress source'
+    $expected = @($ExpectedAuthoritySHA256)
+    if ($expected.Count -ne 3 -or @($expected | Select-Object -Unique).Count -ne 3) { throw 'three distinct egress authorities are required' }
+    foreach ($hash in $expected) { Assert-P3SHA256 -Value $hash -Label 'egress authority' }
+    $observations = @()
+    foreach ($authority in $expected) {
+        $item = & $HttpsRunner $authority
+        Assert-P3ExactProperties -Value $item -ExpectedProperties $script:P3EgressObservationProperties -Label 'egress observation'
+        if ([string]$item.authority_sha256 -cne $authority) { throw 'egress authority differs' }
+        Assert-P3SHA256 -Value ([string]$item.source_cidr_sha256) -Label 'egress source'
+        if ([string]$item.source_cidr_sha256 -cne $ExpectedManagementSourceCIDRSHA256) { throw 'egress source differs' }
+        try { $observed = [DateTime]::Parse([string]$item.observed_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+        catch { throw 'egress observation timestamp differs' }
+        $age = ($NowUtc.ToUniversalTime() - $observed).TotalSeconds
+        if ($age -lt -1 -or $age -gt 120) { throw 'egress observation is stale' }
+        $observations += [pscustomobject][ordered]@{ authority_sha256 = $authority; source_cidr_sha256 = [string]$item.source_cidr_sha256; observed_at_utc = $observed.ToString('o') }
+    }
+    return [pscustomobject][ordered]@{
+        schema = 'home-gateway/p3-prelive-egress-receipt/v1'
+        management_source_cidr_sha256 = $ExpectedManagementSourceCIDRSHA256
+        observations = @($observations)
+        observed_at_utc = $NowUtc.ToUniversalTime().ToString('o')
+        live_mutation_performed = $false
+    }
+}
+
+function Get-P3AdapterClass([string]$InterfaceDescription) {
+    if ([string]::IsNullOrWhiteSpace($InterfaceDescription)) { throw 'adapter description is empty' }
+    $redshield = $InterfaceDescription -match '(?i)redshield'
+    $cisco = $InterfaceDescription -match '(?i)cisco|anyconnect|secure\s+client'
+    $selfhosted = $InterfaceDescription -match '(?i)amnezia|wintun|wireguard'
+    if (($redshield -and $cisco) -or ($cisco -and $selfhosted)) { throw 'adapter classification is ambiguous' }
+    if ($redshield) { return 'redshield' }
+    if ($cisco) { return 'cisco' }
+    if ($selfhosted) { return 'selfhosted' }
+    return 'other'
+}
+
 function New-P3LocalBaselineReceipt([string]$ProtectedProfilePath, [DateTime]$NowUtc, [scriptblock]$AdapterRunner) {
     $profile = Resolve-P3FixedCleanPath -Path $ProtectedProfilePath -Label 'protected profile'
     $adapters = @(& $AdapterRunner)
-    $classes = @($adapters | ForEach-Object { ([string]$_.Class).ToLowerInvariant() })
+    $classes = @($adapters | ForEach-Object {
+        $description = if ($_.PSObject.Properties.Name -contains 'InterfaceDescription') { [string]$_.InterfaceDescription } else { [string]$_.Class }
+        Get-P3AdapterClass -InterfaceDescription $description
+    })
     return [pscustomobject][ordered]@{
         schema = 'home-gateway/p3-prelive-local-baseline-receipt/v1'
         protected_profile_absent = -not ([IO.File]::Exists($profile) -or [IO.Directory]::Exists($profile))
@@ -498,13 +595,37 @@ if (-not [string]::IsNullOrEmpty($Action)) {
             $runtime = Invoke-P3RuntimeValidate -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256
             $manifest = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
             $observation = ConvertFrom-Json -InputObject $inputText -ErrorAction Stop
-            $receipt = New-P3CloudFirewallReceipt -Observation $observation -ExpectedIdentitySHA256 $manifest.accepted_cloud_firewall_sha256 -NowUtc ([DateTime]::UtcNow)
+            $receipt = New-P3CloudFirewallReceipt -Observation $observation -ExpectedIdentitySHA256 $manifest.accepted_cloud_firewall_sha256 `
+                -ExpectedManagementSourceCIDRSHA256 $manifest.management_source_cidr_sha256 -NowUtc ([DateTime]::UtcNow)
             Write-P3RuntimeJson -RuntimeRoot $RuntimeRoot -Name 'cloud-firewall-receipt.json' -Value $receipt
             $receipt | ConvertTo-Json -Compress
         }
+        'RecordEgress' {
+            $null = Invoke-P3RuntimeValidate -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256
+            $manifest = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+            $trust = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'trust.json') -MaximumBytes 65536 -ExpectedProperties $script:P3TrustProperties
+            if (@($EgressEndpoint).Count -ne 3) { throw 'three egress endpoints are required' }
+            $endpointByHash = @{}
+            foreach ($endpoint in $EgressEndpoint) {
+                $uri = [Uri]$endpoint
+                if (-not $uri.IsAbsoluteUri -or $uri.Scheme -cne 'https') { throw 'egress endpoint must use HTTPS' }
+                $endpointByHash[(Get-P3SHA256Text $uri.Authority.ToLowerInvariant())] = $uri
+            }
+            $receipt = New-P3EgressReceipt -ExpectedAuthoritySHA256 @($trust.egress_authority_sha256) `
+                -ExpectedManagementSourceCIDRSHA256 $manifest.management_source_cidr_sha256 -NowUtc ([DateTime]::UtcNow) -HttpsRunner {
+                    param($authoritySHA256)
+                    if (-not $endpointByHash.ContainsKey($authoritySHA256)) { throw 'egress endpoint authority differs' }
+                    $value = [string](Invoke-RestMethod -Uri $endpointByHash[$authoritySHA256] -Method Get -TimeoutSec 10 -MaximumRedirection 0 -ErrorAction Stop)
+                    $address = [Net.IPAddress]$null
+                    if (-not [Net.IPAddress]::TryParse($value.Trim(), [ref]$address) -or $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) { throw 'egress source differs' }
+                    [pscustomobject]@{ authority_sha256=$authoritySHA256;source_cidr_sha256=(Get-P3SHA256Text ($address.ToString() + '/32'));observed_at_utc=[DateTime]::UtcNow.ToString('o') }
+                }
+            Write-P3RuntimeJson -RuntimeRoot $RuntimeRoot -Name 'egress-receipt.json' -Value $receipt
+            $receipt | ConvertTo-Json -Depth 8 -Compress
+        }
         'ObserveLocalBaseline' {
             $null = Invoke-P3RuntimeValidate -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256
-            $receipt = New-P3LocalBaselineReceipt -ProtectedProfilePath $ProtectedProfilePath -NowUtc ([DateTime]::UtcNow) -AdapterRunner { Get-NetAdapter -IncludeHidden -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ Class = [string]$_.InterfaceDescription } } }
+            $receipt = New-P3LocalBaselineReceipt -ProtectedProfilePath $ProtectedProfilePath -NowUtc ([DateTime]::UtcNow) -AdapterRunner { Get-NetAdapter -IncludeHidden -ErrorAction Stop | ForEach-Object { [pscustomobject]@{ InterfaceDescription = [string]$_.InterfaceDescription } } }
             Write-P3RuntimeJson -RuntimeRoot $RuntimeRoot -Name 'local-baseline-receipt.json' -Value $receipt
             $receipt | ConvertTo-Json -Compress
         }

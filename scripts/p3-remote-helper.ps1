@@ -2,6 +2,8 @@
 param(
     [ValidateSet('', 'RemoteInstallPlan', 'RemoteInstall', 'RemoteRemovePlan', 'RemoteRemove')]
     [string]$Action = '',
+    [string]$RuntimeRoot,
+    [string]$ExpectedManifestSHA256,
     [string]$ExpectedPlanSHA256,
     [string]$Confirmation
 )
@@ -107,7 +109,8 @@ function Test-P3RemoteContext([object]$Context) {
         $authorities += [string]$item.authority_sha256
     }
     if (@($authorities | Select-Object -Unique).Count -ne 3) { throw 'egress authorities must be distinct' }
-    if ([int]$Context.Agent.agent_pid -le 0 -or [string]::IsNullOrWhiteSpace([string]$Context.Agent.socket) -or
+    if ([string]$Context.Agent.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v2' -or
+        [int]$Context.Agent.agent_pid -le 0 -or [string]::IsNullOrWhiteSpace([string]$Context.Agent.socket) -or
         [int]$Context.Agent.loaded_key_count -ne 1 -or -not [bool]$Context.Agent.expected_key_match -or
         -not [bool]$Context.Agent.toolchain_match -or [string]$Context.Agent.manifest_sha256 -cne [string]$Context.manifest_sha256) {
         throw 'validated one-key agent receipt differs'
@@ -135,6 +138,85 @@ function New-P3GitSshArguments([object]$Trust, [object]$Agent, [string[]]$Remote
     ) + $RemoteCommand
 }
 
+function New-P3GitScpArguments([object]$Trust, [object]$Agent) {
+    return @(
+        '-F', 'NUL', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        '-o', 'PreferredAuthentications=publickey', '-o', 'PasswordAuthentication=no',
+        '-o', 'KbdInteractiveAuthentication=no', '-o', 'StrictHostKeyChecking=yes',
+        '-o', "UserKnownHostsFile=$($Trust.known_hosts_path)", '-o', 'GlobalKnownHostsFile=NUL',
+        '-o', "IdentityAgent=$($Agent.socket)", '-o', 'ConnectTimeout=10'
+    )
+}
+
+function New-P3RemoteAdapterCommand([string]$Mode, [string]$ExpectedPayloadSHA256, [string]$Token) {
+    if ($Mode -notin @('classify', 'install', 'remove')) { throw 'remote adapter mode differs' }
+    Assert-P3RemoteSHA256 -Value $ExpectedPayloadSHA256 -Label 'remote adapter payload'
+    if ($Mode -ceq 'install' -and $Token -cnotmatch '^[0-9a-f]{32}$') { throw 'remote adapter token differs' }
+    if ($Mode -cne 'install' -and -not [string]::IsNullOrEmpty($Token)) { throw 'remote adapter token differs' }
+    $program = @'
+import glob, hashlib, json, os, shutil, stat, sys
+TARGET = "/usr/local/libexec/home-gateway-p3-peer-guard"
+ZERO = "0" * 64
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb", buffering=0) as stream:
+        for chunk in iter(lambda: stream.read(131072), b""):
+            h.update(chunk)
+    return h.hexdigest()
+def leftovers():
+    return len(glob.glob(TARGET + ".next-*")) + len(glob.glob("/tmp/.home-gateway-p3-*.upload"))
+def classify(expected):
+    if not os.path.lexists(TARGET):
+        return {"state":"absent","regular":False,"owner_match":False,"group_match":False,"mode_match":False,"payload_sha256":ZERO,"temporary_leftover_count":leftovers()}
+    info = os.lstat(TARGET)
+    regular = stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+    value = digest(TARGET) if regular else ZERO
+    exact = regular and info.st_uid == 0 and info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o755 and value == expected
+    return {"state":"exact" if exact else "conflict","regular":regular,"owner_match":info.st_uid==0,"group_match":info.st_gid==0,"mode_match":stat.S_IMODE(info.st_mode)==0o755,"payload_sha256":value,"temporary_leftover_count":leftovers()}
+def cleanup(paths):
+    for path in paths:
+        try:
+            if os.path.lexists(path): os.unlink(path)
+        except OSError:
+            pass
+mode, expected, token = sys.argv[1:4]
+if mode == "classify":
+    result = classify(expected)
+elif mode == "install":
+    upload = "/tmp/.home-gateway-p3-" + token + ".upload"
+    nxt = TARGET + ".next-" + token
+    try:
+        if classify(expected)["state"] != "absent": raise RuntimeError("target race")
+        info = os.lstat(upload)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or digest(upload) != expected: raise RuntimeError("upload identity")
+        fd = os.open(nxt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+        with os.fdopen(fd, "wb", buffering=0) as target, open(upload, "rb", buffering=0) as source:
+            shutil.copyfileobj(source, target, 131072); target.flush(); os.fsync(target.fileno())
+        os.chown(nxt, 0, 0); os.chmod(nxt, 0o755)
+        if digest(nxt) != expected: raise RuntimeError("staged identity")
+        os.link(nxt, TARGET)
+        cleanup([nxt, upload])
+        state = classify(expected)
+        if state["state"] != "exact" or state["temporary_leftover_count"] != 0: raise RuntimeError("post install")
+        result = {"schema":"home-gateway/p3-remote-helper-install-receipt/v1","target_state":"exact","payload_sha256":expected,"owner_match":True,"group_match":True,"mode_match":True,"installed_by_gate":True,"preinstall_state":"absent","temporary_leftover_count":0}
+    except Exception:
+        cleanup([nxt, upload]); raise
+elif mode == "remove":
+    state = classify(expected)
+    if state["state"] != "exact": raise RuntimeError("target race")
+    os.unlink(TARGET)
+    state = classify(expected)
+    if state["state"] != "absent" or state["temporary_leftover_count"] != 0: raise RuntimeError("post remove")
+    result = {"schema":"home-gateway/p3-remote-helper-remove-receipt/v1","removed":True,"target_state":"absent","temporary_leftover_count":0}
+else:
+    raise RuntimeError("mode")
+sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",",":")))
+'@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($program))
+    $bootstrap = "import base64;exec(compile(base64.b64decode('$encoded'),'<p3-lifecycle>','exec'))"
+    return @('sudo', '-n', '/usr/bin/python3', '-c', $bootstrap, $Mode, $ExpectedPayloadSHA256, $Token)
+}
+
 function ConvertFrom-P3RemoteState([string]$Json, [string]$ExpectedPayloadSHA256) {
     try { $state = ConvertFrom-Json -InputObject $Json -ErrorAction Stop } catch { throw 'remote target receipt is malformed' }
     Assert-P3RemoteExactProperties -Value $state -Expected $script:P3RemoteStateProperties -Label 'remote target receipt'
@@ -150,7 +232,7 @@ function ConvertFrom-P3RemoteState([string]$Json, [string]$ExpectedPayloadSHA256
 
 function Invoke-P3RemoteInstallPlan([object]$Context, [scriptblock]$SshRunner) {
     $validated = Test-P3RemoteContext -Context $Context
-    $command = @('sudo', '-n', '/usr/bin/stat', '--format=%F|%U|%G|%a', $script:P3RemoteTarget, '&&', '/usr/bin/sha256sum', $script:P3RemoteTarget)
+    $command = New-P3RemoteAdapterCommand -Mode classify -ExpectedPayloadSHA256 $validated.payload_sha256 -Token ''
     $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand $command
     $json = [string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $arguments 'classify')
     $classification = ConvertFrom-P3RemoteState -Json $json -ExpectedPayloadSHA256 $validated.payload_sha256
@@ -201,7 +283,12 @@ function ConvertFrom-P3InstallReceipt([string]$Json, [string]$ExpectedPayloadSHA
 function Invoke-P3RemoteInstall([object]$Context, [object]$Plan, [scriptblock]$ScpRunner, [scriptblock]$SshRunner) {
     $validated = Assert-P3RemoteInstallPlan -Context $Context -Plan $Plan
     if ([string]$Plan.state -ceq 'conflict') { throw 'remote target conflict prevents overwrite' }
+    $classifyArguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent `
+        -RemoteCommand (New-P3RemoteAdapterCommand -Mode classify -ExpectedPayloadSHA256 $validated.payload_sha256 -Token '')
+    $current = ConvertFrom-P3RemoteState -Json ([string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $classifyArguments 'classify' $null)) `
+        -ExpectedPayloadSHA256 $validated.payload_sha256
     if ([string]$Plan.state -ceq 'exact') {
+        if ($current.classification -cne 'exact') { throw 'remote target race differs from exact plan' }
         return [pscustomobject][ordered]@{
             schema = 'home-gateway/p3-remote-helper-install-receipt/v1'; target_state = 'exact'
             payload_sha256 = $validated.payload_sha256; owner_match = $true; group_match = $true; mode_match = $true
@@ -209,10 +296,11 @@ function Invoke-P3RemoteInstall([object]$Context, [object]$Plan, [scriptblock]$S
         }
     }
     if ([string]$Plan.state -cne 'absent') { throw 'remote install plan state differs' }
+    if ($current.classification -cne 'absent') { throw 'remote target race differs from absent plan' }
     $token = [guid]::NewGuid().ToString('N')
     $upload = "/tmp/.home-gateway-p3-$token.upload"
     $next = "$script:P3RemoteTarget.next-$token"
-    $scpArguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand @()
+    $scpArguments = New-P3GitScpArguments -Trust $Context.Trust -Agent $Context.Agent
     $uploadResult = & $ScpRunner ([string]$Context.Trust.git_scp_path) $scpArguments ([string]$Context.Trust.local_payload_path) $upload
     if ($null -eq $uploadResult -or [int]$uploadResult.exit_code -ne 0) { throw 'remote helper upload failed' }
     $request = [pscustomobject][ordered]@{
@@ -220,7 +308,7 @@ function Invoke-P3RemoteInstall([object]$Context, [object]$Plan, [scriptblock]$S
         payload_sha256 = $validated.payload_sha256; owner = 'root'; group = 'root'; mode = '0755'
         cleanup_required = $true; atomic_create_new = $true
     }
-    $command = @('sudo', '-n', '/usr/bin/install', '--owner=root', '--group=root', '--mode=0755', '--no-target-directory', $upload, $next, '&&', 'sudo', '-n', '/usr/bin/mv', '--no-clobber', $next, $script:P3RemoteTarget)
+    $command = New-P3RemoteAdapterCommand -Mode install -ExpectedPayloadSHA256 $validated.payload_sha256 -Token $token
     $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand $command
     $json = [string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $arguments 'install' $request)
     return ConvertFrom-P3InstallReceipt -Json $json -ExpectedPayloadSHA256 $validated.payload_sha256
@@ -241,7 +329,7 @@ function Assert-P3InstallReceiptForRemoval([object]$Context, [object]$InstallRec
 function Invoke-P3RemoteRemovePlan([object]$Context, [object]$InstallReceipt, [scriptblock]$SshRunner) {
     $validated = Test-P3RemoteContext -Context $Context
     Assert-P3InstallReceiptForRemoval -Context $Context -InstallReceipt $InstallReceipt
-    $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand @('sudo', '-n', '/usr/bin/stat', $script:P3RemoteTarget, '&&', '/usr/bin/sha256sum', $script:P3RemoteTarget)
+    $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand (New-P3RemoteAdapterCommand -Mode classify -ExpectedPayloadSHA256 $validated.payload_sha256 -Token '')
     $state = ConvertFrom-P3RemoteState -Json ([string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $arguments 'classify')) -ExpectedPayloadSHA256 $validated.payload_sha256
     if ($state.classification -cne 'exact') { throw 'remote helper is no longer exact' }
     $identity = [pscustomobject][ordered]@{
@@ -274,13 +362,29 @@ function Invoke-P3RemoteRemove([object]$Context, [object]$InstallReceipt, [objec
     if ((Get-P3RemoteCanonicalSHA256 $identity) -cne [string]$RemovePlan.remove_plan_sha256 -or
         [string]$RemovePlan.context_sha256 -cne $validated.context_sha256 -or
         [string]$RemovePlan.install_receipt_sha256 -cne (Get-P3RemoteCanonicalSHA256 $InstallReceipt)) { throw 'remote remove plan differs' }
-    $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand @('sudo', '-n', '/usr/bin/rm', '--', $script:P3RemoteTarget)
+    $classifyArguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand (New-P3RemoteAdapterCommand -Mode classify -ExpectedPayloadSHA256 $validated.payload_sha256 -Token '')
+    $current = ConvertFrom-P3RemoteState -Json ([string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $classifyArguments 'classify' $null)) -ExpectedPayloadSHA256 $validated.payload_sha256
+    if ($current.classification -cne 'exact') { throw 'remote remove target race differs' }
+    $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand (New-P3RemoteAdapterCommand -Mode remove -ExpectedPayloadSHA256 $validated.payload_sha256 -Token '')
     $json = [string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $arguments 'remove')
     try { $receipt = ConvertFrom-Json -InputObject $json -ErrorAction Stop } catch { throw 'remote remove receipt is malformed' }
     Assert-P3RemoteExactProperties -Value $receipt -Expected @('removed', 'schema', 'target_state', 'temporary_leftover_count') -Label 'remote remove receipt'
     if ([string]$receipt.schema -cne 'home-gateway/p3-remote-helper-remove-receipt/v1' -or -not [bool]$receipt.removed -or
         [string]$receipt.target_state -cne 'absent' -or [int]$receipt.temporary_leftover_count -ne 0) { throw 'remote remove receipt differs' }
     return $receipt
+}
+
+function Write-P3ProtectedInstallReceipt([string]$Root, [string]$ManifestSHA256, [object]$Receipt) {
+    $savedAction = $Action
+    try {
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
+        Assert-P3ExactProperties -Value $Receipt -ExpectedProperties $script:P3InstallReceiptProperties -Label 'install receipt'
+        if ([string]$Receipt.schema -cne 'home-gateway/p3-remote-helper-install-receipt/v1' -or [string]$Receipt.payload_sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'install receipt binding differs'
+        }
+        Write-P3RuntimeJson -RuntimeRoot $Root -Name 'remote-install-receipt.json' -Value $Receipt
+    } finally { $Action = $savedAction }
 }
 
 if (-not [string]::IsNullOrEmpty($Action)) {
@@ -296,9 +400,11 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         'RemoteInstallPlan' { Invoke-P3RemoteInstallPlan -Context $request.context -SshRunner $nativeSshRunner | ConvertTo-Json -Depth 16 -Compress }
         'RemoteInstall' {
             if ([string]$request.plan.plan_sha256 -cne $ExpectedPlanSHA256 -or $Confirmation -cne [string]$request.plan.confirmation_challenge -or $Confirmation -cnotmatch '^P3-REMOTE-INSTALL-[0-9A-F]{16}$') { throw 'remote install approval differs' }
-            Invoke-P3RemoteInstall -Context $request.context -Plan $request.plan `
+            $receipt = Invoke-P3RemoteInstall -Context $request.context -Plan $request.plan `
                 -ScpRunner { param($Executable, $Arguments, $Source, $Target) & $Executable @Arguments $Source "homegateway@$($request.context.Trust.ssh_host):$Target"; [pscustomobject]@{ exit_code = $LASTEXITCODE } } `
-                -SshRunner $nativeSshRunner | ConvertTo-Json -Compress
+                -SshRunner $nativeSshRunner
+            Write-P3ProtectedInstallReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $receipt
+            $receipt | ConvertTo-Json -Compress
         }
         'RemoteRemovePlan' { Invoke-P3RemoteRemovePlan -Context $request.context -InstallReceipt $request.install_receipt -SshRunner $nativeSshRunner | ConvertTo-Json -Compress }
         'RemoteRemove' {

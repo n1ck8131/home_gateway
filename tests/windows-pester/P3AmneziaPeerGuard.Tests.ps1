@@ -19,8 +19,18 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
                 ExpectedUdpPublicationSHA256 = ('9' * 64)
                 ExpectedListenerIdentitySHA256 = ('a' * 64)
                 ExpectedHostPolicySHA256 = ('b' * 64)
+                ExpectedIPv6PolicySHA256 = ('0' * 64)
                 ExpectedPeerCount = 1
-                ExpectedPeerSetSHA256 = ('c' * 64)
+                ExpectedPeerSetSHA256 = Get-P3GuardCanonicalSHA256 @(('1' * 64))
+                ExpectedPeerFingerprints = @(('1' * 64))
+                BaselinePersistentConfigSHA256 = ('2' * 64)
+                BaselineMetadataSHA256 = ('3' * 64)
+                BaselineTemporaryStateSHA256 = ('4' * 64)
+                BaselineRuntimeIdentitySHA256 = ('5' * 64)
+                Rollback = [pscustomobject]@{
+                    persistent_config_path = '/opt/amnezia/awg/wg0.conf'; metadata_path = '/opt/amnezia/awg/peers.json'
+                    temporary_path = '/run/home-gateway-p3-peer-guard/candidate.tmp'; syncconf_path = '/run/home-gateway-p3-peer-guard/awg.conf'
+                }
                 Trust = [pscustomobject]@{
                     ssh_user = 'homegateway'; ssh_host = '192.0.2.10'; known_hosts_path = 'C:\synthetic\known_hosts'
                     git_ssh_path = 'C:\synthetic\Git\usr\bin\ssh.exe'; management_source_cidr_sha256 = ('d' * 64)
@@ -31,6 +41,7 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
                     )
                 }
                 Agent = [pscustomobject]@{
+                    schema = 'home-gateway/p3-ssh-agent-combined-receipt/v2'
                     agent_pid = 4242; socket = '/tmp/ssh-synthetic/agent.4242'; loaded_key_count = 1
                     expected_key_match = $true; toolchain_match = $true; manifest_sha256 = ('1' * 64)
                 }
@@ -197,8 +208,7 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
 
     It 'routes ClientObserve through the same helper and validates exact nonce-bound receipt' {
         $request = New-P3RemoteRequest -Context $script:Context -Mode 'client-observe' -Operation '' -Nonce ('a' * 64) `
-            -SelectedGuestFingerprintSHA256 ('e' * 64) -PreviousNonceSHA256 ('f' * 64) `
-            -ExpectedBeforeCounterSHA256 ('1' * 64) -ExpectedAfterCounterSHA256 ('2' * 64)
+            -SelectedGuestFingerprintSHA256 ('e' * 64) -PreviousNonceSHA256 ('f' * 64)
         $nonceHash = Get-P3GuardTextSHA256 $request.nonce
         $context = $script:Context
         $receipt = Invoke-P3BoundedJsonSsh -Context $script:Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner {
@@ -213,8 +223,19 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
     }
 
     It 'keeps emergency rollback plan read-only and apply challenge-bound' {
-        $candidate = [pscustomobject]@{ candidate_fingerprint_sha256 = ('e' * 64); post_peer_set_sha256 = ('f' * 64); pre_peer_set_sha256 = ('c' * 64) }
-        $current = [pscustomobject]@{ candidate_fingerprint_sha256 = ('e' * 64); post_peer_set_sha256 = ('f' * 64); exact_plus_one = $true }
+        $candidate = [pscustomobject][ordered]@{
+            schema = 'home-gateway/p3-local-guard-receipt/v2'; operation = 'guest'; ready_emitted = $true; candidate_received = $true
+            candidate_fingerprint_sha256 = ('e' * 64); pre_peer_set_sha256 = $script:Context.ExpectedPeerSetSHA256
+            post_peer_set_sha256 = Get-P3GuardCanonicalSHA256 @(('1' * 64), ('e' * 64))
+            nonce_sha256 = ('a' * 64); live_mutation_performed = $false
+        }
+        $candidateHash = Get-P3GuardCanonicalSHA256 $candidate
+        $current = [pscustomobject][ordered]@{
+            schema = 'home-gateway/p3-peer-rollback-observation/v2'; candidate_receipt_sha256 = $candidateHash
+            candidate_fingerprint_sha256 = ('e' * 64); peer_fingerprint_sha256 = @(('1' * 64), ('e' * 64)); peer_set_sha256 = $candidate.post_peer_set_sha256
+            persistent_config_sha256 = ('6' * 64); live_peer_set_sha256 = $candidate.post_peer_set_sha256; metadata_sha256 = ('7' * 64)
+            temporary_state_sha256 = ('8' * 64); runtime_identity_sha256 = ('9' * 64); prepared_syncconf_sha256 = ('a' * 64)
+        }
         $plan = New-P3EmergencyRollbackPlan -Context $script:Context -CandidateReceipt $candidate -CurrentReceipt $current
         $plan.plan_sha256 | Should -Match '^[0-9a-f]{64}$'
         $plan.confirmation_challenge | Should -Match '^P3-EMERGENCY-ROLLBACK-[0-9A-F]{16}$'

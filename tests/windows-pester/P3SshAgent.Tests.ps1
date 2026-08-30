@@ -83,6 +83,9 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $receipt = Test-P3AgentState -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
             -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } `
             -ProcessRunner { [pscustomobject]@{ Id = 4242; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) } }
+        $receipt.schema | Should -BeExactly 'home-gateway/p3-ssh-agent-combined-receipt/v2'
+        $receipt.agent_pid | Should -Be 4242
+        $receipt.socket | Should -BeExactly '/tmp/ssh-synthetic/agent.4242'
         $receipt.loaded_key_count | Should -Be 1
         $receipt.expected_key_match | Should -BeTrue
     }
@@ -122,6 +125,22 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $script:StoppedPids | Should -Be @(4242)
         $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
         $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'stops a uniquely parsed newly created PID when the full agent output is malformed' {
+        $script:StoppedPids = @()
+        { Start-P3Agent -Manifest $script:Manifest `
+            -AgentRunner { "unexpected`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" } `
+            -AddRunner { throw 'must not add' } `
+            -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*malformed*'
+        $script:StoppedPids | Should -Be @(4242)
+    }
+
+    It 'treats cleanup failure as terminal and never swallows it' {
+        { Start-P3Agent -Manifest $script:Manifest `
+            -AgentRunner { "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" } `
+            -AddRunner { throw 'synthetic add failure' } `
+            -StopRunner { throw 'synthetic stop failure' } } | Should -Throw '*cleanup failed*'
     }
 
     It 'starts validates and stops only the receipt-bound agent' {

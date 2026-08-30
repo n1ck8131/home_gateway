@@ -39,6 +39,20 @@ $script:P3CandidateEventProperties = @(
 $script:P3StoppedEventProperties = @(
     'event', 'nonce_sha256', 'operation', 'payload_sha256', 'protocol_sha256', 'reason', 'schema'
 )
+$script:P3LocalGuardProperties = @(
+    'candidate_fingerprint_sha256', 'candidate_received', 'live_mutation_performed', 'nonce_sha256',
+    'operation', 'post_peer_set_sha256', 'pre_peer_set_sha256', 'ready_emitted', 'schema'
+)
+$script:P3RollbackObservationProperties = @(
+    'candidate_fingerprint_sha256', 'candidate_receipt_sha256', 'live_peer_set_sha256',
+    'metadata_sha256', 'peer_fingerprint_sha256', 'peer_set_sha256', 'persistent_config_sha256',
+    'prepared_syncconf_sha256', 'runtime_identity_sha256', 'schema', 'temporary_state_sha256'
+)
+$script:P3EmergencyReceiptProperties = @(
+    'candidate_fingerprint_sha256', 'candidate_receipt_sha256', 'install_receipt_sha256',
+    'manifest_sha256', 'one_syncconf', 'payload_sha256', 'protocol_sha256', 'restored',
+    'rollback_plan_sha256', 'schema', 'temporary_leftover_count'
+)
 
 function Get-P3GuardTextSHA256([string]$Value) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -108,7 +122,8 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
         Assert-P3GuardSHA256 -Value ([string]$item.authority_sha256) -Label 'egress authority'
         if ([string]$item.source_cidr_sha256 -cne [string]$Context.Trust.management_source_cidr_sha256) { throw 'egress source consensus differs' }
     }
-    if ([int]$Context.Agent.loaded_key_count -ne 1 -or -not [bool]$Context.Agent.expected_key_match -or
+    if ([string]$Context.Agent.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v2' -or
+        [int]$Context.Agent.loaded_key_count -ne 1 -or -not [bool]$Context.Agent.expected_key_match -or
         -not [bool]$Context.Agent.toolchain_match -or [int]$Context.Agent.agent_pid -le 0 -or
         [string]::IsNullOrWhiteSpace([string]$Context.Agent.socket) -or
         [string]$Context.Agent.manifest_sha256 -cne [string]$Context.ManifestSHA256) { throw 'agent validation differs' }
@@ -138,6 +153,26 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
         loaded_key_count = 1
         live_mutation_performed = $false
     }
+    if ($Context.PSObject.Properties.Name -contains 'EgressReceipt') {
+        if ([string]$Context.EgressReceipt.schema -cne 'home-gateway/p3-prelive-egress-receipt/v1' -or
+            [string]$Context.EgressReceipt.management_source_cidr_sha256 -cne [string]$Context.Trust.management_source_cidr_sha256 -or
+            [bool]$Context.EgressReceipt.live_mutation_performed -or @($Context.EgressReceipt.observations).Count -ne 3) { throw 'egress receipt differs' }
+        $egressAge = ($NowUtc.ToUniversalTime() - (Get-P3GuardUtc ([string]$Context.EgressReceipt.observed_at_utc) 'egress')).TotalSeconds
+        if ($egressAge -lt -1 -or $egressAge -gt 120) { throw 'egress receipt is stale' }
+    }
+}
+
+function Assert-P3GuardExternalFiles([object]$Context) {
+    if ($Context.PSObject.Properties.Name -notcontains 'ExternalFilesBound' -or -not [bool]$Context.ExternalFilesBound) { return }
+    foreach ($entry in @(
+        @('known_hosts_path', 'known_hosts_sha256', 'known-hosts'),
+        @('git_ssh_path', 'git_ssh_sha256', 'Git ssh'),
+        @('git_scp_path', 'git_scp_sha256', 'Git scp'),
+        @('local_payload_path', 'local_payload_sha256', 'local payload')
+    )) {
+        $actual = Get-P3ExactFileSHA256 -Path ([string]$Context.Trust.($entry[0])) -Label $entry[2]
+        if ($actual -cne [string]$Context.Trust.($entry[1])) { throw "$($entry[2]) final hash differs" }
+    }
 }
 
 function New-P3RemoteRequest(
@@ -147,8 +182,6 @@ function New-P3RemoteRequest(
     [string]$Nonce,
     [string]$SelectedGuestFingerprintSHA256 = '',
     [string]$PreviousNonceSHA256 = '',
-    [string]$ExpectedBeforeCounterSHA256 = '',
-    [string]$ExpectedAfterCounterSHA256 = '',
     [object]$RollbackPlan = $null
 ) {
     if ($Mode -notin @('attest', 'reconcile', 'guard', 'client-observe', 'emergency-rollback')) { throw 'remote request mode differs' }
@@ -172,6 +205,11 @@ function New-P3RemoteRequest(
         $request.expected_peer_count = [int]$Context.ExpectedPeerCount
         $request.expected_peer_set_sha256 = [string]$Context.ExpectedPeerSetSHA256
         $request.expected_server_baseline_sha256 = [string]$Context.ExpectedServerBaselineSHA256
+        $request.expected_firewall_identity_sha256 = [string]$Context.ExpectedCloudFirewallSHA256
+        $request.expected_ipv6_policy_sha256 = [string]$Context.ExpectedIPv6PolicySHA256
+        $request.persistent_config_path = [string]$Context.Rollback.persistent_config_path
+        $request.metadata_path = [string]$Context.Rollback.metadata_path
+        $request.temporary_path = [string]$Context.Rollback.temporary_path
     }
     if ($Mode -ceq 'guard') {
         if ($Operation -notin @('admin', 'guest')) { throw 'remote guard operation differs' }
@@ -181,25 +219,18 @@ function New-P3RemoteRequest(
     }
     if ($Mode -ceq 'client-observe') {
         foreach ($pair in @(
-            @($SelectedGuestFingerprintSHA256, 'selected Guest'), @($PreviousNonceSHA256, 'previous nonce'),
-            @($ExpectedBeforeCounterSHA256, 'before counter'), @($ExpectedAfterCounterSHA256, 'after counter')
+            @($SelectedGuestFingerprintSHA256, 'selected Guest'), @($PreviousNonceSHA256, 'previous nonce')
         )) { Assert-P3GuardSHA256 -Value ([string]$pair[0]) -Label $pair[1] }
         $request.previous_nonce_sha256 = $PreviousNonceSHA256
         $request.selected_guest_fingerprint_sha256 = $SelectedGuestFingerprintSHA256
         $request.maximum_handshake_age_seconds = 180
-        $request.expected_before_counter_sha256 = $ExpectedBeforeCounterSHA256
-        $request.expected_after_counter_sha256 = $ExpectedAfterCounterSHA256
     }
     if ($Mode -ceq 'emergency-rollback') {
         if ($null -eq $RollbackPlan) { throw 'emergency rollback plan is required' }
-        $request.candidate_receipt_sha256 = [string]$RollbackPlan.candidate_receipt_sha256
-        $request.rollback_plan_sha256 = [string]$RollbackPlan.plan_sha256
+        foreach ($property in $RollbackPlan.PSObject.Properties) {
+            if ($property.Name -notin @('schema', 'confirmation_challenge')) { $request[$property.Name] = $property.Value }
+        }
         $request.confirmation = [string]$RollbackPlan.confirmation_challenge
-        $request.candidate_fingerprint_sha256 = [string]$RollbackPlan.candidate_fingerprint_sha256
-        $request.persistent_config_path = [string]$Context.Rollback.persistent_config_path
-        $request.metadata_path = [string]$Context.Rollback.metadata_path
-        $request.temporary_path = [string]$Context.Rollback.temporary_path
-        $request.syncconf_path = [string]$Context.Rollback.syncconf_path
     }
     return [pscustomobject]$request
 }
@@ -254,13 +285,31 @@ function Assert-P3ClientReceipt([object]$Context, [object]$Request, [object]$Rec
     if ([string]$Receipt.nonce_sha256 -cne (Get-P3GuardTextSHA256 ([string]$Request.nonce))) { throw 'client observation nonce differs' }
     if (-not [bool]$Receipt.selected_guest_match) { throw 'client observation selected Guest differs' }
     if (-not [bool]$Receipt.handshake_fresh) { throw 'client observation handshake differs' }
-    if ([string]$Receipt.before_counter_sha256 -cne [string]$Request.expected_before_counter_sha256 -or [string]$Receipt.after_counter_sha256 -cne [string]$Request.expected_after_counter_sha256) { throw 'client observation counter hash differs' }
+    Assert-P3GuardSHA256 -Value ([string]$Receipt.before_counter_sha256) -Label 'before counter'
+    Assert-P3GuardSHA256 -Value ([string]$Receipt.after_counter_sha256) -Label 'after counter'
+    if ([string]$Receipt.before_counter_sha256 -ceq [string]$Receipt.after_counter_sha256) { throw 'client observation counter hash differs' }
     if (-not [bool]$Receipt.traffic_delta -or [int]$Receipt.observation_duration_seconds -ne 10) { throw 'client observation traffic delta differs' }
+    return $Receipt
+}
+
+function Assert-P3EmergencyReceipt([object]$Context, [object]$Request, [object]$Receipt) {
+    Assert-P3GuardExactProperties -Value $Receipt -Expected $script:P3EmergencyReceiptProperties -Label 'emergency rollback receipt'
+    if ([string]$Receipt.schema -cne 'home-gateway/p3-peer-emergency-rollback/v2' -or
+        [string]$Receipt.payload_sha256 -cne [string]$Context.PayloadSHA256 -or
+        [string]$Receipt.protocol_sha256 -cne [string]$Context.ProtocolSHA256 -or
+        [string]$Receipt.manifest_sha256 -cne [string]$Context.ManifestSHA256 -or
+        [string]$Receipt.install_receipt_sha256 -cne [string]$Context.InstallReceiptSHA256 -or
+        [string]$Receipt.candidate_receipt_sha256 -cne [string]$Request.candidate_receipt_sha256 -or
+        [string]$Receipt.rollback_plan_sha256 -cne [string]$Request.rollback_plan_sha256 -or
+        [string]$Receipt.candidate_fingerprint_sha256 -cne [string]$Request.candidate_fingerprint_sha256 -or
+        -not [bool]$Receipt.one_syncconf -or -not [bool]$Receipt.restored -or
+        [int]$Receipt.temporary_leftover_count -ne 0) { throw 'emergency rollback receipt binding differs' }
     return $Receipt
 }
 
 function Invoke-P3BoundedJsonSsh([object]$Context, [object]$Request, [int]$TimeoutSeconds, [int]$MaximumBytes, [scriptblock]$Runner) {
     $null = Test-P3PreliveInputs -Context $Context -NowUtc ([DateTime]::UtcNow)
+    Assert-P3GuardExternalFiles -Context $Context
     if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 190 -or $MaximumBytes -lt 256 -or $MaximumBytes -gt 65536) { throw 'bounded SSH limits differ' }
     if ($null -eq $Runner) { $Runner = $script:P3NativeJsonRunner }
     $operation = if ($Request.PSObject.Properties.Name -contains 'operation') { [string]$Request.operation } else { '' }
@@ -271,6 +320,7 @@ function Invoke-P3BoundedJsonSsh([object]$Context, [object]$Request, [int]$Timeo
     try { $receipt = ConvertFrom-Json -InputObject ([string]$result.StdOut) -ErrorAction Stop } catch { throw 'bounded SSH receipt is malformed' }
     if ([string]$Request.mode -ceq 'reconcile') { return Assert-P3ReconcileReceipt -Context $Context -Request $Request -Receipt $receipt }
     if ([string]$Request.mode -ceq 'client-observe') { return Assert-P3ClientReceipt -Context $Context -Request $Request -Receipt $receipt }
+    if ([string]$Request.mode -ceq 'emergency-rollback') { return Assert-P3EmergencyReceipt -Context $Context -Request $Request -Receipt $receipt }
     return $receipt
 }
 
@@ -298,6 +348,7 @@ function Assert-P3CandidateEvent([object]$Context, [object]$Request, [object]$Ev
 
 function Invoke-P3GuardStream([object]$Context, [string]$Operation, [string]$Nonce, [scriptblock]$Runner) {
     $null = Test-P3PreliveInputs -Context $Context -NowUtc ([DateTime]::UtcNow)
+    Assert-P3GuardExternalFiles -Context $Context
     $request = New-P3RemoteRequest -Context $Context -Mode 'guard' -Operation $Operation -Nonce $Nonce
     $arguments = New-P3GuardSshArguments -Context $Context -Mode 'guard' -Operation $Operation
     $inputJson = ConvertTo-Json -InputObject $request -Depth 32 -Compress
@@ -352,24 +403,45 @@ function Invoke-P3GuardStream([object]$Context, [string]$Operation, [string]$Non
 
 function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt, [object]$CurrentReceipt) {
     $null = Test-P3PreliveInputs -Context $Context -NowUtc ([DateTime]::UtcNow)
+    Assert-P3GuardExactProperties -Value $CandidateReceipt -Expected $script:P3LocalGuardProperties -Label 'candidate receipt'
+    Assert-P3GuardExactProperties -Value $CurrentReceipt -Expected $script:P3RollbackObservationProperties -Label 'rollback observation'
     foreach ($name in @('candidate_fingerprint_sha256', 'post_peer_set_sha256', 'pre_peer_set_sha256')) { Assert-P3GuardSHA256 -Value ([string]$CandidateReceipt.$name) -Label $name }
-    if (-not [bool]$CurrentReceipt.exact_plus_one -or [string]$CurrentReceipt.candidate_fingerprint_sha256 -cne [string]$CandidateReceipt.candidate_fingerprint_sha256 -or
-        [string]$CurrentReceipt.post_peer_set_sha256 -cne [string]$CandidateReceipt.post_peer_set_sha256) { throw 'emergency rollback current candidate differs' }
+    $candidateReceiptSHA256 = Get-P3GuardCanonicalSHA256 $CandidateReceipt
+    if ([string]$CurrentReceipt.schema -cne 'home-gateway/p3-peer-rollback-observation/v2' -or
+        [string]$CurrentReceipt.candidate_receipt_sha256 -cne $candidateReceiptSHA256 -or
+        [string]$CurrentReceipt.candidate_fingerprint_sha256 -cne [string]$CandidateReceipt.candidate_fingerprint_sha256 -or
+        [string]$CurrentReceipt.peer_set_sha256 -cne [string]$CandidateReceipt.post_peer_set_sha256 -or
+        [string]$CurrentReceipt.live_peer_set_sha256 -cne [string]$CandidateReceipt.post_peer_set_sha256) { throw 'emergency rollback current candidate differs' }
+    $prePeers = @($Context.ExpectedPeerFingerprints | Sort-Object)
+    $postPeers = @($CurrentReceipt.peer_fingerprint_sha256 | Sort-Object)
+    if ($postPeers.Count -ne ($prePeers.Count + 1) -or @($postPeers | Where-Object { $_ -notin ($prePeers + @([string]$CandidateReceipt.candidate_fingerprint_sha256)) }).Count -ne 0) { throw 'emergency rollback peer delta differs' }
     $identity = [pscustomobject][ordered]@{
-        schema = 'home-gateway/p3-emergency-rollback-plan/v2'
         manifest_sha256 = [string]$Context.ManifestSHA256
         payload_sha256 = [string]$Context.PayloadSHA256
         protocol_sha256 = [string]$Context.ProtocolSHA256
         install_receipt_sha256 = [string]$Context.InstallReceiptSHA256
-        candidate_receipt_sha256 = Get-P3GuardCanonicalSHA256 $CandidateReceipt
+        candidate_receipt_sha256 = $candidateReceiptSHA256
         candidate_fingerprint_sha256 = [string]$CandidateReceipt.candidate_fingerprint_sha256
-        pre_peer_set_sha256 = [string]$CandidateReceipt.pre_peer_set_sha256
-        post_peer_set_sha256 = [string]$CandidateReceipt.post_peer_set_sha256
-        rollback_scope = 'one-exact-candidate'
-        expected_syncconf_count = 1
+        pre_peer_fingerprint_sha256 = $prePeers
+        post_peer_fingerprint_sha256 = $postPeers
+        baseline_peer_set_sha256 = [string]$CandidateReceipt.pre_peer_set_sha256
+        persistent_config_path = [string]$Context.Rollback.persistent_config_path
+        metadata_path = [string]$Context.Rollback.metadata_path
+        temporary_path = [string]$Context.Rollback.temporary_path
+        syncconf_path = [string]$Context.Rollback.syncconf_path
+        prepared_syncconf_sha256 = [string]$CurrentReceipt.prepared_syncconf_sha256
+        pre_persistent_config_sha256 = [string]$CurrentReceipt.persistent_config_sha256
+        pre_live_peer_set_sha256 = [string]$CurrentReceipt.live_peer_set_sha256
+        pre_metadata_sha256 = [string]$CurrentReceipt.metadata_sha256
+        pre_temporary_state_sha256 = [string]$CurrentReceipt.temporary_state_sha256
+        pre_runtime_identity_sha256 = [string]$CurrentReceipt.runtime_identity_sha256
+        baseline_persistent_config_sha256 = [string]$Context.BaselinePersistentConfigSHA256
+        baseline_metadata_sha256 = [string]$Context.BaselineMetadataSHA256
+        baseline_temporary_state_sha256 = [string]$Context.BaselineTemporaryStateSHA256
+        baseline_runtime_identity_sha256 = [string]$Context.BaselineRuntimeIdentitySHA256
     }
     $hash = Get-P3GuardCanonicalSHA256 $identity
-    $result = [ordered]@{}
+    $result = [ordered]@{ schema = 'home-gateway/p3-emergency-rollback-plan/v2' }
     foreach ($property in $identity.PSObject.Properties) { $result[$property.Name] = $property.Value }
     $result.plan_sha256 = $hash
     $result.confirmation_challenge = 'P3-EMERGENCY-ROLLBACK-' + $hash.Substring(0, 16).ToUpperInvariant()
@@ -377,7 +449,13 @@ function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt
 }
 
 function Invoke-P3EmergencyRollback([object]$Context, [object]$Plan, [string]$ExpectedPlanSHA256, [string]$Confirmation, [scriptblock]$Runner) {
-    if ([string]$Plan.plan_sha256 -cne $ExpectedPlanSHA256 -or $Confirmation -cne [string]$Plan.confirmation_challenge -or
+    $identity = [ordered]@{}
+    foreach ($property in $Plan.PSObject.Properties) {
+        if ($property.Name -notin @('schema', 'plan_sha256', 'confirmation_challenge')) { $identity[$property.Name] = $property.Value }
+    }
+    $computed = Get-P3GuardCanonicalSHA256 ([pscustomobject]$identity)
+    if ([string]$Plan.schema -cne 'home-gateway/p3-emergency-rollback-plan/v2' -or $computed -cne [string]$Plan.plan_sha256 -or
+        [string]$Plan.plan_sha256 -cne $ExpectedPlanSHA256 -or $Confirmation -cne [string]$Plan.confirmation_challenge -or
         $Confirmation -cnotmatch '^P3-EMERGENCY-ROLLBACK-[0-9A-F]{16}$') { throw 'emergency rollback approval differs' }
     $nonce = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).ToLowerInvariant()
     $request = New-P3RemoteRequest -Context $Context -Mode 'emergency-rollback' -Operation '' -Nonce $nonce -RollbackPlan $Plan
@@ -444,22 +522,48 @@ function Get-P3PreliveContext([string]$RuntimeRoot, [string]$ExpectedManifestSHA
     $null = Invoke-P3RuntimeValidate -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256
     $trust = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'trust.json') -MaximumBytes 65536 -ExpectedProperties $script:P3TrustProperties
     $manifest = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
-    $cloud = ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $RuntimeRoot 'cloud-firewall-receipt.json'), [Text.UTF8Encoding]::new($false, $true)))
-    $local = ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $RuntimeRoot 'local-baseline-receipt.json'), [Text.UTF8Encoding]::new($false, $true)))
-    $agent = ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $RuntimeRoot 'agent-receipt.json'), [Text.UTF8Encoding]::new($false, $true)))
-    $install = ConvertFrom-Json ([IO.File]::ReadAllText((Join-Path $RuntimeRoot 'remote-install-receipt.json'), [Text.UTF8Encoding]::new($false, $true)))
+    $cloud = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'cloud-firewall-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CloudFirewallReceiptProperties
+    $local = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'local-baseline-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3LocalBaselineReceiptProperties
+    $egressReceipt = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'egress-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3EgressReceiptProperties
+    $agent = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'agent-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CombinedAgentReceiptProperties
+    $install = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'remote-install-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3InstallReceiptProperties
     if ($trust.PSObject.Properties.Name -notcontains 'accepted_server_baseline') { throw 'protected trust lacks accepted server baseline details' }
     $baseline = $trust.accepted_server_baseline
-    $egress = @(); foreach ($authority in @($trust.egress_authority_sha256)) { $egress += [pscustomobject]@{ authority_sha256 = $authority; source_cidr_sha256 = $trust.management_source_cidr_sha256 } }
+    $egress = @()
+    foreach ($observation in @($egressReceipt.observations)) {
+        Assert-P3ExactProperties -Value $observation -ExpectedProperties $script:P3EgressObservationProperties -Label 'egress observation'
+        $egress += [pscustomobject]@{ authority_sha256 = [string]$observation.authority_sha256; source_cidr_sha256 = [string]$observation.source_cidr_sha256 }
+    }
+    $peerFingerprints = @($baseline.peer_fingerprint_sha256)
+    $peerSetSHA256 = [string]$baseline.persistent_peer_set_sha256
+    if ([string]$baseline.live_peer_set_sha256 -cne $peerSetSHA256 -or [string]$baseline.metadata_peer_set_sha256 -cne $peerSetSHA256) { throw 'accepted peer set convergence differs' }
+    $external = @(
+        @($trust.known_hosts_path, $manifest.known_hosts_sha256, 'known-hosts'),
+        @($trust.git_ssh_path, $manifest.git_ssh_sha256, 'Git ssh'),
+        @($trust.git_scp_path, $manifest.git_scp_sha256, 'Git scp'),
+        @($trust.local_payload_path, $manifest.local_payload_sha256, 'local payload')
+    )
+    foreach ($entry in $external) { if ((Get-P3ExactFileSHA256 -Path $entry[0] -Label $entry[2]) -cne $entry[1]) { throw "$($entry[2]) context hash differs" } }
     return [pscustomobject]@{
         ManifestSHA256 = $ExpectedManifestSHA256; PayloadSHA256 = $manifest.local_payload_sha256; ProtocolSHA256 = $manifest.protocol_sha256
         InstallReceiptSHA256 = Get-P3GuardCanonicalSHA256 $install; ExpectedServerBaselineSHA256 = $manifest.accepted_server_baseline_sha256
         ExpectedCloudFirewallSHA256 = $manifest.accepted_cloud_firewall_sha256; ExpectedContainerIdentitySHA256 = $baseline.container_identity_sha256
         ExpectedImageIdentitySHA256 = $baseline.image_identity_sha256; ExpectedUdpPublicationSHA256 = $baseline.udp_publication_sha256
         ExpectedListenerIdentitySHA256 = $baseline.listener_identity_sha256; ExpectedHostPolicySHA256 = $baseline.host_policy_sha256
-        ExpectedPeerCount = $baseline.peer_count; ExpectedPeerSetSHA256 = $baseline.peer_set_sha256
-        Trust = [pscustomobject]@{ ssh_user = $trust.ssh_user; ssh_host = $trust.ssh_host; known_hosts_path = $trust.known_hosts_path; git_ssh_path = $trust.git_ssh_path; management_source_cidr_sha256 = $trust.management_source_cidr_sha256; egress = $egress }
-        Agent = $agent; Install = $install; CloudFirewall = $cloud; LocalBaseline = $local; Rollback = $trust.rollback_paths
+        ExpectedIPv6PolicySHA256 = $baseline.ipv6_policy_sha256
+        ExpectedPeerCount = $peerFingerprints.Count; ExpectedPeerSetSHA256 = $peerSetSHA256; ExpectedPeerFingerprints = $peerFingerprints
+        BaselinePersistentConfigSHA256 = $baseline.persistent_config_sha256; BaselineMetadataSHA256 = $baseline.metadata_sha256
+        BaselineTemporaryStateSHA256 = $baseline.temporary_state_sha256; BaselineRuntimeIdentitySHA256 = $baseline.runtime_identity_sha256
+        Trust = [pscustomobject]@{
+            ssh_user = $trust.ssh_user; ssh_host = $trust.ssh_host
+            known_hosts_path = $trust.known_hosts_path; known_hosts_sha256 = $manifest.known_hosts_sha256
+            git_ssh_path = $trust.git_ssh_path; git_ssh_sha256 = $manifest.git_ssh_sha256
+            git_scp_path = $trust.git_scp_path; git_scp_sha256 = $manifest.git_scp_sha256
+            local_payload_path = $trust.local_payload_path; local_payload_sha256 = $manifest.local_payload_sha256
+            management_source_cidr_sha256 = $trust.management_source_cidr_sha256; egress = $egress
+        }
+        Agent = $agent; Install = $install; CloudFirewall = $cloud; LocalBaseline = $local
+        EgressReceipt = $egressReceipt; Rollback = $trust.rollback_paths; ExternalFilesBound = $true
     }
 }
 
@@ -478,8 +582,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         'ClientObserve' {
             $input = ConvertFrom-Json ([Console]::In.ReadToEnd())
             $request = New-P3RemoteRequest -Context $context -Mode 'client-observe' -Operation '' -Nonce ([string]$input.nonce) `
-                -SelectedGuestFingerprintSHA256 ([string]$input.selected_guest_fingerprint_sha256) -PreviousNonceSHA256 ([string]$input.previous_nonce_sha256) `
-                -ExpectedBeforeCounterSHA256 ([string]$input.expected_before_counter_sha256) -ExpectedAfterCounterSHA256 ([string]$input.expected_after_counter_sha256)
+                -SelectedGuestFingerprintSHA256 ([string]$input.selected_guest_fingerprint_sha256) -PreviousNonceSHA256 ([string]$input.previous_nonce_sha256)
             Invoke-P3BoundedJsonSsh -Context $context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $null | ConvertTo-Json -Compress
         }
         'EmergencyRollbackPlan' {

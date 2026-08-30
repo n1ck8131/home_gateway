@@ -16,6 +16,7 @@ guard = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = guard
 SPEC.loader.exec_module(guard)
+PAYLOAD = guard.own_payload_sha256()
 
 EXPECTED_PROTOCOL = {
     "schema": "home-gateway/p3-peer-guard-protocol/v2",
@@ -50,6 +51,7 @@ def server_snapshot(*, peers=None, classes=None, **changes):
         "host_policy_loaded": True,
         "host_policy_sha256": "6" * 64,
         "ipv6_non_mutation": True,
+        "ipv6_policy_sha256": "8" * 64,
         "peer_fingerprint_sha256": list(peers),
         "peer_classes": dict(classes),
         "persistent_peer_set_sha256": sha(sorted(peers)),
@@ -59,7 +61,7 @@ def server_snapshot(*, peers=None, classes=None, **changes):
         "temporary_leftover_count": 0,
         "atomic_leftover_count": 0,
         "firewall_identity_sha256": "7" * 64,
-        "payload_sha256": "a" * 64,
+        "payload_sha256": PAYLOAD,
         "protocol_sha256": sha(EXPECTED_PROTOCOL),
     }
     result.update(changes)
@@ -80,6 +82,7 @@ def server_identity(snapshot):
         "host_policy_loaded",
         "host_policy_sha256",
         "ipv6_non_mutation",
+        "ipv6_policy_sha256",
         "peer_fingerprint_sha256",
         "persistent_peer_set_sha256",
         "live_peer_set_sha256",
@@ -99,7 +102,7 @@ def reconcile_request(snapshot=None):
     return {
         "schema": "home-gateway/p3-peer-guard-request/v2",
         "mode": "reconcile",
-        "payload_sha256": "a" * 64,
+        "payload_sha256": PAYLOAD,
         "protocol_sha256": sha(EXPECTED_PROTOCOL),
         "manifest_sha256": "b" * 64,
         "install_receipt_sha256": "c" * 64,
@@ -112,6 +115,11 @@ def reconcile_request(snapshot=None):
         "expected_peer_count": len(snapshot["peer_fingerprint_sha256"]),
         "expected_peer_set_sha256": sha(sorted(snapshot["peer_fingerprint_sha256"])),
         "expected_server_baseline_sha256": server_identity(snapshot),
+        "expected_firewall_identity_sha256": snapshot["firewall_identity_sha256"],
+        "expected_ipv6_policy_sha256": snapshot["ipv6_policy_sha256"],
+        "persistent_config_path": "/opt/amnezia/awg/wg0.conf",
+        "metadata_path": "/opt/amnezia/awg/peers.json",
+        "temporary_path": "/run/home-gateway-p3-peer-guard/candidate.tmp",
     }
 
 
@@ -128,7 +136,7 @@ def client_request(before, after):
     return {
         "schema": "home-gateway/p3-peer-guard-request/v2",
         "mode": "client-observe",
-        "payload_sha256": "a" * 64,
+        "payload_sha256": PAYLOAD,
         "protocol_sha256": sha(EXPECTED_PROTOCOL),
         "manifest_sha256": "b" * 64,
         "install_receipt_sha256": "c" * 64,
@@ -136,8 +144,6 @@ def client_request(before, after):
         "previous_nonce_sha256": "e" * 64,
         "selected_guest_fingerprint_sha256": "f" * 64,
         "maximum_handshake_age_seconds": 180,
-        "expected_before_counter_sha256": sha(before["counter_state"]),
-        "expected_after_counter_sha256": sha(after["counter_state"]),
     }
 
 
@@ -210,6 +216,27 @@ class PeerGuardProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "replayed nonce"):
             guard.validate_request("client-observe", replay)
 
+    def test_every_mode_rejects_installed_payload_drift_before_dispatch(self):
+        before = {"counter_state": {"rx": 1, "tx": 2}}
+        after = {"counter_state": {"rx": 2, "tx": 4}}
+        requests = {
+            "attest": {
+                key: reconcile_request()[key] for key in guard.COMMON_REQUEST_KEYS
+            },
+            "reconcile": reconcile_request(),
+            "guard": guard_request(),
+            "client-observe": client_request(before, after),
+            "emergency-rollback": ClientObserveAndRollbackTests().rollback_request(),
+        }
+        requests["attest"]["mode"] = "attest"
+        with mock.patch.object(guard, "own_payload_sha256", return_value="0" * 64):
+            for mode, request in requests.items():
+                with (
+                    self.subTest(mode=mode),
+                    self.assertRaisesRegex(ValueError, "payload"),
+                ):
+                    guard.validate_request(mode, request)
+
     def test_reconcile_returns_only_sanitized_exact_aggregates(self):
         snapshot = server_snapshot(raw_peer="raw-peer", raw_network="172.18.0.1")
         receipt = guard.run_reconcile(
@@ -260,6 +287,54 @@ class PeerGuardProtocolTests(unittest.TestCase):
                 guard.run_checked_command(
                     command, runner=lambda *args, value=result: value
                 )
+
+    def test_system_collector_uses_independent_persistent_live_metadata_and_temp_sources(
+        self,
+    ):
+        public_key = "synthetic-baseline-key"
+        fingerprint = sha(public_key.encode())
+        ipv4 = b"*filter\nCOMMIT\n"
+        ipv6 = b"*filter\nCOMMIT\n"
+        outputs = {
+            ("/usr/bin/docker", "ps"): b"container|image|0.0.0.0:38556->38556/udp\n",
+            ("/usr/bin/docker", "inspect"): b"0|image-id\n",
+            ("/usr/bin/ss", "-H"): b"udp UNCONN 0 0 0.0.0.0:38556\n",
+            ("/usr/sbin/iptables-save",): ipv4,
+            ("/usr/sbin/ip6tables-save",): ipv6,
+            ("/usr/bin/systemctl",): b"active\n",
+            ("/usr/bin/awg", "show"): (public_key + "\n").encode(),
+        }
+
+        def runner(arguments, _timeout, _maximum):
+            key = tuple(arguments[:2])
+            if arguments[0] in {"/usr/sbin/iptables-save", "/usr/sbin/ip6tables-save"}:
+                key = (arguments[0],)
+            if arguments[0] == "/usr/bin/systemctl":
+                key = (arguments[0],)
+            return guard.CommandResult(0, outputs[key], b"")
+
+        files = {
+            "/opt/amnezia/awg/wg0.conf": f"[Interface]\nPrivateKey = omitted\n[Peer]\nPublicKey = {public_key}\n".encode(),
+            "/opt/amnezia/awg/peers.json": json.dumps(
+                {"peers": [{"public_key": public_key, "role": "baseline"}]}
+            ).encode(),
+        }
+        request = reconcile_request()
+        request["expected_ipv6_policy_sha256"] = sha(ipv6)
+        request["expected_firewall_identity_sha256"] = sha(ipv4 + b"\0" + ipv6)
+        snapshot = guard.collect_server_snapshot(
+            request,
+            runner=runner,
+            reader=lambda path, _maximum: files[str(path).replace("\\", "/")],
+            lister=lambda _path: [],
+        )
+        self.assertEqual(snapshot["peer_fingerprint_sha256"], [fingerprint])
+        self.assertEqual(snapshot["peer_classes"], {fingerprint: "baseline"})
+        self.assertEqual(snapshot["persistent_peer_set_sha256"], sha([fingerprint]))
+        self.assertEqual(snapshot["live_peer_set_sha256"], sha([fingerprint]))
+        self.assertEqual(snapshot["metadata_peer_set_sha256"], sha([fingerprint]))
+        self.assertTrue(snapshot["ipv6_non_mutation"])
+        self.assertEqual(snapshot["temporary_leftover_count"], 0)
 
 
 class PeerGuardStreamingTests(unittest.TestCase):
@@ -390,23 +465,40 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
                 )
 
     def rollback_request(self):
-        return {
+        request = {
             "schema": "home-gateway/p3-peer-guard-request/v2",
             "mode": "emergency-rollback",
-            "payload_sha256": "a" * 64,
+            "payload_sha256": PAYLOAD,
             "protocol_sha256": sha(EXPECTED_PROTOCOL),
             "manifest_sha256": "b" * 64,
             "install_receipt_sha256": "c" * 64,
             "nonce": "d" * 64,
             "candidate_receipt_sha256": "8" * 64,
-            "rollback_plan_sha256": "9" * 64,
-            "confirmation": "P3-EMERGENCY-ROLLBACK-0123456789ABCDEF",
             "candidate_fingerprint_sha256": "f" * 64,
+            "pre_peer_fingerprint_sha256": ["1" * 64],
+            "post_peer_fingerprint_sha256": ["1" * 64, "f" * 64],
+            "baseline_peer_set_sha256": sha(["1" * 64]),
             "persistent_config_path": "/opt/amnezia/awg/wg0.conf",
             "metadata_path": "/opt/amnezia/awg/peers.json",
             "temporary_path": "/run/home-gateway-p3-peer-guard/candidate.tmp",
             "syncconf_path": "/run/home-gateway-p3-peer-guard/awg.conf",
+            "prepared_syncconf_sha256": "9" * 64,
+            "pre_persistent_config_sha256": "2" * 64,
+            "pre_live_peer_set_sha256": sha(["1" * 64, "f" * 64]),
+            "pre_metadata_sha256": "3" * 64,
+            "pre_temporary_state_sha256": "4" * 64,
+            "pre_runtime_identity_sha256": "5" * 64,
+            "baseline_persistent_config_sha256": "6" * 64,
+            "baseline_metadata_sha256": "7" * 64,
+            "baseline_temporary_state_sha256": sha(b"ABSENT"),
+            "baseline_runtime_identity_sha256": "a" * 64,
         }
+        identity = {key: request[key] for key in guard.ROLLBACK_PLAN_KEYS}
+        request["rollback_plan_sha256"] = sha(identity)
+        request["confirmation"] = (
+            "P3-EMERGENCY-ROLLBACK-" + request["rollback_plan_sha256"][:16].upper()
+        )
+        return request
 
     def test_emergency_rollback_is_exact_candidate_bound_and_one_syncconf(self):
         calls = []
@@ -414,10 +506,14 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         def filesystem(action):
             calls.append((action["action"], action.get("candidate_fingerprint_sha256")))
             if action["action"] == "inspect":
-                return {"exact_plus_one": True, "candidate_unchanged": True}
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "remove":
+                return {"removed": True, "recovery_state": "opaque-test-token"}
             if action["action"] == "verify":
-                return {"restored": True, "temporary_leftover_count": 0}
-            return {"removed": True}
+                return guard.rollback_expected_observation(action, phase="baseline")
+            if action["action"] == "cleanup":
+                return {"cleaned": True}
+            raise AssertionError(action)
 
         receipt = guard.run_emergency_rollback(
             self.rollback_request(),
@@ -426,21 +522,70 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         )
         self.assertTrue(receipt["restored"])
         self.assertEqual(
-            [name for name, _ in calls], ["inspect", "remove", "syncconf", "verify"]
+            [name for name, _ in calls],
+            ["inspect", "remove", "syncconf", "verify", "cleanup"],
         )
 
     def test_emergency_rollback_revalidates_before_any_mutation(self):
         calls = []
-        with self.assertRaisesRegex(ValueError, "candidate"):
+        with self.assertRaisesRegex(ValueError, "pre observation"):
             guard.run_emergency_rollback(
                 self.rollback_request(),
                 lambda action: (
                     calls.append(action)
-                    or {"exact_plus_one": False, "candidate_unchanged": True}
+                    or {
+                        **guard.rollback_expected_observation(action, phase="pre"),
+                        "candidate_fingerprint_sha256": "0" * 64,
+                    }
                 ),
                 lambda path: calls.append(path),
             )
         self.assertEqual(len(calls), 1)
+
+    def test_emergency_rollback_recomputes_plan_and_rejects_every_bound_mutation(self):
+        original = self.rollback_request()
+        for field in sorted(guard.ROLLBACK_PLAN_KEYS):
+            mutated = copy.deepcopy(original)
+            value = mutated[field]
+            if isinstance(value, list):
+                mutated[field] = value + ["0" * 64]
+            elif isinstance(value, str) and len(value) == 64:
+                mutated[field] = "0" * 64
+            else:
+                mutated[field] = str(value) + ".drift"
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                guard.validate_request("emergency-rollback", mutated)
+
+    def test_emergency_rollback_recovers_pre_state_when_syncconf_fails(self):
+        calls = []
+
+        def filesystem(action):
+            calls.append(action["action"])
+            if action["action"] == "inspect":
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "remove":
+                return {"removed": True, "recovery_state": "opaque-test-token"}
+            if action["action"] == "recover":
+                self.assertEqual(action["recovery_state"], "opaque-test-token")
+                return {
+                    "recovered": True,
+                    "recovery_syncconf_path": action["syncconf_path"],
+                }
+            if action["action"] == "verify-recovery":
+                return guard.rollback_expected_observation(action, phase="pre")
+            raise AssertionError(action)
+
+        sync_calls = []
+
+        def syncconf(path):
+            sync_calls.append(str(path))
+            if len(sync_calls) == 1:
+                raise RuntimeError("synthetic sync failure")
+
+        with self.assertRaisesRegex(RuntimeError, "rollback failed atomically"):
+            guard.run_emergency_rollback(self.rollback_request(), filesystem, syncconf)
+        self.assertEqual(calls, ["inspect", "remove", "recover", "verify-recovery"])
+        self.assertEqual(len(sync_calls), 2)
 
     def test_main_dispatches_client_and_emergency_modes_to_fixed_adapters(self):
         before, after = self.client_states()

@@ -22,6 +22,12 @@ Describe 'P3 protected pre-live runtime' {
             }
             $payloadHash = (Get-FileHash -LiteralPath $files.'guard.py' -Algorithm SHA256).Hash.ToLowerInvariant()
             $peerSetHash = Get-TestTextSHA256 ((ConvertTo-Json -Compress -InputObject @(('8' * 64))))
+            $cloudObservation = [pscustomobject][ordered]@{
+                schema = 'home-gateway/p3-prelive-cloud-firewall-observation/v1'
+                droplet_association_count = 1; tcp_22_management_source_count = 1
+                management_source_cidr_sha256 = ('2' * 64); udp_38556_all_ipv4_count = 1
+                udp_ipv6_count = 0; extra_inbound_rule_count = 0; observed_at_utc = [DateTime]::UtcNow.ToString('o')
+            }
             return [ordered]@{
                 schema = 'home-gateway/p3-prelive-trust-input/v1'
                 ssh_host = '192.0.2.10'
@@ -44,12 +50,15 @@ Describe 'P3 protected pre-live runtime' {
                     udp_publication_count = 1; udp_publication_sha256 = ('5' * 64)
                     public_listener_class_count = 2; listener_identity_sha256 = ('6' * 64)
                     host_policy_loaded = $true; host_policy_sha256 = ('7' * 64); ipv6_non_mutation = $true
+                    ipv6_policy_sha256 = ('b' * 64); persistent_config_sha256 = ('c' * 64)
+                    metadata_sha256 = ('d' * 64); temporary_state_sha256 = ('e' * 64)
+                    runtime_identity_sha256 = ('f' * 64); prepared_syncconf_sha256 = ('0' * 64)
                     peer_fingerprint_sha256 = @(('8' * 64)); persistent_peer_set_sha256 = $peerSetHash
                     live_peer_set_sha256 = $peerSetHash; metadata_peer_set_sha256 = $peerSetHash
                     candidate_leftover_count = 0; temporary_leftover_count = 0; atomic_leftover_count = 0
                     firewall_identity_sha256 = ('a' * 64); payload_sha256 = $payloadHash; protocol_sha256 = ('4' * 64)
                 }
-                accepted_cloud_firewall_sha256 = ('6' * 64)
+                accepted_cloud_firewall_sha256 = Get-P3CloudFirewallIdentitySHA256 $cloudObservation
                 rollback_paths = [ordered]@{
                     persistent_config_path = '/opt/amnezia/awg/wg0.conf'
                     metadata_path = '/opt/amnezia/awg/peers.json'
@@ -62,6 +71,7 @@ Describe 'P3 protected pre-live runtime' {
     }
 
     BeforeEach {
+        $script:Root = Join-Path $TestDrive ('protected-' + [guid]::NewGuid().ToString('N'))
         $script:Fixture = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $null = New-Item -ItemType Directory -Path $script:Fixture
         $script:Trust = New-TrustFixture -Root $script:Fixture
@@ -126,7 +136,7 @@ Describe 'P3 protected pre-live runtime' {
     }
 
     It 'records only an exact fresh owner-observed Cloud Firewall union' {
-        $receipt = New-P3CloudFirewallReceipt -Observation ([pscustomobject][ordered]@{
+        $observation = [pscustomobject][ordered]@{
             schema = 'home-gateway/p3-prelive-cloud-firewall-observation/v1'
             droplet_association_count = 1
             tcp_22_management_source_count = 1
@@ -135,23 +145,32 @@ Describe 'P3 protected pre-live runtime' {
             udp_ipv6_count = 0
             extra_inbound_rule_count = 0
             observed_at_utc = [DateTime]::UtcNow.ToString('o')
-        }) -ExpectedIdentitySHA256 ('6' * 64) -NowUtc ([DateTime]::UtcNow)
+        }
+        $identity = Get-P3CloudFirewallIdentitySHA256 $observation
+        $receipt = New-P3CloudFirewallReceipt -Observation $observation -ExpectedIdentitySHA256 $identity `
+            -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc ([DateTime]::UtcNow)
+        $receipt.cloud_firewall_identity_sha256 | Should -BeExactly $identity
         $receipt.owner_observed | Should -BeTrue
         $receipt.live_mutation_performed | Should -BeFalse
-        { New-P3CloudFirewallReceipt -Observation ([pscustomobject]@{
+        $invalidInbound = [pscustomobject]@{
             schema = 'home-gateway/p3-prelive-cloud-firewall-observation/v1'; droplet_association_count = 1
             tcp_22_management_source_count = 1; management_source_cidr_sha256 = ('2' * 64)
             udp_38556_all_ipv4_count = 1; udp_ipv6_count = 0; extra_inbound_rule_count = 1
             observed_at_utc = [DateTime]::UtcNow.ToString('o')
-        }) -ExpectedIdentitySHA256 ('6' * 64) -NowUtc ([DateTime]::UtcNow) } | Should -Throw '*inbound*'
+        }
+        { New-P3CloudFirewallReceipt -Observation $invalidInbound -ExpectedIdentitySHA256 (Get-P3CloudFirewallIdentitySHA256 $invalidInbound) `
+            -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc ([DateTime]::UtcNow) } | Should -Throw '*inbound*'
+        $observation.management_source_cidr_sha256 = ('f' * 64)
+        { New-P3CloudFirewallReceipt -Observation $observation -ExpectedIdentitySHA256 (Get-P3CloudFirewallIdentitySHA256 $observation) `
+            -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc ([DateTime]::UtcNow) } | Should -Throw '*management*'
     }
 
     It 'builds a sanitized local baseline from an injected read-only observer' {
         $profile = Join-Path $script:Fixture 'absent.conf'
         $receipt = New-P3LocalBaselineReceipt -ProtectedProfilePath $profile -NowUtc ([DateTime]::UtcNow) -AdapterRunner {
             @(
-                [pscustomobject]@{ Class = 'redshield' },
-                [pscustomobject]@{ Class = 'other' }
+                [pscustomobject]@{ InterfaceDescription = 'RedShield WireGuard Tunnel' },
+                [pscustomobject]@{ InterfaceDescription = 'Intel Ethernet Controller' }
             )
         }
         $receipt.protected_profile_absent | Should -BeTrue
@@ -159,5 +178,46 @@ Describe 'P3 protected pre-live runtime' {
         $receipt.redshield_class_count | Should -Be 1
         $receipt.PSObject.Properties.Name | Should -Not -Contain 'adapter_name'
         $receipt.live_mutation_performed | Should -BeFalse
+    }
+
+    It 'classifies realistic adapter descriptions and rejects ambiguous identities' {
+        (Get-P3AdapterClass 'RedShield Virtual Adapter') | Should -BeExactly 'redshield'
+        (Get-P3AdapterClass 'Cisco AnyConnect Secure Mobility Client Virtual Miniport Adapter') | Should -BeExactly 'cisco'
+        (Get-P3AdapterClass 'AmneziaWG Tunnel') | Should -BeExactly 'selfhosted'
+        (Get-P3AdapterClass 'Wintun Userspace Tunnel') | Should -BeExactly 'selfhosted'
+        (Get-P3AdapterClass 'WireGuard Tunnel') | Should -BeExactly 'selfhosted'
+        (Get-P3AdapterClass 'Intel Ethernet Controller') | Should -BeExactly 'other'
+        { Get-P3AdapterClass 'Cisco RedShield WireGuard Adapter' } | Should -Throw '*ambiguous*'
+        $profile = Join-Path $script:Fixture 'missing.conf'
+        $receipt = New-P3LocalBaselineReceipt -ProtectedProfilePath $profile -NowUtc ([DateTime]::UtcNow) -AdapterRunner {
+            @([pscustomobject]@{ InterfaceDescription = 'Cisco Secure Client' }, [pscustomobject]@{ InterfaceDescription = 'Cisco Secure Client' })
+        }
+        $receipt.cisco_class_count | Should -Be 2
+    }
+
+    It 'builds one fresh exact three-authority egress receipt from an injected HTTPS boundary' {
+        $authorities = @(('7' * 64), ('8' * 64), ('9' * 64))
+        $script:EgressCalls = 0
+        $receipt = New-P3EgressReceipt -ExpectedAuthoritySHA256 $authorities -ExpectedManagementSourceCIDRSHA256 ('2' * 64) `
+            -NowUtc ([DateTime]::UtcNow) -HttpsRunner {
+                param($authoritySHA256)
+                $script:EgressCalls++
+                [pscustomobject]@{ authority_sha256 = $authoritySHA256; source_cidr_sha256 = ('2' * 64); observed_at_utc = [DateTime]::UtcNow.ToString('o') }
+            }
+        $script:EgressCalls | Should -Be 3
+        @($receipt.observations).Count | Should -Be 3
+        $receipt.management_source_cidr_sha256 | Should -BeExactly ('2' * 64)
+        { New-P3EgressReceipt -ExpectedAuthoritySHA256 $authorities -ExpectedManagementSourceCIDRSHA256 ('2' * 64) `
+            -NowUtc ([DateTime]::UtcNow) -HttpsRunner { param($authoritySHA256) [pscustomobject]@{ authority_sha256=$authoritySHA256;source_cidr_sha256=('f'*64);observed_at_utc=[DateTime]::UtcNow.ToString('o') } } } |
+            Should -Throw '*source*'
+    }
+
+    It 'rejects a runtime ACL whose owner differs even when allow rules match' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        $null = Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+            -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge
+        Mock Get-Acl { $acl = New-P3RuntimeAcl; $acl.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-18')); $acl }
+        { Assert-P3ProtectedRuntimeRoot -Path $script:Root -CurrentSID ([Security.Principal.WindowsIdentity]::GetCurrent().User) } |
+            Should -Throw '*owner*'
     }
 }

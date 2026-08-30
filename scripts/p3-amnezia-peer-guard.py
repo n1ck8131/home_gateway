@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -55,6 +56,11 @@ RECONCILE_KEYS = COMMON_REQUEST_KEYS | {
     "expected_peer_count",
     "expected_peer_set_sha256",
     "expected_server_baseline_sha256",
+    "expected_firewall_identity_sha256",
+    "expected_ipv6_policy_sha256",
+    "persistent_config_path",
+    "metadata_path",
+    "temporary_path",
 }
 GUARD_KEYS = RECONCILE_KEYS | {
     "operation",
@@ -65,19 +71,40 @@ CLIENT_KEYS = COMMON_REQUEST_KEYS | {
     "previous_nonce_sha256",
     "selected_guest_fingerprint_sha256",
     "maximum_handshake_age_seconds",
-    "expected_before_counter_sha256",
-    "expected_after_counter_sha256",
 }
-ROLLBACK_KEYS = COMMON_REQUEST_KEYS | {
+ROLLBACK_PLAN_KEYS = {
+    "payload_sha256",
+    "protocol_sha256",
+    "manifest_sha256",
+    "install_receipt_sha256",
     "candidate_receipt_sha256",
-    "rollback_plan_sha256",
-    "confirmation",
     "candidate_fingerprint_sha256",
+    "pre_peer_fingerprint_sha256",
+    "post_peer_fingerprint_sha256",
+    "baseline_peer_set_sha256",
     "persistent_config_path",
     "metadata_path",
     "temporary_path",
     "syncconf_path",
+    "prepared_syncconf_sha256",
+    "pre_persistent_config_sha256",
+    "pre_live_peer_set_sha256",
+    "pre_metadata_sha256",
+    "pre_temporary_state_sha256",
+    "pre_runtime_identity_sha256",
+    "baseline_persistent_config_sha256",
+    "baseline_metadata_sha256",
+    "baseline_temporary_state_sha256",
+    "baseline_runtime_identity_sha256",
 }
+ROLLBACK_KEYS = (
+    COMMON_REQUEST_KEYS
+    | ROLLBACK_PLAN_KEYS
+    | {
+        "rollback_plan_sha256",
+        "confirmation",
+    }
+)
 SERVER_IDENTITY_KEYS = (
     "container_count",
     "container_running",
@@ -91,6 +118,7 @@ SERVER_IDENTITY_KEYS = (
     "host_policy_loaded",
     "host_policy_sha256",
     "ipv6_non_mutation",
+    "ipv6_policy_sha256",
     "peer_fingerprint_sha256",
     "persistent_peer_set_sha256",
     "live_peer_set_sha256",
@@ -113,6 +141,7 @@ class CommandResult:
 
 CommandRunner: TypeAlias = Callable[[Sequence[str], int, int], CommandResult]
 FileReader: TypeAlias = Callable[[pathlib.Path, int], bytes]
+FileLister: TypeAlias = Callable[[pathlib.Path], Sequence[pathlib.Path]]
 Collector: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
 Clock: TypeAlias = Callable[[], float]
 AtomicFilesystem: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
@@ -211,6 +240,8 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"request {name} differs")
     if request["protocol_sha256"] != public_protocol_sha256():
         raise ValueError("request protocol identity differs")
+    if request["payload_sha256"] != own_payload_sha256():
+        raise ValueError("request payload identity differs")
     nonce = request["nonce"]
     if not _is_sha256(nonce):
         raise ValueError("request nonce differs")
@@ -223,6 +254,8 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
             "expected_host_policy_sha256",
             "expected_peer_set_sha256",
             "expected_server_baseline_sha256",
+            "expected_firewall_identity_sha256",
+            "expected_ipv6_policy_sha256",
         ):
             if not _is_sha256(request[name]):
                 raise ValueError(f"request {name} differs")
@@ -241,12 +274,7 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(duration, int) or duration < 7 or duration > 180:
             raise ValueError("guard duration differs")
     if mode == "client-observe":
-        for name in (
-            "previous_nonce_sha256",
-            "selected_guest_fingerprint_sha256",
-            "expected_before_counter_sha256",
-            "expected_after_counter_sha256",
-        ):
+        for name in ("previous_nonce_sha256", "selected_guest_fingerprint_sha256"):
             if not _is_sha256(request[name]):
                 raise ValueError(f"request {name} differs")
         if request["previous_nonce_sha256"] == _sha(nonce.encode("utf-8")):
@@ -259,6 +287,17 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
             "candidate_receipt_sha256",
             "rollback_plan_sha256",
             "candidate_fingerprint_sha256",
+            "baseline_peer_set_sha256",
+            "prepared_syncconf_sha256",
+            "pre_persistent_config_sha256",
+            "pre_live_peer_set_sha256",
+            "pre_metadata_sha256",
+            "pre_temporary_state_sha256",
+            "pre_runtime_identity_sha256",
+            "baseline_persistent_config_sha256",
+            "baseline_metadata_sha256",
+            "baseline_temporary_state_sha256",
+            "baseline_runtime_identity_sha256",
         ):
             if not _is_sha256(request[name]):
                 raise ValueError(f"request {name} differs")
@@ -288,6 +327,28 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
                 or pathlib.PurePosixPath(*path.parts[: len(root.parts)]) != root
             ):
                 raise ValueError(f"emergency rollback {name} differs")
+        pre_peers = request["pre_peer_fingerprint_sha256"]
+        post_peers = request["post_peer_fingerprint_sha256"]
+        candidate = request["candidate_fingerprint_sha256"]
+        if (
+            not isinstance(pre_peers, list)
+            or not isinstance(post_peers, list)
+            or any(not _is_sha256(peer) for peer in pre_peers + post_peers)
+            or len(set(pre_peers)) != len(pre_peers)
+            or len(set(post_peers)) != len(post_peers)
+            or sorted(post_peers) != sorted(pre_peers + [candidate])
+            or candidate in pre_peers
+            or request["baseline_peer_set_sha256"] != _sha(sorted(pre_peers))
+            or request["pre_live_peer_set_sha256"] != _sha(sorted(post_peers))
+        ):
+            raise ValueError("emergency rollback peer delta differs")
+        plan_identity = {name: request[name] for name in ROLLBACK_PLAN_KEYS}
+        expected_plan = _sha(plan_identity)
+        if request["rollback_plan_sha256"] != expected_plan:
+            raise ValueError("emergency rollback plan identity differs")
+        expected_confirmation = "P3-EMERGENCY-ROLLBACK-" + expected_plan[:16].upper()
+        if request["confirmation"] != expected_confirmation:
+            raise ValueError("emergency rollback confirmation differs")
     return request
 
 
@@ -346,9 +407,9 @@ def _read_utf8_lines(data: bytes, label: str) -> list[str]:
 def collect_server_snapshot(
     request: dict[str, Any],
     runner: CommandRunner = _default_command_runner,
-    reader: FileReader | None = None,
+    reader: FileReader = lambda path, maximum: _read_atomic_file(path, maximum),
+    lister: FileLister = lambda path: tuple(path.iterdir()),
 ) -> dict[str, Any]:
-    del reader
     docker_rows = _read_utf8_lines(
         run_checked_command(
             [
@@ -396,14 +457,40 @@ def collect_server_snapshot(
         .strip()
         == "active"
     )
-    peer_lines = _read_utf8_lines(
+    live_peer_lines = _read_utf8_lines(
         run_checked_command(
             ["/usr/bin/awg", "show", "all", "public-keys"], runner=runner
         ),
         "peer observation",
     )
-    peers = sorted(_sha(line.encode("utf-8")) for line in peer_lines)
-    peer_set = _sha(peers)
+    live_peers = sorted(_sha(line.encode("utf-8")) for line in live_peer_lines)
+    config_path = pathlib.Path(request["persistent_config_path"])
+    metadata_path = pathlib.Path(request["metadata_path"])
+    temporary_path = pathlib.Path(request["temporary_path"])
+    config_text = reader(config_path, 1048576).decode("utf-8", errors="strict")
+    _, blocks = _config_peer_blocks(config_text)
+    persistent_peers = sorted(
+        fingerprint
+        for fingerprint in (_block_fingerprint(block) for block in blocks)
+        if fingerprint is not None
+    )
+    metadata_value = json.loads(
+        reader(metadata_path, 1048576).decode("utf-8", errors="strict")
+    )
+    rows, _ = _metadata_rows(metadata_value)
+    metadata_peers = sorted(_row_fingerprint(row) for row in rows)
+    peer_classes: dict[str, str] = {}
+    for row in rows:
+        fingerprint = _row_fingerprint(row)
+        role = row.get("role")
+        if role not in {"baseline", "admin", "guest"} or fingerprint in peer_classes:
+            raise ValueError("peer metadata classification differs")
+        peer_classes[fingerprint] = role
+    leftovers = [path.name for path in lister(temporary_path.parent)]
+    candidate_leftovers = sum("candidate" in name for name in leftovers)
+    atomic_leftovers = sum(".p3-next-" in name for name in leftovers)
+    temporary_leftovers = int(temporary_path.name in leftovers)
+    firewall_identity = _sha(ipv4_policy + b"\0" + ipv6_policy)
     return {
         "container_count": 1,
         "container_running": True,
@@ -418,18 +505,20 @@ def collect_server_snapshot(
         "listener_identity_sha256": _sha(listener_bytes),
         "host_policy_loaded": policy_loaded,
         "host_policy_sha256": _sha(ipv4_policy),
-        "ipv6_non_mutation": len(ipv6_policy) >= 0,
-        "peer_fingerprint_sha256": peers,
-        "peer_classes": {peer: "observed" for peer in peers},
-        "persistent_peer_set_sha256": peer_set,
-        "live_peer_set_sha256": peer_set,
-        "metadata_peer_set_sha256": peer_set,
-        "candidate_leftover_count": 0,
-        "temporary_leftover_count": 0,
-        "atomic_leftover_count": 0,
-        "firewall_identity_sha256": _sha(ipv4_policy + b"\0" + ipv6_policy),
-        "payload_sha256": request["payload_sha256"],
-        "protocol_sha256": request["protocol_sha256"],
+        "ipv6_non_mutation": _sha(ipv6_policy)
+        == request["expected_ipv6_policy_sha256"],
+        "ipv6_policy_sha256": _sha(ipv6_policy),
+        "peer_fingerprint_sha256": live_peers,
+        "peer_classes": peer_classes,
+        "persistent_peer_set_sha256": _sha(persistent_peers),
+        "live_peer_set_sha256": _sha(live_peers),
+        "metadata_peer_set_sha256": _sha(metadata_peers),
+        "candidate_leftover_count": candidate_leftovers,
+        "temporary_leftover_count": temporary_leftovers,
+        "atomic_leftover_count": atomic_leftovers,
+        "firewall_identity_sha256": firewall_identity,
+        "payload_sha256": own_payload_sha256(),
+        "protocol_sha256": public_protocol_sha256(),
     }
 
 
@@ -485,6 +574,13 @@ def _validate_baseline_snapshot(
         raise ValueError("host policy loaded state differs")
     if snapshot.get("ipv6_non_mutation") is not True:
         raise ValueError("IPv6 non-mutation state differs")
+    if snapshot.get("ipv6_policy_sha256") != request["expected_ipv6_policy_sha256"]:
+        raise ValueError("IPv6 policy identity differs")
+    if (
+        snapshot.get("firewall_identity_sha256")
+        != request["expected_firewall_identity_sha256"]
+    ):
+        raise ValueError("firewall identity differs")
     peers = snapshot.get("peer_fingerprint_sha256")
     if not isinstance(peers, list) or any(not _is_sha256(peer) for peer in peers):
         raise ValueError("peer set schema differs")
@@ -554,9 +650,7 @@ def _reconcile_receipt(
 
 def run_reconcile(request: dict[str, Any], collector: Collector) -> dict[str, Any]:
     validate_request("reconcile", request)
-    snapshot = collector(
-        {"mode": "reconcile", "nonce_sha256": _sha(request["nonce"].encode())}
-    )
+    snapshot = collector(dict(request))
     _validate_baseline_snapshot(request, snapshot)
     return _reconcile_receipt(request, snapshot)
 
@@ -656,7 +750,7 @@ def run_guard(
     validate_request("guard", request)
     if request["operation"] != operation:
         raise ValueError("guard operation binding differs")
-    baseline = collector({"mode": "guard", "phase": "baseline"})
+    baseline = collector({**request, "phase": "baseline"})
     _validate_baseline_snapshot(request, baseline)
     reconcile = _reconcile_receipt(request, baseline)
     yield {
@@ -675,7 +769,7 @@ def run_guard(
         if not _bounded_sleep(clock, deadline, PUBLIC_PROTOCOL["poll_seconds"]):
             yield _stopped_event(request, "TIMEOUT")
             return
-        first = collector({"mode": "guard", "phase": "candidate"})
+        first = collector({**request, "phase": "candidate"})
         state, candidate = _candidate_state(baseline, first, operation)
         if state == "invalid":
             yield _stopped_event(request, "DELTA_INVALID")
@@ -685,7 +779,7 @@ def run_guard(
         if not _bounded_sleep(clock, deadline, PUBLIC_PROTOCOL["stable_seconds"]):
             yield _stopped_event(request, "TIMEOUT")
             return
-        second = collector({"mode": "guard", "phase": "stability"})
+        second = collector({**request, "phase": "stability"})
         second_state, second_candidate = _candidate_state(baseline, second, operation)
         if second_state == "invalid":
             yield _stopped_event(request, "DELTA_INVALID")
@@ -759,13 +853,9 @@ def run_client_observe(
     }
     before = collector({**observation_request, "phase": "before"})
     before_hash = _validate_client_state(before, request, "before")
-    if before_hash != request["expected_before_counter_sha256"]:
-        raise ValueError("before counter identity differs")
     _clock_sleep(clock, 10)
     after = collector({**observation_request, "phase": "after"})
     after_hash = _validate_client_state(after, request, "after")
-    if after_hash != request["expected_after_counter_sha256"]:
-        raise ValueError("after counter identity differs")
     before_counters = before["counter_state"]
     after_counters = after["counter_state"]
     if (
@@ -790,6 +880,69 @@ def run_client_observe(
     }
 
 
+ROLLBACK_OBSERVATION_KEYS = {
+    "schema",
+    "candidate_receipt_sha256",
+    "candidate_fingerprint_sha256",
+    "peer_fingerprint_sha256",
+    "peer_set_sha256",
+    "persistent_config_sha256",
+    "live_peer_set_sha256",
+    "metadata_sha256",
+    "temporary_state_sha256",
+    "runtime_identity_sha256",
+    "prepared_syncconf_sha256",
+}
+
+
+def rollback_expected_observation(
+    request: dict[str, Any], *, phase: str
+) -> dict[str, Any]:
+    if phase == "pre":
+        peers = request["post_peer_fingerprint_sha256"]
+        values = (
+            request["pre_persistent_config_sha256"],
+            request["pre_live_peer_set_sha256"],
+            request["pre_metadata_sha256"],
+            request["pre_temporary_state_sha256"],
+            request["pre_runtime_identity_sha256"],
+        )
+    elif phase == "baseline":
+        peers = request["pre_peer_fingerprint_sha256"]
+        values = (
+            request["baseline_persistent_config_sha256"],
+            request["baseline_peer_set_sha256"],
+            request["baseline_metadata_sha256"],
+            request["baseline_temporary_state_sha256"],
+            request["baseline_runtime_identity_sha256"],
+        )
+    else:
+        raise ValueError("rollback observation phase differs")
+    return {
+        "schema": "home-gateway/p3-peer-rollback-observation/v2",
+        "candidate_receipt_sha256": request["candidate_receipt_sha256"],
+        "candidate_fingerprint_sha256": request["candidate_fingerprint_sha256"],
+        "peer_fingerprint_sha256": sorted(peers),
+        "peer_set_sha256": _sha(sorted(peers)),
+        "persistent_config_sha256": values[0],
+        "live_peer_set_sha256": values[1],
+        "metadata_sha256": values[2],
+        "temporary_state_sha256": values[3],
+        "runtime_identity_sha256": values[4],
+        "prepared_syncconf_sha256": request["prepared_syncconf_sha256"],
+    }
+
+
+def _require_rollback_observation(
+    actual: dict[str, Any], expected: dict[str, Any], label: str
+) -> None:
+    if not isinstance(actual, dict):
+        raise TypeError(f"emergency rollback {label} observation differs")
+    _require_exact_keys(actual, ROLLBACK_OBSERVATION_KEYS)
+    if actual != expected:
+        raise ValueError(f"emergency rollback {label} observation differs")
+
+
 def run_emergency_rollback(
     request: dict[str, Any],
     filesystem: AtomicFilesystem,
@@ -797,32 +950,67 @@ def run_emergency_rollback(
 ) -> dict[str, Any]:
     validate_request("emergency-rollback", request)
     candidate = request["candidate_fingerprint_sha256"]
-    file_context = {
-        "candidate_fingerprint_sha256": candidate,
-        "persistent_config_path": request["persistent_config_path"],
-        "metadata_path": request["metadata_path"],
-        "temporary_path": request["temporary_path"],
-    }
+    file_context = {name: request[name] for name in ROLLBACK_PLAN_KEYS}
     inspected = filesystem({"action": "inspect", **file_context})
-    if (
-        inspected.get("exact_plus_one") is not True
-        or inspected.get("candidate_unchanged") is not True
-    ):
-        raise ValueError("candidate identity differs before emergency rollback")
+    _require_rollback_observation(
+        inspected, rollback_expected_observation(request, phase="pre"), "pre"
+    )
     removed = filesystem({"action": "remove", **file_context})
-    if removed.get("removed") is not True:
-        raise RuntimeError("candidate removal failed")
-    syncconf(pathlib.Path(request["syncconf_path"]))
-    verified = filesystem({"action": "verify", **file_context})
     if (
-        verified.get("restored") is not True
-        or verified.get("temporary_leftover_count") != 0
+        not isinstance(removed, dict)
+        or set(removed) != {"removed", "recovery_state"}
+        or removed.get("removed") is not True
+        or not isinstance(removed.get("recovery_state"), str)
+        or not removed["recovery_state"]
     ):
-        raise RuntimeError("emergency rollback convergence differs")
+        raise RuntimeError("candidate removal failed")
+    try:
+        syncconf(pathlib.Path(request["syncconf_path"]))
+        verified = filesystem({"action": "verify", **file_context})
+        _require_rollback_observation(
+            verified,
+            rollback_expected_observation(request, phase="baseline"),
+            "baseline",
+        )
+        cleaned = filesystem(
+            {
+                "action": "cleanup",
+                **file_context,
+                "recovery_state": removed["recovery_state"],
+            }
+        )
+        if cleaned != {"cleaned": True}:
+            raise RuntimeError("emergency rollback recovery cleanup differs")
+    except Exception as exc:
+        recovered = filesystem(
+            {
+                "action": "recover",
+                **file_context,
+                "recovery_state": removed["recovery_state"],
+            }
+        )
+        if (
+            not isinstance(recovered, dict)
+            or set(recovered) != {"recovered", "recovery_syncconf_path"}
+            or recovered.get("recovered") is not True
+        ):
+            raise RuntimeError("emergency rollback recovery failed") from exc
+        syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
+        recovery_verified = filesystem({"action": "verify-recovery", **file_context})
+        _require_rollback_observation(
+            recovery_verified,
+            rollback_expected_observation(request, phase="pre"),
+            "recovery",
+        )
+        raise RuntimeError("emergency rollback failed atomically") from exc
     return {
         "schema": "home-gateway/p3-peer-emergency-rollback/v2",
         "payload_sha256": request["payload_sha256"],
         "protocol_sha256": request["protocol_sha256"],
+        "manifest_sha256": request["manifest_sha256"],
+        "install_receipt_sha256": request["install_receipt_sha256"],
+        "candidate_receipt_sha256": request["candidate_receipt_sha256"],
+        "rollback_plan_sha256": request["rollback_plan_sha256"],
         "candidate_fingerprint_sha256": candidate,
         "one_syncconf": True,
         "restored": True,
@@ -994,11 +1182,106 @@ def _atomic_replace(path: pathlib.Path, data: bytes) -> None:
             pass
 
 
+_RECOVERY_STATES: dict[str, dict[str, pathlib.Path | None]] = {}
+
+
+def _rollback_runtime_identity() -> str:
+    observations = []
+    for arguments in (
+        [
+            "/usr/bin/docker",
+            "ps",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.ID}}|{{.Image}}|{{.Ports}}",
+        ],
+        ["/usr/bin/ss", "-H", "-lntu"],
+        ["/usr/sbin/iptables-save"],
+        ["/usr/sbin/ip6tables-save"],
+        ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],
+    ):
+        observations.append(_sha(run_checked_command(arguments)))
+    return _sha(observations)
+
+
+def _system_rollback_observation(action: dict[str, Any]) -> dict[str, Any]:
+    config_path = pathlib.Path(action["persistent_config_path"])
+    metadata_path = pathlib.Path(action["metadata_path"])
+    temporary_path = pathlib.Path(action["temporary_path"])
+    syncconf_path = pathlib.Path(action["syncconf_path"])
+    live_keys = _read_utf8_lines(
+        run_checked_command(["/usr/bin/awg", "show", "all", "public-keys"]),
+        "rollback live peer observation",
+    )
+    peers = sorted(_sha(key.encode("utf-8")) for key in live_keys)
+    temporary_state = (
+        _sha(_read_atomic_file(temporary_path, 65536))
+        if temporary_path.exists()
+        else _sha(b"ABSENT")
+    )
+    return {
+        "schema": "home-gateway/p3-peer-rollback-observation/v2",
+        "candidate_receipt_sha256": action["candidate_receipt_sha256"],
+        "candidate_fingerprint_sha256": action["candidate_fingerprint_sha256"],
+        "peer_fingerprint_sha256": peers,
+        "peer_set_sha256": _sha(peers),
+        "persistent_config_sha256": _sha(_read_atomic_file(config_path, 1048576)),
+        "live_peer_set_sha256": _sha(peers),
+        "metadata_sha256": _sha(_read_atomic_file(metadata_path, 1048576)),
+        "temporary_state_sha256": temporary_state,
+        "runtime_identity_sha256": _rollback_runtime_identity(),
+        "prepared_syncconf_sha256": _sha(_read_atomic_file(syncconf_path, 1048576)),
+    }
+
+
+def _backup_exact_file(path: pathlib.Path, backup: pathlib.Path) -> None:
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
+    try:
+        shutil.copy2(path, backup)
+    except Exception:
+        backup.unlink(missing_ok=True)
+        raise
+
+
 def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
     candidate = action["candidate_fingerprint_sha256"]
     config_path = pathlib.Path(action["persistent_config_path"])
     metadata_path = pathlib.Path(action["metadata_path"])
     temporary_path = pathlib.Path(action["temporary_path"])
+    if action["action"] in {"inspect", "verify", "verify-recovery"}:
+        return _system_rollback_observation(action)
+    if action["action"] == "cleanup":
+        state = _RECOVERY_STATES.pop(action["recovery_state"], None)
+        if state is None:
+            raise ValueError("emergency rollback recovery state differs")
+        for backup in state.values():
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+        return {"cleaned": True}
+    if action["action"] == "recover":
+        state = _RECOVERY_STATES.pop(action["recovery_state"], None)
+        if state is None:
+            raise ValueError("emergency rollback recovery state differs")
+        try:
+            os.replace(state["config"], config_path)
+            os.replace(state["metadata"], metadata_path)
+            if state["temporary"] is None:
+                temporary_path.unlink(missing_ok=True)
+            else:
+                os.replace(state["temporary"], temporary_path)
+        finally:
+            for backup in state.values():
+                if backup is not None:
+                    backup.unlink(missing_ok=True)
+        return {"recovered": True, "recovery_syncconf_path": str(config_path)}
+    if action["action"] != "remove":
+        raise ValueError("emergency rollback filesystem action differs")
+    expected_pre = rollback_expected_observation(action, phase="pre")
+    _require_rollback_observation(
+        _system_rollback_observation(action), expected_pre, "apply-time pre"
+    )
     config_text = _read_atomic_file(config_path, 1048576).decode(
         "utf-8", errors="strict"
     )
@@ -1011,48 +1294,45 @@ def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
         block for block in blocks if _block_fingerprint(block) == candidate
     ]
     matching_rows = [row for row in rows if _row_fingerprint(row) == candidate]
-    if action["action"] == "inspect":
-        temporary_match = True
+    if len(matching_blocks) != 1 or len(matching_rows) != 1:
+        raise ValueError("candidate identity differs before removal")
+    kept_blocks = [block for block in blocks if _block_fingerprint(block) != candidate]
+    config_bytes = "".join(
+        prefix + [line for block in kept_blocks for line in block]
+    ).encode()
+    kept_rows = [row for row in rows if _row_fingerprint(row) != candidate]
+    metadata_value: Any = kept_rows if shape == "list" else {"peers": kept_rows}
+    token = os.urandom(32).hex()
+    recovery_root = temporary_path.parent
+    config_backup = recovery_root / (".recovery-" + token + ".conf")
+    metadata_backup = recovery_root / (".recovery-" + token + ".json")
+    temporary_backup = recovery_root / (".recovery-" + token + ".tmp")
+    _backup_exact_file(config_path, config_backup)
+    try:
+        _backup_exact_file(metadata_path, metadata_backup)
         if temporary_path.exists():
-            temporary = json.loads(
-                _read_atomic_file(temporary_path, 65536).decode(
-                    "utf-8", errors="strict"
-                )
-            )
-            temporary_match = temporary == {"candidate_fingerprint_sha256": candidate}
-        return {
-            "exact_plus_one": len(matching_blocks) == 1 and len(matching_rows) == 1,
-            "candidate_unchanged": temporary_match,
+            _backup_exact_file(temporary_path, temporary_backup)
+            saved_temporary: pathlib.Path | None = temporary_backup
+        else:
+            saved_temporary = None
+        state = {
+            "config": config_backup,
+            "metadata": metadata_backup,
+            "temporary": saved_temporary,
         }
-    if action["action"] == "remove":
-        if len(matching_blocks) != 1 or len(matching_rows) != 1:
-            raise ValueError("candidate identity differs before removal")
-        kept_blocks = [
-            block for block in blocks if _block_fingerprint(block) != candidate
-        ]
-        config_bytes = "".join(
-            prefix + [line for block in kept_blocks for line in block]
-        ).encode()
-        kept_rows = [row for row in rows if _row_fingerprint(row) != candidate]
-        metadata_value: Any = kept_rows if shape == "list" else {"peers": kept_rows}
         _atomic_replace(config_path, config_bytes)
         _atomic_replace(metadata_path, _canonical(metadata_value))
-        if temporary_path.exists():
-            temporary = json.loads(
-                _read_atomic_file(temporary_path, 65536).decode(
-                    "utf-8", errors="strict"
-                )
-            )
-            if temporary != {"candidate_fingerprint_sha256": candidate}:
-                raise ValueError("candidate temporary identity differs")
-            temporary_path.unlink()
-        return {"removed": True}
-    if action["action"] == "verify":
-        return {
-            "restored": not matching_blocks and not matching_rows,
-            "temporary_leftover_count": int(temporary_path.exists()),
-        }
-    raise ValueError("emergency rollback filesystem action differs")
+        temporary_path.unlink(missing_ok=True)
+        _RECOVERY_STATES[token] = state
+        return {"removed": True, "recovery_state": token}
+    except Exception:
+        if config_backup.exists():
+            os.replace(config_backup, config_path)
+        if metadata_backup.exists():
+            os.replace(metadata_backup, metadata_path)
+        if temporary_backup.exists():
+            os.replace(temporary_backup, temporary_path)
+        raise
 
 
 def _system_syncconf(path: pathlib.Path) -> None:

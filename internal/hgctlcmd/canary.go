@@ -34,6 +34,8 @@ type canaryPlanOutput struct {
 	FirewallRuleCount     int                                  `json:"firewall_rule_count"`
 	DNSRuleCount          int                                  `json:"dns_rule_count"`
 	ConfirmationChallenge string                               `json:"confirmation_challenge,omitempty"`
+	CandidateSHA256       string                               `json:"candidate_sha256,omitempty"`
+	CandidateIdentity     any                                  `json:"candidate_identity,omitempty"`
 	ConfirmTimeoutSeconds int                                  `json:"confirm_timeout_seconds,omitempty"`
 	BlockCode             string                               `json:"block_code,omitempty"`
 	BlockDetails          []windowssystem.CanaryIsolationBlock `json:"block_details,omitempty"`
@@ -135,6 +137,8 @@ func runCanaryPlan(command canaryPlanCommand, stdout, stderr io.Writer, dependen
 		FirewallRuleCount:     plan.FirewallRuleCount,
 		DNSRuleCount:          plan.DNSRuleCount,
 		ConfirmationChallenge: plan.ConfirmationChallenge(command.stateRoot),
+		CandidateSHA256:       plan.CandidateSHA256(),
+		CandidateIdentity:     plan.RedactedCandidateEnvelope(),
 		ConfirmTimeoutSeconds: int(windowssystem.DefaultCanaryConfirmTimeout / time.Second),
 	})
 }
@@ -178,5 +182,6 @@ func collectCanaryPlan(ctx context.Context, command canaryPlanCommand, dependenc
 		return windowssystem.CanaryPlan{}, 3, fmt.Errorf("windows canary plan blocked: %w", err)
 	}
 	plan.ConfigSHA256 = command.configSHA256
+	plan.StateRootIdentity = windowssystem.StateRootIdentity(command.stateRoot)
 	return plan, 0, nil
 }

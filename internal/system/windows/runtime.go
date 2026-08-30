@@ -132,6 +132,91 @@ type RecoveryPlan struct {
 	RestoreDNS      int `json:"restore_dns,omitempty"`
 }
 
+type FullRestorePlan struct {
+	Schema                         string             `json:"schema"`
+	StateRootIdentity              string             `json:"state_root_identity"`
+	JournalState                   apply.State        `json:"journal_state"`
+	JournalFileSHA256              string             `json:"journal_file_sha256"`
+	OwnershipRegistrySHA256        string             `json:"ownership_registry_sha256"`
+	OwnedEntryIdentities           []artifactIdentity `json:"owned_entry_identities"`
+	RegistryVersion                int                `json:"registry_version"`
+	BootMarkerSHA256               string             `json:"boot_marker_sha256"`
+	NonterminalMutation            bool               `json:"nonterminal_mutation"`
+	InstallSnapshotSHA256          string             `json:"install_snapshot_sha256"`
+	CurrentManagedSHA256           string             `json:"current_managed_state_sha256"`
+	PreservedForeignSHA256         string             `json:"preserved_foreign_state_sha256"`
+	FirewallEnforced               bool               `json:"firewall_enforced"`
+	ActiveRevisionManifestSHA256   string             `json:"active_revision_manifest_sha256"`
+	LKGRevisionManifestSHA256      string             `json:"lkg_revision_manifest_sha256"`
+	PendingRevisionManifestSHA256  string             `json:"pending_revision_manifest_sha256"`
+	RecoveryRevisionManifestSHA256 string             `json:"recovery_revision_manifest_sha256"`
+	RemoveRouteIdentities          []artifactIdentity `json:"remove_route_identities"`
+	RetainSinkIdentities           []artifactIdentity `json:"retain_sink_identities"`
+	RemoveSinkIdentities           []artifactIdentity `json:"remove_sink_identities"`
+	RemoveFirewallIdentities       []artifactIdentity `json:"remove_firewall_identities"`
+	RemoveNRPTIdentities           []artifactIdentity `json:"remove_nrpt_identities"`
+	RestoreRouteIdentities         []artifactIdentity `json:"restore_route_identities"`
+	RestoreSinkIdentities          []artifactIdentity `json:"restore_sink_identities"`
+	RestoreFirewallIdentities      []artifactIdentity `json:"restore_firewall_identities"`
+	RestoreNRPTIdentities          []artifactIdentity `json:"restore_nrpt_identities"`
+	WatchdogTaskIdentities         []artifactIdentity `json:"watchdog_task_identities"`
+	ProtectedConfigPathIdentity    string             `json:"protected_config_path_identity"`
+	CurrentConfigACLSHA256         string             `json:"current_config_acl_sha256"`
+	BaselineConfigACLSHA256        string             `json:"baseline_config_acl_sha256"`
+	ProtectedConfigOperation       string             `json:"protected_config_operation"`
+	HgctlSHA256                    string             `json:"hgctl_sha256"`
+	CanaryLauncherSHA256           string             `json:"canary_launcher_sha256"`
+	BootstrapDriverSHA256          string             `json:"bootstrap_driver_sha256"`
+	BootstrapPayloadSHA256         string             `json:"bootstrap_payload_sha256"`
+	LockAtomicIdentities           []artifactIdentity `json:"lock_atomic_identities"`
+	Counts                         RecoveryPlan       `json:"counts"`
+}
+
+func sha256JSON(value any) string {
+	data, _ := json.Marshal(value)
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func fileSHA256IfRegular(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func (plan FullRestorePlan) IdentitySHA256() string { return sha256JSON(plan) }
+
+func (plan FullRestorePlan) ConfirmationChallenge(stateRoot string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(stateRoot) + "\x00" + plan.IdentitySHA256()))
+	return "P35-FULL-RESTORE-" + strings.ToUpper(fmt.Sprintf("%x", digest[:8]))
+}
+
+func snapshotIdentities(snapshot managedSnapshot, role string) (routes, sinks, firewall, nrpt []artifactIdentity) {
+	for _, value := range snapshot.Routes {
+		routes = append(routes, exactArtifactIdentity("route", value.Family, role, value))
+	}
+	for _, value := range snapshot.Sinks {
+		sinks = append(sinks, exactArtifactIdentity("sink", value.Route.Family, role, value))
+	}
+	for _, value := range snapshot.Firewall {
+		firewall = append(firewall, exactArtifactIdentity("firewall", value.Rule.Family, role, value))
+	}
+	for _, value := range snapshot.NRPT {
+		nrpt = append(nrpt, exactArtifactIdentity("nrpt", "", role, value))
+	}
+	for _, values := range [][]artifactIdentity{routes, sinks, firewall, nrpt} {
+		sortArtifactIdentities(values)
+	}
+	return
+}
+
 func (runtime *Runtime) Preflight(ctx context.Context, revisions []string) error {
 	if err := runtime.validateConfiguration(); err != nil {
 		return err
@@ -586,29 +671,94 @@ func (runtime *Runtime) EmergencyDisable(ctx context.Context) error {
 	return nil
 }
 
-func (runtime *Runtime) PlanFullRestore(ctx context.Context) (RecoveryPlan, error) {
+func (runtime *Runtime) PlanFullRestore(ctx context.Context, journal apply.Journal) (FullRestorePlan, error) {
 	snapshot, err := runtime.verifiedCurrentSnapshot(ctx)
 	if err != nil {
-		return RecoveryPlan{}, err
+		return FullRestorePlan{}, err
 	}
 	before, err := runtime.readSnapshot(installSnapshotName)
 	if err != nil {
-		return RecoveryPlan{}, err
+		return FullRestorePlan{}, err
 	}
-	plan := RecoveryPlan{RestoreRoutes: len(before.Routes), RestoreSinks: len(before.Sinks), RestoreFirewall: len(before.Firewall), RestoreDNS: len(before.NRPT)}
+	counts := RecoveryPlan{RestoreRoutes: len(before.Routes), RestoreSinks: len(before.Sinks), RestoreFirewall: len(before.Firewall), RestoreDNS: len(before.NRPT)}
 	for _, route := range snapshot.Routes {
 		if route.Owner != ArtifactOwner {
 			continue
 		}
 		if route.Role == RouteRoleEndpointDirect {
-			plan.RemoveEndpoints++
+			counts.RemoveEndpoints++
 		} else {
-			plan.RemoveVPNRoutes++
+			counts.RemoveVPNRoutes++
 		}
 	}
-	plan.RemoveSinks = countOwnedSinks(snapshot.Sinks)
-	plan.RemoveFirewall = countOwnedFirewall(snapshot.Firewall)
-	plan.RemoveDNS = countOwnedNRPT(snapshot.NRPT)
+	counts.RemoveSinks = countOwnedSinks(snapshot.Sinks)
+	counts.RemoveFirewall = countOwnedFirewall(snapshot.Firewall)
+	counts.RemoveDNS = countOwnedNRPT(snapshot.NRPT)
+	managed, err := filterManagedSnapshot(snapshot)
+	if err != nil {
+		return FullRestorePlan{}, err
+	}
+	removeRoutes, removeSinks, removeFirewall, removeNRPT := snapshotIdentities(managed, "remove")
+	restoreRoutes, restoreSinks, restoreFirewall, restoreNRPT := snapshotIdentities(before, "restore")
+	plan := FullRestorePlan{
+		Schema:                      "home-gateway/windows-full-restore/v1",
+		StateRootIdentity:           StateRootIdentity(runtime.Root),
+		JournalState:                journal.State,
+		JournalFileSHA256:           fileSHA256IfRegular(filepath.Join(runtime.Root, "journal.json")),
+		OwnershipRegistrySHA256:     fileSHA256IfRegular(filepath.Join(runtime.Root, "native-ownership.v1.json")),
+		RegistryVersion:             ArtifactVersion,
+		BootMarkerSHA256:            fileSHA256IfRegular(filepath.Join(runtime.Root, "boot-marker.v1.json")),
+		NonterminalMutation:         journal.State != apply.StateIdle && journal.State != apply.StateCommitted && journal.State != apply.StateRolledBack && journal.State != apply.StateRestored,
+		InstallSnapshotSHA256:       fileSHA256IfRegular(filepath.Join(runtime.Root, installSnapshotName)),
+		CurrentManagedSHA256:        sha256JSON(managed),
+		PreservedForeignSHA256:      sha256JSON(foreignKeys(snapshot)),
+		FirewallEnforced:            snapshot.FirewallEnforced,
+		RemoveRouteIdentities:       removeRoutes,
+		RemoveSinkIdentities:        removeSinks,
+		RemoveFirewallIdentities:    removeFirewall,
+		RemoveNRPTIdentities:        removeNRPT,
+		RestoreRouteIdentities:      restoreRoutes,
+		RestoreSinkIdentities:       restoreSinks,
+		RestoreFirewallIdentities:   restoreFirewall,
+		RestoreNRPTIdentities:       restoreNRPT,
+		ProtectedConfigPathIdentity: StateRootIdentity(filepath.Join(runtime.Root, "secrets", "tunnel.conf")),
+		ProtectedConfigOperation:    "restore-acl",
+		HgctlSHA256:                 fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "hgctl.exe")),
+		CanaryLauncherSHA256:        fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "p35-canary.ps1")),
+		BootstrapDriverSHA256:       fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "p35-bootstrap.ps1")),
+		BootstrapPayloadSHA256:      fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "p35-bootstrap-elevated.ps1")),
+		Counts:                      counts,
+	}
+	plan.OwnedEntryIdentities = append(plan.OwnedEntryIdentities, removeRoutes...)
+	plan.OwnedEntryIdentities = append(plan.OwnedEntryIdentities, removeSinks...)
+	plan.OwnedEntryIdentities = append(plan.OwnedEntryIdentities, removeFirewall...)
+	plan.OwnedEntryIdentities = append(plan.OwnedEntryIdentities, removeNRPT...)
+	sortArtifactIdentities(plan.OwnedEntryIdentities)
+	for label, revision := range map[string]string{"active": journal.ActiveRevision, "lkg": journal.LastKnownGoodRevision, "pending": journal.PendingRevision, "recovery": journal.FailedRevision} {
+		hash := ""
+		if revision != "" {
+			hash = fileSHA256IfRegular(filepath.Join(runtime.Root, "revisions", revision, revisionManifestName))
+		}
+		switch label {
+		case "active":
+			plan.ActiveRevisionManifestSHA256 = hash
+		case "lkg":
+			plan.LKGRevisionManifestSHA256 = hash
+		case "pending":
+			plan.PendingRevisionManifestSHA256 = hash
+		case "recovery":
+			plan.RecoveryRevisionManifestSHA256 = hash
+		}
+	}
+	// The active operation.lock is intentionally excluded: the read-only plan is
+	// produced before locking, while execution recomputes it under that lock.
+	// Only recoverable atomic leftovers are part of the exact restore identity.
+	for _, path := range []string{filepath.Join(runtime.Root, "journal.json.next"), filepath.Join(runtime.Root, "native-ownership.v1.json.next"), filepath.Join(runtime.Root, "native-ownership.v1.json.routerd.replace-backup")} {
+		if hash := fileSHA256IfRegular(path); hash != "" {
+			plan.LockAtomicIdentities = append(plan.LockAtomicIdentities, exactArtifactIdentity("lock-or-atomic-leftover", "", "inspect", hash))
+		}
+	}
+	sortArtifactIdentities(plan.LockAtomicIdentities)
 	return plan, nil
 }
 

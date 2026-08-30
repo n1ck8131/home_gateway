@@ -78,7 +78,7 @@ Describe 'scripts/p35-canary.ps1' {
             $node -is [Management.Automation.Language.CommandAst]
         }, $true))
         $planInvocations = @($commands | Where-Object { $_.GetCommandName() -ceq 'Invoke-HgctlPlan' })
-        $planInvocations.Count | Should -Be 1
+        $planInvocations.Count | Should -Be 2
         $checkedInvocations = @($commands | Where-Object { $_.GetCommandName() -ceq 'Invoke-CheckedHgctl' })
         $checkedInvocations.Count |
             Should -BeGreaterThan 1
@@ -186,11 +186,26 @@ Describe 'scripts/p35-canary.ps1' {
                 -Target '1.1.1.1' `
                 -DnsNamespace '.one.one.one.one' `
                 -Challenge 'P35-APPLY-0011223344556677' `
+                -CandidateSHA256 ('a' * 64) `
                 -ConfirmLiveMutation `
                 -HgctlPath (Join-Path $TestDrive 'missing-hgctl.exe') `
                 -WhatIf
 
             $state | Should -Not -Exist
         }
+    }
+
+    It 'routes exact candidate and recovery plan hashes without mutation under WhatIf' {
+        $text = $script:Ast.Extent.Text
+        $text | Should -Match '--candidate-sha256'', \$CandidateSHA256'
+        $text | Should -Match '--recovery-plan-sha256'', \$RecoveryPlanSHA256'
+        $text | Should -Match 'if \(\$Action -eq ''FullRestorePlan''\)[\s\S]*full-restore-plan'
+        $text | Should -Match 'NETWORK_RESTORE=COMPLETE'
+        $text | Should -Match 'ACL_RESTORE=PENDING'
+
+        $state = Join-Path $TestDrive 'restore-state'
+        & $script:Canary -Action FullRestore -StateRoot $state -ConfirmRecovery `
+            -RecoveryPlanSHA256 ('a' * 64) -Challenge 'P35-FULL-RESTORE-0123456789ABCDEF' -WhatIf
+        $state | Should -Not -Exist
     }
 }

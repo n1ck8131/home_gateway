@@ -51,6 +51,9 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	if command, ok := parseCanaryLiveCommand(args); ok {
 		return runCanaryLive(command, stdout, stderr, dependencies)
 	}
+	if command, ok := parseCanaryFullRestorePlanCommand(args); ok {
+		return runCanaryFullRestorePlan(command, stdout, stderr, dependencies)
+	}
 	if command, ok := parseCanaryPlanCommand(args); ok {
 		return runCanaryPlan(command, stdout, stderr, dependencies)
 	}
@@ -133,8 +136,9 @@ func writeUsage(program string, writer io.Writer) {
 	fmt.Fprintf(writer, "       %s tunnel inspect --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows preflight --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary plan --config <path> --config-sha256 <lowercase-sha256> --state-root <absolute-path> --revision <id> --target <ip> [--target <ip>] --dns-namespace <suffix> --json\n", program)
-	fmt.Fprintf(writer, "       %s windows canary <apply|confirm> <plan-options> --confirm-live <challenge> --json\n", program)
+	fmt.Fprintf(writer, "       %s windows canary <apply|confirm> <plan-options> --candidate-sha256 <lowercase-sha256> --confirm-live <challenge> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary <rollback|recover|emergency-disable|full-restore> --state-root <absolute-path> --confirm-recovery <action-token> --json\n", program)
+	fmt.Fprintf(writer, "       %s windows canary full-restore-plan --state-root <absolute-path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary status --state-root <absolute-path> --json\n", program)
 	fmt.Fprintln(writer, "exit codes: 0=success/read-only-qualified, 1=runtime error, 2=usage error, 3=read-only preflight blocked, 4=watchdog rollback")
 }

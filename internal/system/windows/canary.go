@@ -110,36 +110,122 @@ type CanaryRequest struct {
 }
 
 type CanaryPlan struct {
-	Candidate          apply.Candidate
-	QualifiedEndpoints []string
-	TargetPrefixes     []string
-	ConfigSHA256       string
-	RouteCount         int
-	SinkCount          int
-	FirewallRuleCount  int
-	DNSRuleCount       int
+	Candidate              apply.Candidate
+	QualifiedEndpoints     []string
+	TargetPrefixes         []string
+	ConfigSHA256           string
+	StateRootIdentity      string
+	WatchdogTimeoutSeconds int
+	RouteCount             int
+	SinkCount              int
+	FirewallRuleCount      int
+	DNSRuleCount           int
 }
 
-func (plan CanaryPlan) ConfirmationChallenge(stateRoot string) string {
-	digest := sha256.New()
-	_, _ = digest.Write([]byte(strings.ToLower(stateRoot)))
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write([]byte(plan.Candidate.RevisionID))
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write([]byte(plan.ConfigSHA256))
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write(plan.Candidate.Routes)
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write(plan.Candidate.Firewall)
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write(plan.Candidate.Sinks)
-	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write(plan.Candidate.DNS)
-	for _, endpoint := range plan.QualifiedEndpoints {
-		_, _ = digest.Write([]byte{0})
-		_, _ = digest.Write([]byte(endpoint))
+type artifactIdentity struct {
+	Type   string        `json:"type"`
+	Family AddressFamily `json:"family,omitempty"`
+	Role   string        `json:"role,omitempty"`
+	SHA256 string        `json:"sha256"`
+}
+
+type targetClassCounts struct {
+	QualifiedEndpoints int `json:"qualified_endpoints"`
+	Routes             int `json:"routes"`
+	Sinks              int `json:"sinks"`
+	Firewall           int `json:"firewall"`
+	NRPT               int `json:"nrpt"`
+}
+
+type canaryCandidateEnvelope struct {
+	Schema                      string             `json:"schema"`
+	StateRootIdentity           string             `json:"state_root_identity"`
+	RevisionID                  string             `json:"revision_id"`
+	ConfigSHA256                string             `json:"config_sha256"`
+	QualifiedEndpointIdentities []artifactIdentity `json:"qualified_endpoint_identities"`
+	RouteIdentities             []artifactIdentity `json:"route_identities"`
+	SinkIdentities              []artifactIdentity `json:"sink_identities"`
+	FirewallIdentities          []artifactIdentity `json:"firewall_identities"`
+	NRPTIdentities              []artifactIdentity `json:"nrpt_identities"`
+	TargetClassCounts           targetClassCounts  `json:"target_class_counts"`
+	WatchdogTimeoutSeconds      int                `json:"watchdog_timeout_seconds"`
+}
+
+func stateRootIdentity(stateRoot string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(stateRoot)))
+	return fmt.Sprintf("%x", digest[:])
+}
+
+func StateRootIdentity(stateRoot string) string { return stateRootIdentity(stateRoot) }
+
+func exactArtifactIdentity(kind string, family AddressFamily, role string, value any) artifactIdentity {
+	data, _ := json.Marshal(value)
+	digest := sha256.Sum256(data)
+	return artifactIdentity{Type: kind, Family: family, Role: role, SHA256: fmt.Sprintf("%x", digest[:])}
+}
+
+func sortArtifactIdentities(values []artifactIdentity) {
+	sort.Slice(values, func(i, j int) bool {
+		left := strings.Join([]string{values[i].Type, string(values[i].Family), values[i].Role, values[i].SHA256}, "\x00")
+		right := strings.Join([]string{values[j].Type, string(values[j].Family), values[j].Role, values[j].SHA256}, "\x00")
+		return left < right
+	})
+}
+
+func (plan CanaryPlan) candidateEnvelope() canaryCandidateEnvelope {
+	artifacts, _ := parseArtifacts(plan.Candidate.RevisionID, plan.Candidate.Routes, plan.Candidate.Sinks, plan.Candidate.Firewall, plan.Candidate.DNS)
+	envelope := canaryCandidateEnvelope{
+		Schema:                 "home-gateway/windows-canary-candidate/v1",
+		StateRootIdentity:      plan.StateRootIdentity,
+		RevisionID:             plan.Candidate.RevisionID,
+		ConfigSHA256:           plan.ConfigSHA256,
+		WatchdogTimeoutSeconds: plan.WatchdogTimeoutSeconds,
 	}
-	return fmt.Sprintf("P35-APPLY-%X", digest.Sum(nil)[:8])
+	for _, endpoint := range plan.QualifiedEndpoints {
+		family := AddressFamily("")
+		if prefix, err := netip.ParsePrefix(endpoint); err == nil {
+			family = addressFamily(prefix.Addr())
+		}
+		envelope.QualifiedEndpointIdentities = append(envelope.QualifiedEndpointIdentities, exactArtifactIdentity("qualified-endpoint", family, RouteRoleEndpointDirect, endpoint))
+	}
+	for _, route := range artifacts.routes.Routes {
+		envelope.RouteIdentities = append(envelope.RouteIdentities, exactArtifactIdentity("route", route.Family, route.Role, route))
+	}
+	for _, sink := range artifacts.sinks.Routes {
+		envelope.SinkIdentities = append(envelope.SinkIdentities, exactArtifactIdentity("sink", sink.Family, "fail-closed", sink))
+	}
+	for _, rule := range artifacts.firewall.Rules {
+		envelope.FirewallIdentities = append(envelope.FirewallIdentities, exactArtifactIdentity("firewall", rule.Family, rule.Action, rule))
+	}
+	for _, rule := range artifacts.dns.Rules {
+		envelope.NRPTIdentities = append(envelope.NRPTIdentities, exactArtifactIdentity("nrpt", "", "dns", rule))
+	}
+	for _, identities := range [][]artifactIdentity{envelope.QualifiedEndpointIdentities, envelope.RouteIdentities, envelope.SinkIdentities, envelope.FirewallIdentities, envelope.NRPTIdentities} {
+		sortArtifactIdentities(identities)
+	}
+	envelope.TargetClassCounts = targetClassCounts{
+		QualifiedEndpoints: len(envelope.QualifiedEndpointIdentities),
+		Routes:             len(envelope.RouteIdentities),
+		Sinks:              len(envelope.SinkIdentities),
+		Firewall:           len(envelope.FirewallIdentities),
+		NRPT:               len(envelope.NRPTIdentities),
+	}
+	return envelope
+}
+
+func (plan CanaryPlan) CandidateSHA256() string {
+	data, _ := json.Marshal(plan.candidateEnvelope())
+	digest := sha256.Sum256(data)
+	return fmt.Sprintf("%x", digest[:])
+}
+
+// RedactedCandidateEnvelope exposes only stable hashes and class counts for
+// operator review. Exact network values remain private to the candidate.
+func (plan CanaryPlan) RedactedCandidateEnvelope() any { return plan.candidateEnvelope() }
+
+func (plan CanaryPlan) ConfirmationChallenge(stateRoot string) string {
+	plan.StateRootIdentity = stateRootIdentity(stateRoot)
+	return "P35-APPLY-" + strings.ToUpper(plan.CandidateSHA256()[:16])
 }
 
 // BuildCanaryPlan converts an already-qualified, read-only Windows snapshot
@@ -297,12 +383,13 @@ func BuildCanaryPlan(inventory Inventory, inspection tunnel.Inspection, request 
 			Firewall:   firewallData,
 			DNS:        dnsData,
 		},
-		QualifiedEndpoints: qualified,
-		TargetPrefixes:     targetStrings,
-		RouteCount:         len(routes),
-		SinkCount:          len(sinks),
-		FirewallRuleCount:  len(firewall),
-		DNSRuleCount:       1,
+		QualifiedEndpoints:     qualified,
+		TargetPrefixes:         targetStrings,
+		WatchdogTimeoutSeconds: 120,
+		RouteCount:             len(routes),
+		SinkCount:              len(sinks),
+		FirewallRuleCount:      len(firewall),
+		DNSRuleCount:           1,
 	}, nil
 }
 

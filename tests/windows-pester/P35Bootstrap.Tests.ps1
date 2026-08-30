@@ -276,7 +276,7 @@ if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore orig
             -ExpectedConfigSHA256 (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() `
             -ExpectedDriverSHA256 $driverSHA256 `
             -ExpectedPayloadSHA256 (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant() `
-            -Confirmation 'P35-RESTORE-CONFIG-ACL-V1' -PayloadPath $payload -WhatIf
+            -ACLPlanSHA256 ('d' * 64) -Confirmation 'P35-RESTORE-CONFIG-ACL-0123456789ABCDEF' -PayloadPath $payload -WhatIf
 
         $env:HG_P35_BOOTSTRAP_REQUEST_B64 | Should -Be $before
 
@@ -295,6 +295,43 @@ if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore orig
                 -ExpectedLauncherSHA256 ('0' * 64) -ExpectedHgctlSHA256 ('0' * 64) `
                 -Confirmation 'P35-BOOTSTRAP-FILESYSTEM-V1' -PayloadPath $payload -LauncherPath $launcher -HgctlPath $hgctl -WhatIf
         } | Should -Throw '*local absolute path*'
+    }
+
+    It 'builds a redacted exact ACL subplan and binds restore to its hash and challenge' {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:Driver, [ref]$tokens, [ref]$parseErrors)
+        $parseErrors | Should -BeNullOrEmpty
+        $required = @('Get-TextSHA256', 'New-RestoreConfigAclPlan')
+        $definitions = foreach ($name in $required) {
+            $definition = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+            }, $true))
+            $definition.Count | Should -Be 1
+            $definition[0].Extent.Text
+        }
+        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
+
+        $first = New-RestoreConfigAclPlan -ConfigPath 'C:\protected\profile.conf' `
+            -CurrentAclSDDL 'O:S-1-5-21-current' -BaselineAclSDDL 'O:S-1-5-21-baseline' `
+            -ConfigSHA256 ('a' * 64) -DriverSHA256 ('b' * 64) -PayloadSHA256 ('c' * 64)
+        $second = New-RestoreConfigAclPlan -ConfigPath 'C:\protected\profile.conf' `
+            -CurrentAclSDDL 'O:S-1-5-21-changed' -BaselineAclSDDL 'O:S-1-5-21-baseline' `
+            -ConfigSHA256 ('a' * 64) -DriverSHA256 ('b' * 64) -PayloadSHA256 ('c' * 64)
+
+        $first.acl_plan_sha256 | Should -Match '^[0-9a-f]{64}$'
+        $first.confirmation_challenge | Should -Match '^P35-RESTORE-CONFIG-ACL-[0-9A-F]{16}$'
+        $first.acl_plan_sha256 | Should -Not -BeExactly $second.acl_plan_sha256
+        $json = ConvertTo-Json -Compress -InputObject $first
+        $json | Should -Not -Match 'S-1-5-21|profile\.conf'
+
+        $text = $ast.Extent.Text
+        $text | Should -Match "ValidateSet\('Install', 'RestoreConfigAclPlan', 'RestoreConfigAcl'\)"
+        $text | Should -Match 'ACLPlanSHA256'
+        $text | Should -Match 'P35-RESTORE-CONFIG-ACL-'
+        $text | Should -Match 'driver_sha256'
+        $text | Should -Match 'payload_sha256'
     }
 
     It 'launches a short pinned loader that exclusively reads and executes the approved payload' {

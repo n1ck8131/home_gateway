@@ -1,6 +1,6 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [ValidateSet('Install', 'RestoreConfigAcl')]
+    [ValidateSet('Install', 'RestoreConfigAclPlan', 'RestoreConfigAcl')]
     [string]$Action = 'Install',
     [Parameter(Mandatory = $true)][string]$ConfigPath,
     [Parameter(Mandatory = $true)][string]$ExpectedConfigSHA256,
@@ -8,7 +8,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedPayloadSHA256,
     [string]$ExpectedLauncherSHA256,
     [string]$ExpectedHgctlSHA256,
-    [Parameter(Mandatory = $true)][string]$Confirmation,
+    [string]$Confirmation,
+    [string]$ACLPlanSHA256,
     [string]$DriverPath,
     [string]$PayloadPath,
     [string]$LauncherPath,
@@ -23,6 +24,49 @@ if (-not [string]::IsNullOrEmpty($PSCommandPath)) { throw 'P3.5 bootstrap driver
 
 function Assert-SHA256([string]$Value, [string]$Label) {
     if ($Value -cnotmatch '^[0-9a-f]{64}$') { throw "$Label must be one lowercase SHA-256 value" }
+}
+
+function Get-TextSHA256([string]$Value) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value)))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+function New-RestoreConfigAclPlan(
+    [string]$ConfigPath,
+    [string]$CurrentAclSDDL,
+    [string]$BaselineAclSDDL,
+    [string]$ConfigSHA256,
+    [string]$DriverSHA256,
+    [string]$PayloadSHA256
+) {
+    $identity = [pscustomobject][ordered]@{
+        schema = 'home-gateway/windows-restore-config-acl/v1'
+        protected_config_path_identity = Get-TextSHA256 -Value $ConfigPath.ToLowerInvariant()
+        current_acl_sha256 = Get-TextSHA256 -Value $CurrentAclSDDL
+        baseline_acl_sha256 = Get-TextSHA256 -Value $BaselineAclSDDL
+        config_sha256 = $ConfigSHA256
+        bootstrap_driver_sha256 = $DriverSHA256
+        bootstrap_payload_sha256 = $PayloadSHA256
+        operation = 'restore-config-acl'
+    }
+    $planHash = Get-TextSHA256 -Value (ConvertTo-Json -Compress -InputObject $identity)
+    $challengeHash = Get-TextSHA256 -Value ($ConfigPath.ToLowerInvariant() + [char]0 + $planHash)
+    return [pscustomobject][ordered]@{
+        mode = 'restore-config-acl-plan'
+        live_mutation_performed = $false
+        identity = $identity
+        acl_plan_sha256 = $planHash
+        confirmation_challenge = 'P35-RESTORE-CONFIG-ACL-' + $challengeHash.Substring(0, 16).ToUpperInvariant()
+    }
+}
+
+function Read-ExactUTF8JSON([string]$Path, [string]$Label) {
+    $stream = Open-RegularExclusive -Path $Path -Label $Label
+    try {
+        if ($stream.Length -le 0 -or $stream.Length -gt 65536) { throw "$Label length differs" }
+        $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false, $true), $true)
+        try { return ConvertFrom-Json -InputObject $reader.ReadToEnd() -ErrorAction Stop } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
 }
 
 function Resolve-LocalCleanPath([string]$Path, [string]$Label) {
@@ -116,8 +160,7 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'P3.5 bootstrap driver must run from a non-elevated session' }
 if ($null -eq $identity.User -or -not $identity.User.IsValidTargetType([Security.Principal.SecurityIdentifier])) { throw 'P3.5 bootstrap caller identity is unavailable' }
 
-$expectedConfirmation = if ($Action -ceq 'Install') { 'P35-BOOTSTRAP-FILESYSTEM-V1' } else { 'P35-RESTORE-CONFIG-ACL-V1' }
-if ($Confirmation -cne $expectedConfirmation) { throw 'P3.5 bootstrap driver confirmation differs' }
+if ($Action -ceq 'Install' -and $Confirmation -cne 'P35-BOOTSTRAP-FILESYSTEM-V1') { throw 'P3.5 bootstrap driver confirmation differs' }
 foreach ($entry in @(
     @{ Value = $ExpectedConfigSHA256; Label = 'config hash' },
     @{ Value = $ExpectedDriverSHA256; Label = 'driver hash' },
@@ -136,6 +179,15 @@ $resolvedPayload = Resolve-LocalCleanPath -Path $PayloadPath -Label 'bootstrap p
 
 Assert-FileSHA256 -Path $resolvedConfig -Expected $ExpectedConfigSHA256 -Label 'Tunnel config source'
 Assert-FileSHA256 -Path $resolvedDriver -Expected $ExpectedDriverSHA256 -Label 'bootstrap driver'
+Assert-FileSHA256 -Path $resolvedPayload -Expected $ExpectedPayloadSHA256 -Label 'bootstrap payload'
+
+if ($Action -ceq 'RestoreConfigAclPlan') {
+    if (-not [string]::IsNullOrWhiteSpace($Confirmation) -or -not [string]::IsNullOrWhiteSpace($ACLPlanSHA256)) { throw 'RestoreConfigAclPlan does not accept mutation approval' }
+}
+if ($Action -ceq 'RestoreConfigAcl') {
+    Assert-SHA256 -Value $ACLPlanSHA256 -Label 'ACL plan hash'
+    if ($Confirmation -cnotmatch '^P35-RESTORE-CONFIG-ACL-[0-9A-F]{16}$') { throw 'P3.5 ACL restore challenge differs' }
+}
 
 if ($Action -ceq 'Install') {
     if ([string]::IsNullOrWhiteSpace($LauncherPath)) { $LauncherPath = Join-Path $PSScriptRoot 'p35-canary.ps1' }
@@ -159,11 +211,16 @@ if ($Action -ceq 'Install') {
 } else {
     $request = [pscustomobject][ordered]@{
         version = 1
-        action = 'restore-config-acl'
+        action = if ($Action -ceq 'RestoreConfigAclPlan') { 'restore-config-acl-plan' } else { 'restore-config-acl' }
         confirmation = $Confirmation
         caller_sid = $identity.User.Value
         config_path = $resolvedConfig
         config_sha256 = $ExpectedConfigSHA256
+        acl_plan_sha256 = $ACLPlanSHA256
+        driver_path = $resolvedDriver
+        driver_sha256 = $ExpectedDriverSHA256
+        payload_path = $resolvedPayload
+        payload_sha256 = $ExpectedPayloadSHA256
     }
 }
 $requestBytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject $request))
@@ -183,6 +240,7 @@ $commandLength = $trustedPowerShell.Length + 1 + (($arguments | ForEach-Object {
 if ($commandLength -ge 32767) { throw 'P3.5 bootstrap command exceeds CreateProcess command length budget' }
 $process = Start-Process -FilePath $trustedPowerShell -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
 if ($null -eq $process -or $process.ExitCode -ne 0) { throw "P3.5 elevated bootstrap failed with exit code $($process.ExitCode)" }
+if ($Action -ceq 'RestoreConfigAclPlan') { return }
 [Console]::Out.WriteLine((ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{
     version = 1
     ok = $true

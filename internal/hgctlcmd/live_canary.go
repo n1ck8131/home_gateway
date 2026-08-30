@@ -1,19 +1,50 @@
 package hgctlcmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/vsevo/home-gateway/internal/revisions/apply"
 	windowssystem "github.com/vsevo/home-gateway/internal/system/windows"
 )
+
+func loadCanaryJournalReadOnly(path string) (apply.Journal, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return apply.Journal{State: apply.StateIdle}, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 64<<10 {
+		return apply.Journal{}, errors.New("journal is not one bounded regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return apply.Journal{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var journal apply.Journal
+	if err := decoder.Decode(&journal); err != nil {
+		return apply.Journal{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return apply.Journal{}, errors.New("journal contains trailing data")
+	}
+	if !slices.Contains([]apply.State{apply.StateIdle, apply.StatePending, apply.StateCommitted, apply.StateRolledBack, apply.StateDegraded, apply.StateDisabling, apply.StateDisabled, apply.StateRestoring, apply.StateRestored}, journal.State) {
+		return apply.Journal{}, errors.New("journal state is invalid")
+	}
+	return journal, nil
+}
 
 const (
 	recoveryRollbackToken = "P35-ROLLBACK"          // #nosec G101 -- stable operator confirmation token, not a credential.
@@ -24,10 +55,72 @@ const (
 )
 
 type canaryLiveCommand struct {
-	action          string
-	plan            canaryPlanCommand
-	liveConfirm     string
-	recoveryConfirm string
+	action             string
+	plan               canaryPlanCommand
+	liveConfirm        string
+	candidateSHA256    string
+	recoveryConfirm    string
+	recoveryPlanSHA256 string
+}
+
+type canaryFullRestorePlanCommand struct{ stateRoot string }
+
+type canaryFullRestorePlanOutput struct {
+	Mode                  string `json:"mode"`
+	LiveMutationPerformed bool   `json:"live_mutation_performed"`
+	windowssystem.FullRestorePlan
+	RecoveryPlanSHA256    string `json:"recovery_plan_sha256"`
+	ConfirmationChallenge string `json:"confirmation_challenge"`
+}
+
+func parseCanaryFullRestorePlanCommand(args []string) (canaryFullRestorePlanCommand, bool) {
+	if len(args) != 6 || args[0] != "windows" || args[1] != "canary" || args[2] != "full-restore-plan" || args[3] != "--state-root" || args[4] == "" || args[5] != "--json" {
+		return canaryFullRestorePlanCommand{}, false
+	}
+	return canaryFullRestorePlanCommand{stateRoot: args[4]}, true
+}
+
+func runCanaryFullRestorePlan(command canaryFullRestorePlanCommand, stdout, stderr io.Writer, dependencies dependencies) int {
+	if dependencies.validateStateRoot == nil || dependencies.newMutation == nil {
+		fmt.Fprintln(stderr, "Windows full restore planner dependency is unavailable")
+		return 1
+	}
+	if err := dependencies.validateStateRoot(command.stateRoot); err != nil {
+		fmt.Fprintln(stderr, "Windows full restore plan state root blocked:", err)
+		return 3
+	}
+	journal, err := loadCanaryJournalReadOnly(filepath.Join(command.stateRoot, "journal.json"))
+	if err != nil {
+		fmt.Fprintln(stderr, "Windows full restore plan journal failed:", err)
+		return 1
+	}
+	tx, err := newRecoveryTransactionLocked(command.stateRoot, journal, dependencies)
+	if err != nil {
+		fmt.Fprintln(stderr, "Windows full restore planner initialization failed:", err)
+		return 1
+	}
+	if preflighter, ok := tx.Runtime.(apply.RecoveryPreflighter); ok {
+		if err := preflighter.PreflightRecovery(context.Background(), journal); err != nil {
+			fmt.Fprintln(stderr, "Windows full restore plan preflight failed:", err)
+			return 3
+		}
+	}
+	planner, ok := tx.Runtime.(interface {
+		PlanFullRestore(context.Context, apply.Journal) (windowssystem.FullRestorePlan, error)
+	})
+	if !ok {
+		fmt.Fprintln(stderr, "Windows full restore exact planner is unavailable")
+		return 1
+	}
+	plan, err := planner.PlanFullRestore(context.Background(), journal)
+	if err != nil {
+		fmt.Fprintln(stderr, "Windows full restore plan failed:", err)
+		return 1
+	}
+	return encodeJSON(stdout, stderr, canaryFullRestorePlanOutput{
+		Mode: "full-restore-plan", LiveMutationPerformed: false, FullRestorePlan: plan,
+		RecoveryPlanSHA256: plan.IdentitySHA256(), ConfirmationChallenge: plan.ConfirmationChallenge(command.stateRoot),
+	})
 }
 
 type canaryActionOutput struct {
@@ -103,8 +196,12 @@ func parseCanaryLiveCommand(args []string) (canaryLiveCommand, bool) {
 			command.plan.dnsNamespace = value
 		case "--confirm-live":
 			command.liveConfirm = value
+		case "--candidate-sha256":
+			command.candidateSHA256 = value
 		case "--confirm-recovery":
 			command.recoveryConfirm = value
+		case "--recovery-plan-sha256":
+			command.recoveryPlanSHA256 = value
 		default:
 			return canaryLiveCommand{}, false
 		}
@@ -115,15 +212,19 @@ func parseCanaryLiveCommand(args []string) (canaryLiveCommand, bool) {
 	}
 	switch command.action {
 	case "apply", "confirm":
-		if command.plan.configPath == "" || !lowercaseSHA256Pattern.MatchString(command.plan.configSHA256) || command.plan.revision == "" || command.plan.dnsNamespace == "" || len(command.plan.targets) == 0 || command.liveConfirm == "" || command.recoveryConfirm != "" {
+		if command.plan.configPath == "" || !lowercaseSHA256Pattern.MatchString(command.plan.configSHA256) || !lowercaseSHA256Pattern.MatchString(command.candidateSHA256) || command.plan.revision == "" || command.plan.dnsNamespace == "" || len(command.plan.targets) == 0 || command.liveConfirm == "" || command.recoveryConfirm != "" {
 			return canaryLiveCommand{}, false
 		}
-	case "rollback", "recover", "emergency-disable", "full-restore", "expire":
-		if command.recoveryConfirm == "" || command.liveConfirm != "" || command.plan.configPath != "" || command.plan.configSHA256 != "" || command.plan.revision != "" || command.plan.dnsNamespace != "" || len(command.plan.targets) != 0 {
+	case "rollback", "recover", "emergency-disable", "expire":
+		if command.recoveryConfirm == "" || command.recoveryPlanSHA256 != "" || command.liveConfirm != "" || command.candidateSHA256 != "" || command.plan.configPath != "" || command.plan.configSHA256 != "" || command.plan.revision != "" || command.plan.dnsNamespace != "" || len(command.plan.targets) != 0 {
+			return canaryLiveCommand{}, false
+		}
+	case "full-restore":
+		if command.recoveryConfirm == "" || !lowercaseSHA256Pattern.MatchString(command.recoveryPlanSHA256) || command.liveConfirm != "" || command.candidateSHA256 != "" || command.plan.configPath != "" || command.plan.configSHA256 != "" || command.plan.revision != "" || command.plan.dnsNamespace != "" || len(command.plan.targets) != 0 {
 			return canaryLiveCommand{}, false
 		}
 	case "status":
-		if command.liveConfirm != "" || command.recoveryConfirm != "" || command.plan.configPath != "" || command.plan.configSHA256 != "" || command.plan.revision != "" || command.plan.dnsNamespace != "" || len(command.plan.targets) != 0 {
+		if command.liveConfirm != "" || command.candidateSHA256 != "" || command.recoveryConfirm != "" || command.recoveryPlanSHA256 != "" || command.plan.configPath != "" || command.plan.configSHA256 != "" || command.plan.revision != "" || command.plan.dnsNamespace != "" || len(command.plan.targets) != 0 {
 			return canaryLiveCommand{}, false
 		}
 	}
@@ -141,14 +242,17 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 	}
 	isRecovery := slices.Contains([]string{"rollback", "recover", "emergency-disable", "full-restore", "expire"}, command.action)
 	if isRecovery {
+		if command.action == "full-restore" && (!lowercaseSHA256Pattern.MatchString(command.recoveryPlanSHA256) || !strings.HasPrefix(command.recoveryConfirm, recoveryRestoreToken+"-") || len(command.recoveryConfirm) != len(recoveryRestoreToken)+17) {
+			fmt.Fprintln(stderr, "full restore requires an exact lowercase plan SHA-256 and derived challenge")
+			return 2
+		}
 		expected := map[string]string{
 			"rollback":          recoveryRollbackToken,
 			"recover":           recoveryRecoverToken,
 			"emergency-disable": recoveryDisableToken,
-			"full-restore":      recoveryRestoreToken,
 			"expire":            recoveryExpireToken,
 		}[command.action]
-		if !equalConfirmation(command.recoveryConfirm, expected) {
+		if command.action != "full-restore" && !equalConfirmation(command.recoveryConfirm, expected) {
 			fmt.Fprintln(stderr, "recovery confirmation token does not match the requested action")
 			return 2
 		}
@@ -183,6 +287,10 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return errorCode
+		}
+		if !equalConfirmation(command.candidateSHA256, plan.CandidateSHA256()) {
+			fmt.Fprintln(stderr, "candidate SHA-256 does not match the exact canary candidate")
+			return 2
 		}
 		challenge := plan.ConfirmationChallenge(command.plan.stateRoot)
 		if !equalConfirmation(command.liveConfirm, challenge) {
@@ -237,6 +345,25 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 			recoveryPlan, err = canaryRecoveryPlan(recoveryContext, journal, command.action, tx)
 		}
 		if err == nil {
+			if command.action == "full-restore" {
+				planner, ok := tx.Runtime.(interface {
+					PlanFullRestore(context.Context, apply.Journal) (windowssystem.FullRestorePlan, error)
+				})
+				if !ok {
+					err = errors.New("exact full restore planner is unavailable")
+				} else {
+					var exactPlan windowssystem.FullRestorePlan
+					exactPlan, err = planner.PlanFullRestore(recoveryContext, journal)
+					if err == nil && (!equalConfirmation(command.recoveryPlanSHA256, exactPlan.IdentitySHA256()) || !equalConfirmation(command.recoveryConfirm, exactPlan.ConfirmationChallenge(command.plan.stateRoot))) {
+						err = errors.New("full restore plan hash or challenge is stale")
+					}
+					if err == nil {
+						recoveryPlan = exactPlan.Counts
+					}
+				}
+			}
+		}
+		if err == nil && command.action != "full-restore" {
 			switch command.action {
 			case "rollback":
 				err = tx.Rollback(recoveryContext)
@@ -244,11 +371,12 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 				err = tx.Recover(recoveryContext)
 			case "emergency-disable":
 				err = tx.EmergencyDisable(recoveryContext)
-			case "full-restore":
-				err = tx.FullRestore(recoveryContext)
 			case "expire":
 				err = tx.Expire(recoveryContext)
 			}
+		}
+		if err == nil && command.action == "full-restore" {
+			err = tx.FullRestore(recoveryContext)
 		}
 	}
 	if err == nil {
@@ -269,7 +397,7 @@ func runCanaryLive(command canaryLiveCommand, stdout, stderr io.Writer, dependen
 func canaryRecoveryPlan(ctx context.Context, journal apply.Journal, action string, tx *apply.Transaction) (windowssystem.RecoveryPlan, error) {
 	planner, ok := tx.Runtime.(interface {
 		PlanEmergencyDisable(context.Context) (windowssystem.RecoveryPlan, error)
-		PlanFullRestore(context.Context) (windowssystem.RecoveryPlan, error)
+		PlanFullRestore(context.Context, apply.Journal) (windowssystem.FullRestorePlan, error)
 	})
 	if !ok {
 		return windowssystem.RecoveryPlan{}, nil
@@ -283,7 +411,8 @@ func canaryRecoveryPlan(ctx context.Context, journal apply.Journal, action strin
 	case "emergency-disable":
 		return planner.PlanEmergencyDisable(ctx)
 	case "full-restore":
-		return planner.PlanFullRestore(ctx)
+		plan, err := planner.PlanFullRestore(ctx, journal)
+		return plan.Counts, err
 	default:
 		return windowssystem.RecoveryPlan{}, nil
 	}

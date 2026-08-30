@@ -39,6 +39,39 @@ type trackingPersistentWatchdog struct {
 	disarms   int
 }
 
+func exactFullRestoreCommand(t *testing.T, root string, dependencies dependencies) canaryLiveCommand {
+	t.Helper()
+	journal, err := (apply.FileJournal{Path: filepath.Join(root, "journal.json")}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := newRecoveryTransactionLocked(root, journal, dependencies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflighter, ok := tx.Runtime.(apply.RecoveryPreflighter); ok {
+		if err := preflighter.PreflightRecovery(t.Context(), journal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	planner, ok := tx.Runtime.(interface {
+		PlanFullRestore(context.Context, apply.Journal) (windowssystem.FullRestorePlan, error)
+	})
+	if !ok {
+		t.Fatal("exact full restore planner is unavailable")
+	}
+	plan, err := planner.PlanFullRestore(t.Context(), journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canaryLiveCommand{
+		action:             "full-restore",
+		plan:               canaryPlanCommand{stateRoot: root},
+		recoveryConfirm:    plan.ConfirmationChallenge(root),
+		recoveryPlanSHA256: plan.IdentitySHA256(),
+	}
+}
+
 func (watchdog *blockingDisarmWatchdog) Arm(time.Time, func()) (func(), error) {
 	return func() {}, nil
 }
@@ -271,7 +304,7 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 		t.Fatal(err)
 	}
 	challenge := plan.ConfirmationChallenge(root)
-	applyCommand := canaryLiveCommand{action: "apply", plan: planCommand, liveConfirm: challenge}
+	applyCommand := canaryLiveCommand{action: "apply", plan: planCommand, liveConfirm: challenge, candidateSHA256: plan.CandidateSHA256()}
 	var applyStdout bytes.Buffer
 	var applyStderr bytes.Buffer
 	applyDone := make(chan int, 1)
@@ -297,7 +330,7 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 		t.Fatal(err)
 	}
 	var mismatchStdout, mismatchStderr bytes.Buffer
-	mismatchConfirm := canaryLiveCommand{action: "confirm", plan: mismatchPlanCommand, liveConfirm: mismatchPlan.ConfirmationChallenge(root)}
+	mismatchConfirm := canaryLiveCommand{action: "confirm", plan: mismatchPlanCommand, liveConfirm: mismatchPlan.ConfirmationChallenge(root), candidateSHA256: mismatchPlan.CandidateSHA256()}
 	if code := runCanaryLive(mismatchConfirm, &mismatchStdout, &mismatchStderr, deps); code == 0 {
 		t.Fatal("different candidate unexpectedly confirmed the pending revision")
 	}
@@ -311,7 +344,7 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 
 	var confirmStdout bytes.Buffer
 	var confirmStderr bytes.Buffer
-	confirmCommand := canaryLiveCommand{action: "confirm", plan: planCommand, liveConfirm: challenge}
+	confirmCommand := canaryLiveCommand{action: "confirm", plan: planCommand, liveConfirm: challenge, candidateSHA256: plan.CandidateSHA256()}
 	if code := runCanaryLive(confirmCommand, &confirmStdout, &confirmStderr, deps); code != 0 {
 		t.Fatalf("confirm code = %d, stderr = %q", code, confirmStderr.String())
 	}
@@ -343,10 +376,46 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 	if !commandForeignStatePresent(snapshot) {
 		t.Fatal("foreign state changed during canary apply")
 	}
+	beforePlan, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restorePlanStdout, restorePlanStderr bytes.Buffer
+	if code := runCanaryFullRestorePlan(canaryFullRestorePlanCommand{stateRoot: root}, &restorePlanStdout, &restorePlanStderr, deps); code != 0 {
+		t.Fatalf("full restore plan code = %d, stderr = %q", code, restorePlanStderr.String())
+	}
+	var restorePlan canaryFullRestorePlanOutput
+	if err := json.Unmarshal(restorePlanStdout.Bytes(), &restorePlan); err != nil {
+		t.Fatal(err)
+	}
+	if restorePlan.LiveMutationPerformed || !lowercaseSHA256Pattern.MatchString(restorePlan.RecoveryPlanSHA256) || !strings.HasPrefix(restorePlan.ConfirmationChallenge, recoveryRestoreToken+"-") || len(restorePlan.RemoveRouteIdentities) == 0 {
+		t.Fatalf("full restore plan output = %#v", restorePlan)
+	}
+	afterPlanSnapshot, err := backend.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterPlan, err := json.Marshal(afterPlanSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforePlan, afterPlan) {
+		t.Fatal("read-only full restore plan changed backend state")
+	}
+	stale := canaryLiveCommand{action: "full-restore", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: restorePlan.ConfirmationChallenge, recoveryPlanSHA256: strings.Repeat("0", 64)}
+	var staleStdout, staleStderr bytes.Buffer
+	if code := runCanaryLive(stale, &staleStdout, &staleStderr, deps); code == 0 {
+		t.Fatal("stale full restore plan unexpectedly mutated state")
+	}
+	staleSnapshot, _ := backend.Snapshot(t.Context())
+	staleJSON, _ := json.Marshal(staleSnapshot)
+	if !bytes.Equal(beforePlan, staleJSON) {
+		t.Fatal("stale full restore plan changed backend state")
+	}
 
 	var restoreStdout bytes.Buffer
 	var restoreStderr bytes.Buffer
-	restore := canaryLiveCommand{action: "full-restore", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryRestoreToken}
+	restore := exactFullRestoreCommand(t, root, deps)
 	if code := runCanaryLive(restore, &restoreStdout, &restoreStderr, deps); code != 0 {
 		t.Fatalf("restore code = %d, stderr = %q", code, restoreStderr.String())
 	}
@@ -453,7 +522,7 @@ func TestRunCanaryLiveOutputsRedactedSinkAndRecoveryEvidence(t *testing.T) {
 	}
 
 	var restoreStdout, restoreStderr bytes.Buffer
-	restore := canaryLiveCommand{action: "full-restore", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryRestoreToken}
+	restore := exactFullRestoreCommand(t, root, deps)
 	if code := runCanaryLive(restore, &restoreStdout, &restoreStderr, deps); code != 0 {
 		t.Fatalf("restore code = %d, stderr = %q", code, restoreStderr.String())
 	}
@@ -511,7 +580,7 @@ func TestRunCanaryFullRestoreWatchdogSemantics(t *testing.T) {
 	}
 	backend.failCall = "remove-sink:198.51.100.10/32"
 	var failedStdout, failedStderr bytes.Buffer
-	restore := canaryLiveCommand{action: "full-restore", plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: recoveryRestoreToken}
+	restore := exactFullRestoreCommand(t, root, deps)
 	if code := runCanaryLive(restore, &failedStdout, &failedStderr, deps); code == 0 {
 		t.Fatal("faulted full restore unexpectedly succeeded")
 	}
@@ -638,6 +707,27 @@ func TestCanaryRecoveryTokensAreActionSpecific(t *testing.T) {
 				t.Fatalf("action %s accepted token %q with code %d", action, wrong, code)
 			}
 		}
+	}
+}
+
+func TestParseCanaryLiveRequiresExactCandidateSHA256ForApplyAndConfirm(t *testing.T) {
+	base := []string{"windows", "canary", "apply", "--config", "config", "--config-sha256", strings.Repeat("a", 64), "--state-root", "state", "--revision", "p35", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--confirm-live", "P35-APPLY-0011223344556677", "--json"}
+	if _, ok := parseCanaryLiveCommand(base); ok {
+		t.Fatal("apply accepted a missing candidate SHA-256")
+	}
+	withCandidate := append([]string(nil), base[:len(base)-1]...)
+	withCandidate = append(withCandidate, "--candidate-sha256", strings.Repeat("b", 64), "--json")
+	command, ok := parseCanaryLiveCommand(withCandidate)
+	if !ok || command.candidateSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("candidate-bound apply parse = %#v, %v", command, ok)
+	}
+	withCandidate[2] = "confirm"
+	if command, ok = parseCanaryLiveCommand(withCandidate); !ok || command.candidateSHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("candidate-bound confirm parse = %#v, %v", command, ok)
+	}
+	withCandidate[len(withCandidate)-2] = strings.Repeat("B", 64)
+	if _, ok := parseCanaryLiveCommand(withCandidate); ok {
+		t.Fatal("uppercase candidate SHA-256 was accepted")
 	}
 }
 

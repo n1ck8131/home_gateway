@@ -2,6 +2,8 @@ package windows
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1184,6 +1186,49 @@ func TestWindowsEmergencyDisableAndFullRestorePreserveForeignState(t *testing.T)
 		t.Fatal(err)
 	}
 	assertManagedEmpty(t, backend.state)
+}
+
+func TestFullRestorePlanIdentityBindsExactObjectsNotOnlyCounts(t *testing.T) {
+	plan := FullRestorePlan{
+		Schema:                   "home-gateway/windows-full-restore/v1",
+		StateRootIdentity:        strings.Repeat("1", 64),
+		JournalState:             apply.StateCommitted,
+		JournalFileSHA256:        strings.Repeat("2", 64),
+		OwnershipRegistrySHA256:  strings.Repeat("3", 64),
+		RegistryVersion:          1,
+		InstallSnapshotSHA256:    strings.Repeat("4", 64),
+		CurrentManagedSHA256:     strings.Repeat("5", 64),
+		PreservedForeignSHA256:   strings.Repeat("6", 64),
+		FirewallEnforced:         true,
+		RemoveRouteIdentities:    []artifactIdentity{{Type: "route", Family: FamilyIPv4, Role: RouteRoleVPNClass, SHA256: strings.Repeat("7", 64)}},
+		RestoreRouteIdentities:   []artifactIdentity{{Type: "route", Family: FamilyIPv4, Role: "restore", SHA256: strings.Repeat("8", 64)}},
+		ProtectedConfigOperation: "restore-acl",
+		Counts:                   RecoveryPlan{RemoveVPNRoutes: 1, RestoreRoutes: 1},
+	}
+	first := plan.IdentitySHA256()
+	if len(first) != 64 || first != strings.ToLower(first) {
+		t.Fatalf("full restore identity = %q", first)
+	}
+	if got := plan.IdentitySHA256(); got != first {
+		t.Fatalf("full restore identity changed: %q != %q", got, first)
+	}
+	wantChallengeDigest := sha256.Sum256([]byte(strings.ToLower(`C:\ProgramData\HomeGateway\p35`) + "\x00" + first))
+	wantChallenge := "P35-FULL-RESTORE-" + strings.ToUpper(hex.EncodeToString(wantChallengeDigest[:])[:16])
+	if got := plan.ConfirmationChallenge(`C:\ProgramData\HomeGateway\p35`); got != wantChallenge {
+		t.Fatalf("full restore challenge = %q, want %q", got, wantChallenge)
+	}
+
+	changed := plan
+	changed.RemoveRouteIdentities = append([]artifactIdentity(nil), plan.RemoveRouteIdentities...)
+	changed.RemoveRouteIdentities[0].SHA256 = strings.Repeat("9", 64)
+	if changed.Counts != plan.Counts || changed.IdentitySHA256() == first {
+		t.Fatal("same counts with different exact route identity reused the plan hash")
+	}
+	changed = plan
+	changed.FirewallEnforced = false
+	if changed.IdentitySHA256() == first {
+		t.Fatal("FirewallEnforced was omitted from the plan identity")
+	}
 }
 
 func TestWindowsEmergencyDisableFailsWhenRetainedSinkDisappears(t *testing.T) {

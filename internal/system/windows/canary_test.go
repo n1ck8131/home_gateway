@@ -1,6 +1,7 @@
 package windows
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -204,6 +205,71 @@ func TestBuildCanaryPlanProducesBoundedDualStackArtifacts(t *testing.T) {
 		}
 		if strings.Contains(string(payload), "PrivateKey") || strings.Contains(string(payload), "config") {
 			t.Fatalf("candidate contains provider source material: %s", payload)
+		}
+	}
+}
+
+func TestCanaryCandidateSHA256IsExactDeterministicAndRedacted(t *testing.T) {
+	inventory, inspection := qualifiedCanaryInput()
+	plan, err := BuildCanaryPlan(inventory, inspection, CanaryRequest{
+		Revision:        "p35-canary-001",
+		TargetAddresses: []string{"198.51.100.10", "2001:db8:100::10"},
+		DNSNamespace:    CanaryDNSNamespace,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ConfigSHA256 = strings.Repeat("a", 64)
+	plan.StateRootIdentity = stateRootIdentity(`C:\ProgramData\HomeGateway\p35`)
+	plan.WatchdogTimeoutSeconds = 120
+	want := plan.CandidateSHA256()
+	if len(want) != 64 || want != strings.ToLower(want) {
+		t.Fatalf("candidate SHA-256 = %q", want)
+	}
+	if got := plan.CandidateSHA256(); got != want {
+		t.Fatalf("candidate SHA-256 changed without input change: %q != %q", got, want)
+	}
+	challenge := plan.ConfirmationChallenge(`C:\ProgramData\HomeGateway\p35`)
+	if challenge != "P35-APPLY-"+strings.ToUpper(want[:16]) {
+		t.Fatalf("challenge = %q, candidate = %q", challenge, want)
+	}
+
+	mutations := map[string]func(*CanaryPlan){
+		"endpoint": func(value *CanaryPlan) { value.QualifiedEndpoints[0] = "203.0.113.6/32" },
+		"routes": func(value *CanaryPlan) {
+			value.Candidate.Routes = bytes.Replace(value.Candidate.Routes, []byte("198.51.100.10/32"), []byte("198.51.100.11/32"), 1)
+		},
+		"sinks": func(value *CanaryPlan) {
+			value.Candidate.Sinks = bytes.Replace(value.Candidate.Sinks, []byte("198.51.100.10/32"), []byte("198.51.100.11/32"), 1)
+		},
+		"firewall": func(value *CanaryPlan) {
+			value.Candidate.Firewall = bytes.Replace(value.Candidate.Firewall, []byte("198.51.100.10/32"), []byte("198.51.100.11/32"), 1)
+		},
+		"nrpt": func(value *CanaryPlan) {
+			value.Candidate.DNS = bytes.Replace(value.Candidate.DNS, []byte("10.20.30.1"), []byte("10.20.30.3"), 1)
+		},
+		"timeout": func(value *CanaryPlan) { value.WatchdogTimeoutSeconds++ },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			changed := cloneCanaryValue(t, plan)
+			mutate(&changed)
+			if got := changed.CandidateSHA256(); got == want {
+				t.Fatalf("candidate hash did not change for %s", name)
+			}
+		})
+	}
+
+	public, err := json.Marshal(plan.candidateEnvelope())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"198.51.100.10", "2001:db8:100::10", "203.0.113.5", "10.20.30.1",
+		testPhysicalGUID, testRedShieldGUID, "vpn.example.test", "RedShield",
+	} {
+		if bytes.Contains(public, []byte(forbidden)) {
+			t.Fatalf("candidate envelope leaked %q: %s", forbidden, public)
 		}
 	}
 }

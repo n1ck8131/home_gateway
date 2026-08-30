@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/vsevo/home-gateway/internal/providers/redshield"
+	"github.com/vsevo/home-gateway/internal/revisions/apply"
 	windowssystem "github.com/vsevo/home-gateway/internal/system/windows"
 	"github.com/vsevo/home-gateway/internal/tunnel"
 )
@@ -296,7 +297,7 @@ func TestRunWindowsCanaryPlanIsReadOnlyRedactedAndChallengeBound(t *testing.T) {
 		"mode", "revision", "ready_for_live_gate",
 		"live_mutation_performed", "route_count", "sink_count",
 		"persistent_sink_ready", "firewall_rule_count", "dns_rule_count",
-		"confirmation_challenge", "confirm_timeout_seconds",
+		"confirmation_challenge", "candidate_sha256", "candidate_identity", "confirm_timeout_seconds",
 	}
 	gotKeys := make([]string, 0, len(successFields))
 	for key := range successFields {
@@ -447,8 +448,47 @@ func TestParseCanaryPlanCommandRejectsAmbiguousArguments(t *testing.T) {
 	}
 }
 
+func TestParseCanaryFullRestorePlanIsReadOnlyAndExact(t *testing.T) {
+	command, ok := parseCanaryFullRestorePlanCommand([]string{"windows", "canary", "full-restore-plan", "--state-root", `C:\ProgramData\HomeGateway\p35`, "--json"})
+	if !ok || command.stateRoot == "" {
+		t.Fatalf("full restore plan parse = %#v, %v", command, ok)
+	}
+	for _, args := range [][]string{
+		{"windows", "canary", "full-restore-plan", "--state-root", "state"},
+		{"windows", "canary", "full-restore-plan", "--state-root", "a", "--state-root", "b", "--json"},
+		{"windows", "canary", "full-restore-plan", "--state-root", "state", "--confirm-recovery", "x", "--json"},
+	} {
+		if _, ok := parseCanaryFullRestorePlanCommand(args); ok {
+			t.Fatalf("unsafe full restore plan args parsed: %v", args)
+		}
+	}
+}
+
+func TestLoadCanaryJournalReadOnlyNeverRecoversAtomicReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "journal.json")
+	current := []byte("{\"state\":\"idle\"}\n")
+	next := []byte("{\"state\":\"restored\"}\n")
+	if err := os.WriteFile(path, current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".next", next, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := loadCanaryJournalReadOnly(path)
+	if err != nil || journal.State != apply.StateIdle {
+		t.Fatalf("read-only journal = %#v, %v", journal, err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, current) {
+		t.Fatalf("current journal changed: %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(path + ".next"); err != nil || !bytes.Equal(got, next) {
+		t.Fatalf("atomic leftover changed: %q, %v", got, err)
+	}
+}
+
 func TestParseCanaryLiveCommandRequiresActionSpecificConfirmation(t *testing.T) {
-	planArgs := []string{"windows", "canary", "apply", "--config", "config", "--config-sha256", strings.Repeat("a", 64), "--state-root", "state", "--revision", "p35", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--confirm-live", "P35-APPLY-0011223344556677", "--json"}
+	planArgs := []string{"windows", "canary", "apply", "--config", "config", "--config-sha256", strings.Repeat("a", 64), "--candidate-sha256", strings.Repeat("b", 64), "--state-root", "state", "--revision", "p35", "--target", "1.1.1.1", "--dns-namespace", ".probe.example", "--confirm-live", "P35-APPLY-0011223344556677", "--json"}
 	command, ok := parseCanaryLiveCommand(planArgs)
 	if !ok || command.action != "apply" || command.liveConfirm == "" || len(command.plan.targets) != 1 {
 		t.Fatalf("valid live command did not parse: %#v, %v", command, ok)
@@ -499,7 +539,12 @@ func TestRunCanaryRecoveryDoesNotCreateAbsentStateRoot(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "absent")
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
-			code := runCanaryLive(canaryLiveCommand{action: action, plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: confirmation}, &stdout, &stderr, dependencies{
+			command := canaryLiveCommand{action: action, plan: canaryPlanCommand{stateRoot: root}, recoveryConfirm: confirmation}
+			if action == "full-restore" {
+				command.recoveryConfirm = recoveryRestoreToken + "-0123456789ABCDEF"
+				command.recoveryPlanSHA256 = strings.Repeat("a", 64)
+			}
+			code := runCanaryLive(command, &stdout, &stderr, dependencies{
 				validateStateRoot: func(string) error { return nil },
 			})
 			if code != 0 || stderr.Len() != 0 {

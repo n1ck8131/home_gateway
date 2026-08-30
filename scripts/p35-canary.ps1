@@ -1,6 +1,6 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [ValidateSet('Plan', 'Apply', 'Confirm', 'Rollback', 'Recover', 'EmergencyDisable', 'FullRestore', 'Status')]
+    [ValidateSet('Plan', 'Apply', 'Confirm', 'Rollback', 'Recover', 'EmergencyDisable', 'FullRestorePlan', 'FullRestore', 'Status')]
     [string]$Action = 'Plan',
     [string]$ConfigPath,
     [string]$StateRoot,
@@ -8,6 +8,8 @@ param(
     [string[]]$Target,
     [string]$DnsNamespace = '.one.one.one.one',
     [string]$Challenge,
+    [string]$CandidateSHA256,
+    [string]$RecoveryPlanSHA256,
     [switch]$ConfirmLiveMutation,
     [switch]$ConfirmRecovery,
     [string]$HgctlPath,
@@ -370,8 +372,18 @@ if ($Action -eq 'Status') {
     return
 }
 
+if ($Action -eq 'FullRestorePlan') {
+    Assert-ElevatedWindows
+    Assert-ProductionStateRoot -Path $resolvedStateRoot
+    Assert-ProtectedLauncher -Root $resolvedStateRoot -Expected $ExpectedLauncherSHA256
+    Invoke-HgctlPlan -Executable (Resolve-InstalledHgctl -Root $resolvedStateRoot) -Arguments @(
+        'windows', 'canary', 'full-restore-plan', '--state-root', $resolvedStateRoot, '--json'
+    )
+    return
+}
+
 if ($Action -in @('Apply', 'Confirm')) {
-    if (@($Target).Count -eq 0 -or -not $ConfirmLiveMutation -or [string]::IsNullOrWhiteSpace($Challenge)) { throw 'Apply and Confirm require Target, ConfirmLiveMutation and the exact candidate challenge' }
+    if (@($Target).Count -eq 0 -or -not $ConfirmLiveMutation -or [string]::IsNullOrWhiteSpace($Challenge) -or $CandidateSHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Apply and Confirm require Target, ConfirmLiveMutation, exact CandidateSHA256 and the exact candidate challenge' }
     if (-not $PSCmdlet.ShouldProcess('current Windows network state', "P3.5 $Action with durable automatic rollback boundary")) { return }
     Assert-ElevatedWindows
     Assert-ProductionStateRoot -Path $resolvedStateRoot
@@ -386,20 +398,27 @@ if ($Action -in @('Apply', 'Confirm')) {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSHA256) -and $ExpectedConfigSHA256 -cne $installedConfig.SHA256) { throw 'requested tunnel config SHA-256 differs from the protected pin' }
     $arguments = @('windows', 'canary', $Action.ToLowerInvariant(), '--config', $installedConfig.Path, '--config-sha256', $installedConfig.SHA256, '--state-root', $resolvedStateRoot, '--revision', $Revision)
     foreach ($address in @($Target)) { $arguments += @('--target', $address) }
-    $arguments += @('--dns-namespace', $DnsNamespace, '--confirm-live', $Challenge, '--json')
+    $arguments += @('--dns-namespace', $DnsNamespace, '--candidate-sha256', $CandidateSHA256, '--confirm-live', $Challenge, '--json')
     Invoke-CheckedHgctl -Executable $resolvedHgctl -Arguments $arguments
     return
 }
 
 if (-not $ConfirmRecovery) { throw 'Recovery actions require ConfirmRecovery' }
+if ($Action -eq 'FullRestore' -and ($RecoveryPlanSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $Challenge -cnotmatch '^P35-FULL-RESTORE-[0-9A-F]{16}$')) { throw 'FullRestore requires an exact RecoveryPlanSHA256 and P35-FULL-RESTORE recovery-plan-derived challenge' }
 if (-not $PSCmdlet.ShouldProcess('project-owned Windows network state', "P3.5 $Action recovery action")) { return }
 Assert-ElevatedWindows
 Assert-ProductionStateRoot -Path $resolvedStateRoot
 Assert-ProtectedLauncher -Root $resolvedStateRoot -Expected $ExpectedLauncherSHA256
 $resolvedHgctl = Resolve-InstalledHgctl -Root $resolvedStateRoot
-$recoveryTokens = @{ Rollback = 'P35-ROLLBACK'; Recover = 'P35-RECOVER'; EmergencyDisable = 'P35-EMERGENCY-DISABLE'; FullRestore = 'P35-FULL-RESTORE' }
+$recoveryTokens = @{ Rollback = 'P35-ROLLBACK'; Recover = 'P35-RECOVER'; EmergencyDisable = 'P35-EMERGENCY-DISABLE'; FullRestore = $Challenge }
 $recoveryCommands = @{ Rollback = 'rollback'; Recover = 'recover'; EmergencyDisable = 'emergency-disable'; FullRestore = 'full-restore' }
-Invoke-CheckedHgctl -Executable $resolvedHgctl -Arguments @(
+    $recoveryArguments = @(
     'windows', 'canary', $recoveryCommands[$Action], '--state-root', $resolvedStateRoot,
     '--confirm-recovery', $recoveryTokens[$Action], '--json'
 )
+if ($Action -eq 'FullRestore') { $recoveryArguments = $recoveryArguments[0..4] + @('--recovery-plan-sha256', $RecoveryPlanSHA256) + $recoveryArguments[5..($recoveryArguments.Count - 1)] }
+Invoke-CheckedHgctl -Executable $resolvedHgctl -Arguments $recoveryArguments
+if ($Action -eq 'FullRestore') {
+    [Console]::Out.WriteLine('NETWORK_RESTORE=COMPLETE')
+    [Console]::Out.WriteLine('ACL_RESTORE=PENDING')
+}

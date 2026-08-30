@@ -1,104 +1,150 @@
-BeforeAll {
-    $script:Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $script:Gate = Join-Path $script:Root 'scripts/p3-client-gate.ps1'
-}
+$ErrorActionPreference = 'Stop'
 
-Describe 'read-only P3 client gate' {
-    It 'parses and exposes only read-only observation actions' {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Gate, [ref]$tokens, [ref]$errors)
-        $errors | Should -BeNullOrEmpty
-        $text = $ast.Extent.Text
-        $text | Should -Match "ValidateSet\('Preflight', 'PostConnect', 'PostRollback'\)"
-        $text | Should -Match '5\.0\.1\.5'
-        $text | Should -Match 'Get-AuthenticodeSignature'
-        $text | Should -Match 'ExpectedGuestPeerFingerprintSHA256'
-        $text | Should -Match 'ExpectedEgressIdentitySHA256'
-        $text | Should -Not -Match 'IdentityAgent=none'
-        $text | Should -Not -Match 'Import-Vpn|Connect-Vpn|Disconnect-Vpn|Remove-Vpn|Remove-Net|Set-Net|New-Net|Disable-Net|Enable-Net|Restart-Service|Stop-Service'
+Describe 'read-only P3 client gate v2' {
+    BeforeAll {
+        $script:Gate = Join-Path $PSScriptRoot '..\..\scripts\p3-client-gate.ps1'
+        . $script:Gate
+
+        function New-ClientContext {
+            return [pscustomobject]@{
+                LauncherPath = Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1'
+                RuntimeRoot = Join-Path $TestDrive 'runtime'
+                ExpectedManifestSHA256 = ('1' * 64)
+                PayloadSHA256 = ('2' * 64)
+                ProtocolSHA256 = ('3' * 64)
+                SelectedGuestFingerprintSHA256 = ('4' * 64)
+                PreviousNonceSHA256 = ('5' * 64)
+                ExpectedBeforeCounterSHA256 = ('6' * 64)
+                ExpectedAfterCounterSHA256 = ('7' * 64)
+            }
+        }
+
+        function New-ClientReceipt([object]$Context, [string]$Nonce) {
+            return [ordered]@{
+                schema = 'home-gateway/p3-peer-client-observe/v2'; payload_sha256 = $Context.PayloadSHA256
+                protocol_sha256 = $Context.ProtocolSHA256; nonce_sha256 = Get-P3ClientTextSHA256 $Nonce
+                selected_guest_match = $true; handshake_fresh = $true
+                before_counter_sha256 = $Context.ExpectedBeforeCounterSHA256
+                after_counter_sha256 = $Context.ExpectedAfterCounterSHA256
+                traffic_delta = $true; observation_duration_seconds = 10
+            }
+        }
+
+        function New-FixtureObservation {
+            return [ordered]@{
+                schema = 'home-gateway/p3-client-local-observation/v2'
+                profile_sha256 = ('8' * 64); profile_absent = $false; client_sha256 = ('9' * 64)
+                client_version_match = $true; signature_valid = $true
+                redshield_class_sha256 = ('a' * 64); redshield_class_count = 1
+                cisco_class_sha256 = ('b' * 64); cisco_class_count = 0
+                selfhosted_adapter_count = 1; selfhosted_class_sha256 = ('c' * 64)
+                route_matches_selfhosted = $true; egress_identity_sha256 = ('d' * 64); egress_observation_count = 3
+                observed_at_utc = [DateTime]::UtcNow.ToString('o'); live_mutation_performed = $false
+            }
+        }
     }
 
-    It 'converts synthetic observations to a sanitized schema without raw identities' {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Gate, [ref]$tokens, [ref]$errors)
-        $definitions = foreach ($name in @('Get-TextSHA256', 'ConvertTo-SanitizedClientRecord')) {
-            $definition = @($ast.FindAll({
-                param($node)
-                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
-            }, $true))
-            $definition.Count | Should -Be 1
-            $definition[0].Extent.Text
+    BeforeEach {
+        $script:Context = New-ClientContext
+        $script:FixtureRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $script:FixtureRoot
+        $script:Fixture = Join-Path $script:FixtureRoot 'observation.json'
+        [IO.File]::WriteAllText($script:Fixture, (New-FixtureObservation | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+    }
+
+    It 'rejects synthetic observation input outside explicit test mode for every action' {
+        foreach ($action in @('Preflight', 'PostConnect', 'PostRollback')) {
+            { Read-P3ClientObservation -Action $action -ObservationPath $script:Fixture -TestOnlyFixture:$false -TestFixtureRoot $script:FixtureRoot } |
+                Should -Throw '*test-only*'
         }
-        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
-        $raw = [pscustomobject]@{
-            profile_sha256 = ('a' * 64); client_sha256 = ('b' * 64); client_version = '5.0.1.5'; signature_valid = $true
-            redshield_identity = 'redshield-adapter'; cisco_identity = 'cisco-adapter'; selfhosted_identity = 'selfhosted-adapter'
-            route_interface_identity = 'selfhosted-adapter'; peer_fingerprint_sha256 = (Get-TextSHA256 'guest-peer'); handshake_fresh = $true; traffic_delta = $true
-            egress_values = @('198.51.100.9', '198.51.100.9', '198.51.100.9')
+    }
+
+    It 'accepts fixtures only with explicit test mode under the injected root' {
+        $value = Read-P3ClientObservation -Action Preflight -ObservationPath $script:Fixture -TestOnlyFixture -TestFixtureRoot $script:FixtureRoot
+        $value.schema | Should -BeExactly 'home-gateway/p3-client-local-observation/v2'
+        $outside = Join-Path $TestDrive 'outside.json'
+        [IO.File]::WriteAllText($outside, '{}')
+        { Read-P3ClientObservation -Action Preflight -ObservationPath $outside -TestOnlyFixture -TestFixtureRoot $script:FixtureRoot } |
+            Should -Throw '*fixture root*'
+        { Read-P3ClientObservation -Action Preflight -ObservationPath '' -TestOnlyFixture -TestFixtureRoot $script:FixtureRoot } |
+            Should -Throw '*requires ObservationPath*'
+    }
+
+    It 'binds client observation to one fresh nonce through the fixed guard launcher' {
+        $nonce = 'a' * 64
+        $script:Calls = 0
+        $receipt = Invoke-P3ClientPeerObservation -Context $script:Context -Nonce $nonce -Runner {
+            param($Executable, $Arguments, $InputJson, $TimeoutSeconds, $MaximumBytes)
+            $script:Calls++
+            $Arguments | Should -Contain '-Action'
+            $Arguments | Should -Contain 'ClientObserve'
+            $Arguments | Should -Not -Contain '/usr/local/libexec/home-gateway-p3-peer-observe'
+            $request = $InputJson | ConvertFrom-Json
+            $request.selected_guest_fingerprint_sha256 | Should -BeExactly $script:Context.SelectedGuestFingerprintSHA256
+            [pscustomobject]@{
+                ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''
+                StdOut = (New-ClientReceipt $script:Context $nonce | ConvertTo-Json -Compress)
+            }
         }
-        $record = ConvertTo-SanitizedClientRecord -Action PostConnect -Observation $raw `
-            -ExpectedGuestPeerFingerprintSHA256 (Get-TextSHA256 'guest-peer') -ExpectedEgressIdentitySHA256 (Get-TextSHA256 '198.51.100.9')
+        $receipt.nonce_sha256 | Should -BeExactly (Get-P3ClientTextSHA256 $nonce)
+        $receipt.traffic_delta | Should -BeTrue
+        $script:Calls | Should -Be 1
+    }
+
+    It 'rejects wrong replayed stale mismatched no-delta and extra client receipts' {
+        $nonce = 'a' * 64
+        $base = New-ClientReceipt $script:Context $nonce
+        $cases = @(
+            @{ Name = 'nonce'; Change = { param($r) $r.nonce_sha256 = ('0' * 64) } },
+            @{ Name = 'payload'; Change = { param($r) $r.payload_sha256 = ('0' * 64) } },
+            @{ Name = 'protocol'; Change = { param($r) $r.protocol_sha256 = ('0' * 64) } },
+            @{ Name = 'selected Guest'; Change = { param($r) $r.selected_guest_match = $false } },
+            @{ Name = 'handshake'; Change = { param($r) $r.handshake_fresh = $false } },
+            @{ Name = 'before counter'; Change = { param($r) $r.before_counter_sha256 = ('0' * 64) } },
+            @{ Name = 'after counter'; Change = { param($r) $r.after_counter_sha256 = ('0' * 64) } },
+            @{ Name = 'traffic'; Change = { param($r) $r.traffic_delta = $false } },
+            @{ Name = 'duration'; Change = { param($r) $r.observation_duration_seconds = 181 } },
+            @{ Name = 'schema'; Change = { param($r) $r.extra = $true } }
+        )
+        foreach ($case in $cases) {
+            $receipt = [ordered]@{}; foreach ($key in $base.Keys) { $receipt[$key] = $base[$key] }
+            & $case.Change $receipt
+            $script:BadReceipt = $receipt
+            { Invoke-P3ClientPeerObservation -Context $script:Context -Nonce $nonce -Runner {
+                [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''; StdOut = ($script:BadReceipt | ConvertTo-Json -Compress) }
+            } } | Should -Throw "*$($case.Name)*"
+        }
+        $script:Context.PreviousNonceSHA256 = Get-P3ClientTextSHA256 $nonce
+        $calls = 0
+        { Invoke-P3ClientPeerObservation -Context $script:Context -Nonce $nonce -Runner { $calls++ } } | Should -Throw '*replayed*'
+        $calls | Should -Be 0
+    }
+
+    It 'writes PRE preservation classes and computes later equality itself' {
+        $pre = New-P3ClientPreReceipt -Observation ([pscustomobject](New-FixtureObservation)) -NowUtc ([DateTime]::UtcNow)
+        $pre.schema | Should -BeExactly 'home-gateway/p3-client-pre-receipt/v2'
+        $same = Test-P3ClientPreservation -PreReceipt $pre -Observation ([pscustomobject](New-FixtureObservation)) -NowUtc ([DateTime]::UtcNow)
+        $same.redshield_equals_pre | Should -BeTrue
+        $same.cisco_equals_pre | Should -BeTrue
+        $changed = [pscustomobject](New-FixtureObservation)
+        $changed.redshield_class_sha256 = ('0' * 64)
+        { Test-P3ClientPreservation -PreReceipt $pre -Observation $changed -NowUtc ([DateTime]::UtcNow) } |
+            Should -Throw '*RedShield*'
+    }
+
+    It 'returns a sanitized action record without raw adapter profile or host values' {
+        $observation = [pscustomobject](New-FixtureObservation)
+        $record = ConvertTo-P3ClientRecord -Action PostConnect -Observation $observation -ClientReceipt ([pscustomobject](New-ClientReceipt $script:Context ('a' * 64)))
+        $record.schema | Should -BeExactly 'home-gateway/p3-client-gate/v2'
         $record.live_mutation_performed | Should -BeFalse
-        $record.handshake_fresh | Should -BeTrue
-        $record.traffic_delta_observed | Should -BeTrue
-        $record.route_matches_selfhosted | Should -BeTrue
-        $record.egress_match_count | Should -Be 3
-        $json = ConvertTo-Json -Compress -InputObject $record
-        $json | Should -Not -Match '198\.51\.100\.9|guest-peer|redshield-adapter|cisco-adapter|selfhosted-adapter'
+        $json = $record | ConvertTo-Json -Compress
+        $json | Should -Not -Match 'ssh_host|adapter_name|profile_path|raw'
     }
 
-    It 'accepts PostRollback only with a sanitized proof that the selected profile is absent' {
-        $observationPath = Join-Path $TestDrive 'post-rollback.json'
-        $observation = [pscustomobject][ordered]@{
-            profile_sha256='';profile_absent=$true;client_sha256=('b' * 64);client_version='5.0.1.5';signature_valid=$true
-            redshield_identity='redshield';cisco_identity='cisco';selfhosted_identity='';route_interface_identity=''
-            peer_fingerprint_sha256='';handshake_fresh=$false;traffic_delta=$false;egress_values=@()
-            redshield_equals_pre=$true;cisco_equals_pre=$true
-        }
-        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
-
-        $json = & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $script:Gate -Action PostRollback -ObservationPath $observationPath `
-            -ExpectedGuestPeerFingerprintSHA256 ('a' * 64) -ExpectedEgressIdentitySHA256 ('c' * 64) `
-            -ExpectedProfileSHA256 ('d' * 64) -ExpectedClientSHA256 ('b' * 64) -ExpectedKnownHostsSHA256 ('e' * 64)
-        $LASTEXITCODE | Should -Be 0
-        ($json | ConvertFrom-Json).profile_absent | Should -BeTrue
-        $observation.profile_absent = $false
-        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
-        { & $script:Gate -Action PostRollback -ObservationPath $observationPath `
-            -ExpectedGuestPeerFingerprintSHA256 ('a' * 64) -ExpectedEgressIdentitySHA256 ('c' * 64) `
-            -ExpectedProfileSHA256 ('d' * 64) -ExpectedClientSHA256 ('b' * 64) -ExpectedKnownHostsSHA256 ('e' * 64) } | Should -Throw '*post-rollback*'
-    }
-
-    It 'fails closed on timed-out or oversized injected SSH process results' {
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Gate, [ref]$tokens, [ref]$errors)
-        $definition = @($ast.FindAll({
-            param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-BoundedSshObservation'
-        }, $true))
-        $definition.Count | Should -Be 1
-        . ([ScriptBlock]::Create($definition[0].Extent.Text))
-        { Invoke-BoundedSshObservation -Executable 'synthetic-ssh.exe' -Arguments @('arg') -TimeoutSeconds 15 -MaxOutputBytes 1024 `
-            -Runner { [pscustomobject]@{ExitCode=-1;TimedOut=$true;StdOut='';StdErr=''} } } | Should -Throw '*timed out*'
-        { Invoke-BoundedSshObservation -Executable 'synthetic-ssh.exe' -Arguments @('arg') -TimeoutSeconds 15 -MaxOutputBytes 256 `
-            -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut=('x' * 257);StdErr=''} } } | Should -Throw '*output exceeds*'
-        $value = Invoke-BoundedSshObservation -Executable 'synthetic-ssh.exe' -Arguments @('arg') -TimeoutSeconds 15 -MaxOutputBytes 1024 `
-            -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut='{"selected_peer_fingerprint_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","handshake_fresh":true,"traffic_delta":true}';StdErr=''} }
-        $value.handshake_fresh | Should -BeTrue
-    }
-
-    It 'requires exact profile, client and known-hosts trust pins before processing an observation' {
-        $observationPath = Join-Path $TestDrive 'trust-inputs.json'
-        $observation = [pscustomobject][ordered]@{
-            profile_sha256=('c' * 64);profile_absent=$false;client_sha256=('d' * 64);client_version='5.0.1.5';signature_valid=$true
-            redshield_identity='redshield';cisco_identity='cisco';selfhosted_identity='';route_interface_identity=''
-            peer_fingerprint_sha256='';handshake_fresh=$false;traffic_delta=$false;egress_values=@();redshield_equals_pre=$true;cisco_equals_pre=$true
-        }
-        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
-        { & $script:Gate -Action Preflight -ObservationPath $observationPath `
-            -ExpectedGuestPeerFingerprintSHA256 ('a' * 64) -ExpectedEgressIdentitySHA256 ('b' * 64) } | Should -Throw
+    It 'contains no second observer synthetic production bypass or network mutation command' {
+        $text = Get-Content -LiteralPath $script:Gate -Raw
+        $text | Should -Not -Match 'home-gateway-p3-peer-observe|System32.{1,4}OpenSSH|Import-Vpn|Connect-Vpn|Disconnect-Vpn|Remove-Vpn|Remove-Net|Set-Net|New-Net|Disable-Net|Enable-Net|Restart-Service|Stop-Service'
+        $text | Should -Match 'p3-amnezia-peer-guard\.ps1'
+        $text | Should -Match 'TestOnlyFixture'
     }
 }

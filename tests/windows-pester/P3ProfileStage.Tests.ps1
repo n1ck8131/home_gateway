@@ -42,4 +42,42 @@ Describe 'protected P3 profile staging' {
         { Test-StageManifest -Names @('.p3-profile-stage-owner.v1', 'foreign.tmp') -Action Prepare } | Should -Throw '*foreign*'
         { Test-StageManifest -Names @('.p3-profile-stage-owner.v1', 'profile-export.conf', 'other.conf') -Action Verify } | Should -Throw '*foreign*'
     }
+
+    It 'keeps exact profile and executable bytes locked while an actual child reopens them for inspection' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Payload, [ref]$tokens, [ref]$errors)
+        $definitions = foreach ($name in @('Get-StreamSHA256','Invoke-PinnedProfileInspection')) {
+            $definition = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+            }, $true))
+            $definition.Count | Should -Be 1
+            $definition[0].Extent.Text
+        }
+        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
+        $profile = Join-Path $TestDrive 'profile-export.conf'
+        [IO.File]::WriteAllText($profile,'[synthetic-profile]',[Text.UTF8Encoding]::new($false))
+        $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        $child = Join-Path $windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $childHash = (Get-FileHash -LiteralPath $child -Algorithm SHA256).Hash.ToLowerInvariant()
+        $exclusiveWriteBlocked = $false
+        $runner = {
+            param($Executable,$Arguments,$ProfilePath)
+            try {
+                $probe = [IO.File]::Open($ProfilePath,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::None)
+                $probe.Dispose()
+            } catch { $script:exclusiveWriteBlocked = $true }
+            $encodedPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProfilePath))
+            $probeScript = "`$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedPath'));`$s=[IO.File]::Open(`$p,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);try{if(`$s.Length -le 0){exit 9}}finally{`$s.Dispose()}"
+            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+            & $Executable -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded
+            return $LASTEXITCODE
+        }
+
+        $result = Invoke-PinnedProfileInspection -HgctlPath $child -ExpectedHgctlSHA256 $childHash -ProfilePath $profile -Runner $runner
+
+        $result.profile_sha256 | Should -Be (Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:exclusiveWriteBlocked | Should -BeTrue
+    }
 }

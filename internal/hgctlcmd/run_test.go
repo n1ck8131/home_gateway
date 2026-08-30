@@ -59,6 +59,15 @@ func TestRunPreservesVersionCommand(t *testing.T) {
 	}
 }
 
+func TestUsageShowsMandatoryFullRestorePlanHash(t *testing.T) {
+	var usage bytes.Buffer
+	writeUsage("hgctl", &usage)
+	line := "windows canary full-restore --state-root <absolute-path> --confirm-recovery <action-token> --recovery-plan-sha256 <lowercase-sha256> --json"
+	if !strings.Contains(usage.String(), line) {
+		t.Fatalf("full-restore usage omitted mandatory plan hash:\n%s", usage.String())
+	}
+}
+
 func TestRunRedShieldInspectJSONIsRedacted(t *testing.T) {
 	privateKey := commandSyntheticKey(41)
 	publicKey := commandSyntheticKey(42)

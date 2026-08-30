@@ -19,12 +19,22 @@ import (
 )
 
 func loadCanaryJournalReadOnly(path string) (apply.Journal, error) {
+	return loadCanaryJournalReadOnlyBound(path, nil)
+}
+
+func loadCanaryJournalReadOnlyBound(path string, beforeOpen func()) (apply.Journal, error) {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return apply.Journal{State: apply.StateIdle}, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 64<<10 {
 		return apply.Journal{}, errors.New("journal is not one bounded regular file")
+	}
+	if !os.SameFile(info, info) {
+		return apply.Journal{}, errors.New("journal file identity is unavailable")
+	}
+	if beforeOpen != nil {
+		beforeOpen()
 	}
 	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
@@ -36,9 +46,16 @@ func loadCanaryJournalReadOnly(path string) (apply.Journal, error) {
 		return apply.Journal{}, err
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return apply.Journal{}, errors.New("journal file identity changed")
+	}
 	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
 	if err != nil {
 		return apply.Journal{}, err
+	}
+	if len(data) > 64<<10 {
+		return apply.Journal{}, errors.New("journal exceeds its bound")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

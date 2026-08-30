@@ -163,6 +163,8 @@ type FullRestorePlan struct {
 	ProtectedConfigPathIdentity    string             `json:"protected_config_path_identity"`
 	CurrentConfigACLSHA256         string             `json:"current_config_acl_sha256"`
 	BaselineConfigACLSHA256        string             `json:"baseline_config_acl_sha256"`
+	ProtectedConfigSHA256          string             `json:"protected_config_sha256"`
+	ConfigACLSnapshotSHA256        string             `json:"config_acl_snapshot_sha256"`
 	ProtectedConfigOperation       string             `json:"protected_config_operation"`
 	HgctlSHA256                    string             `json:"hgctl_sha256"`
 	CanaryLauncherSHA256           string             `json:"canary_launcher_sha256"`
@@ -178,29 +180,141 @@ func sha256JSON(value any) string {
 	return fmt.Sprintf("%x", digest[:])
 }
 
-func fileSHA256IfRegular(path string) string {
+func fileSHA256Bound(path string, beforeOpen func()) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return ""
+		return "", errors.New("artifact is not one regular file")
+	}
+	if !os.SameFile(info, info) {
+		return "", errors.New("artifact file identity is unavailable")
+	}
+	if beforeOpen != nil {
+		beforeOpen()
 	}
 	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer root.Close()
 	file, err := root.Open(filepath.Base(path))
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return "", errors.New("artifact file identity changed")
+	}
 	digest := sha256.New()
 	if _, err := io.Copy(digest, file); err != nil {
-		return ""
+		return "", err
 	}
-	return fmt.Sprintf("%x", digest.Sum(nil))
+	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+func fileSHA256IfRegular(path string) string {
+	hash, _ := fileSHA256Bound(path, nil)
+	return hash
+}
+
+func requiredFileSHA256(path, label string) (string, error) {
+	hash, err := fileSHA256Bound(path, nil)
+	if err != nil || len(hash) != 64 {
+		return "", fmt.Errorf("%s identity is required", label)
+	}
+	return hash, nil
+}
+
+type configACLRestoreBinding struct {
+	Version      int    `json:"version"`
+	ConfigPath   string `json:"config_path"`
+	ConfigSHA256 string `json:"config_sha256"`
+	VolumeSerial string `json:"volume_serial"`
+	FileIndex    string `json:"file_index"`
+	SDDL         string `json:"sddl"`
+}
+
+func readConfigACLRestoreBinding(rootPath string) (configACLRestoreBinding, string, error) {
+	return readConfigACLRestoreBindingBound(rootPath, nil)
+}
+
+func readConfigACLRestoreBindingBound(rootPath string, beforeOpen func()) (configACLRestoreBinding, string, error) {
+	path := filepath.Join(rootPath, "config-source-before.v1.json")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64<<10 {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot is not one bounded regular file")
+	}
+	if !os.SameFile(info, info) {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot file identity is unavailable")
+	}
+	if beforeOpen != nil {
+		beforeOpen()
+	}
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return configACLRestoreBinding{}, "", err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return configACLRestoreBinding{}, "", err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot identity changed")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
+	if err != nil || len(data) > 64<<10 {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot exceeds its bound")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var binding configACLRestoreBinding
+	if err := decoder.Decode(&binding); err != nil {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot schema differs")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot contains trailing data")
+	}
+	if binding.Version != 1 || !filepath.IsAbs(binding.ConfigPath) || filepath.Clean(binding.ConfigPath) != binding.ConfigPath || len(binding.ConfigSHA256) != 64 || binding.SDDL == "" {
+		return configACLRestoreBinding{}, "", errors.New("config ACL snapshot binding differs")
+	}
+	snapshotDigest := sha256.Sum256(data)
+	return binding, fmt.Sprintf("%x", snapshotDigest[:]), nil
 }
 
 func (plan FullRestorePlan) IdentitySHA256() string { return sha256JSON(plan) }
+
+func (plan FullRestorePlan) Validate() error {
+	if plan.Schema != "home-gateway/windows-full-restore/v1" || plan.ProtectedConfigOperation != "restore-acl" || len(plan.WatchdogTaskIdentities) != 2 {
+		return errors.New("full restore plan terminal identities are incomplete")
+	}
+	for label, value := range map[string]string{
+		"state root": plan.StateRootIdentity, "journal": plan.JournalFileSHA256, "ownership registry": plan.OwnershipRegistrySHA256,
+		"boot marker": plan.BootMarkerSHA256, "install snapshot": plan.InstallSnapshotSHA256, "managed state": plan.CurrentManagedSHA256,
+		"foreign state": plan.PreservedForeignSHA256, "config path": plan.ProtectedConfigPathIdentity, "current config ACL": plan.CurrentConfigACLSHA256,
+		"baseline config ACL": plan.BaselineConfigACLSHA256, "protected config": plan.ProtectedConfigSHA256, "config ACL snapshot": plan.ConfigACLSnapshotSHA256,
+		"hgctl": plan.HgctlSHA256, "canary launcher": plan.CanaryLauncherSHA256, "bootstrap driver": plan.BootstrapDriverSHA256,
+		"bootstrap payload": plan.BootstrapPayloadSHA256,
+	} {
+		if len(value) != 64 || strings.Trim(value, "0123456789abcdef") != "" {
+			return fmt.Errorf("full restore plan %s identity is required", label)
+		}
+	}
+	watchdogIdentities := make(map[string]struct{}, len(plan.WatchdogTaskIdentities))
+	for _, identity := range plan.WatchdogTaskIdentities {
+		if identity.Type != "scheduled-task" || identity.Role != "remove" || len(identity.SHA256) != 64 || strings.Trim(identity.SHA256, "0123456789abcdef") != "" {
+			return errors.New("full restore plan watchdog identity differs")
+		}
+		watchdogIdentities[identity.SHA256] = struct{}{}
+	}
+	if len(watchdogIdentities) != len(plan.WatchdogTaskIdentities) {
+		return errors.New("full restore plan watchdog identities are not unique")
+	}
+	return nil
+}
 
 func (plan FullRestorePlan) ConfirmationChallenge(stateRoot string) string {
 	digest := sha256.Sum256([]byte(strings.ToLower(stateRoot) + "\x00" + plan.IdentitySHA256()))
@@ -709,33 +823,66 @@ func (runtime *Runtime) PlanFullRestore(ctx context.Context, journal apply.Journ
 	}
 	removeRoutes, removeSinks, removeFirewall, removeNRPT := snapshotIdentities(managed, "remove")
 	restoreRoutes, restoreSinks, restoreFirewall, restoreNRPT := snapshotIdentities(before, "restore")
+	binding, configACLSnapshotSHA256, err := readConfigACLRestoreBinding(runtime.Root)
+	if err != nil {
+		return FullRestorePlan{}, err
+	}
+	protectedConfigSHA256, err := requiredFileSHA256(binding.ConfigPath, "protected config")
+	if err != nil || protectedConfigSHA256 != binding.ConfigSHA256 {
+		return FullRestorePlan{}, errors.New("protected config identity differs from the ACL snapshot")
+	}
+	currentConfigACLSHA256, err := configACLIdentity(binding.ConfigPath)
+	if err != nil {
+		return FullRestorePlan{}, err
+	}
+	baselineConfigACLDigest := sha256.Sum256([]byte(binding.SDDL))
+	requiredHashes := make(map[string]string)
+	for label, path := range map[string]string{
+		"journal": filepath.Join(runtime.Root, "journal.json"), "ownership registry": filepath.Join(runtime.Root, "native-ownership.v1.json"),
+		"boot marker": filepath.Join(runtime.Root, "boot-marker.v1.json"), "install snapshot": filepath.Join(runtime.Root, installSnapshotName),
+		"hgctl": filepath.Join(runtime.Root, "bin", "hgctl.exe"), "canary launcher": filepath.Join(runtime.Root, "bin", "p35-canary.ps1"),
+		"bootstrap driver": filepath.Join(runtime.Root, "bin", "p35-bootstrap.ps1"), "bootstrap payload": filepath.Join(runtime.Root, "bin", "p35-bootstrap-elevated.ps1"),
+	} {
+		requiredHashes[label], err = requiredFileSHA256(path, label)
+		if err != nil {
+			return FullRestorePlan{}, err
+		}
+	}
 	plan := FullRestorePlan{
-		Schema:                      "home-gateway/windows-full-restore/v1",
-		StateRootIdentity:           StateRootIdentity(runtime.Root),
-		JournalState:                journal.State,
-		JournalFileSHA256:           fileSHA256IfRegular(filepath.Join(runtime.Root, "journal.json")),
-		OwnershipRegistrySHA256:     fileSHA256IfRegular(filepath.Join(runtime.Root, "native-ownership.v1.json")),
-		RegistryVersion:             ArtifactVersion,
-		BootMarkerSHA256:            fileSHA256IfRegular(filepath.Join(runtime.Root, "boot-marker.v1.json")),
-		NonterminalMutation:         journal.State != apply.StateIdle && journal.State != apply.StateCommitted && journal.State != apply.StateRolledBack && journal.State != apply.StateRestored,
-		InstallSnapshotSHA256:       fileSHA256IfRegular(filepath.Join(runtime.Root, installSnapshotName)),
-		CurrentManagedSHA256:        sha256JSON(managed),
-		PreservedForeignSHA256:      sha256JSON(foreignKeys(snapshot)),
-		FirewallEnforced:            snapshot.FirewallEnforced,
-		RemoveRouteIdentities:       removeRoutes,
-		RemoveSinkIdentities:        removeSinks,
-		RemoveFirewallIdentities:    removeFirewall,
-		RemoveNRPTIdentities:        removeNRPT,
-		RestoreRouteIdentities:      restoreRoutes,
-		RestoreSinkIdentities:       restoreSinks,
-		RestoreFirewallIdentities:   restoreFirewall,
-		RestoreNRPTIdentities:       restoreNRPT,
-		ProtectedConfigPathIdentity: StateRootIdentity(filepath.Join(runtime.Root, "secrets", "tunnel.conf")),
+		Schema:                    "home-gateway/windows-full-restore/v1",
+		StateRootIdentity:         StateRootIdentity(runtime.Root),
+		JournalState:              journal.State,
+		JournalFileSHA256:         requiredHashes["journal"],
+		OwnershipRegistrySHA256:   requiredHashes["ownership registry"],
+		RegistryVersion:           ArtifactVersion,
+		BootMarkerSHA256:          requiredHashes["boot marker"],
+		NonterminalMutation:       journal.State != apply.StateIdle && journal.State != apply.StateCommitted && journal.State != apply.StateRolledBack && journal.State != apply.StateRestored,
+		InstallSnapshotSHA256:     requiredHashes["install snapshot"],
+		CurrentManagedSHA256:      sha256JSON(managed),
+		PreservedForeignSHA256:    sha256JSON(foreignKeys(snapshot)),
+		FirewallEnforced:          snapshot.FirewallEnforced,
+		RemoveRouteIdentities:     removeRoutes,
+		RemoveSinkIdentities:      removeSinks,
+		RemoveFirewallIdentities:  removeFirewall,
+		RemoveNRPTIdentities:      removeNRPT,
+		RestoreRouteIdentities:    restoreRoutes,
+		RestoreSinkIdentities:     restoreSinks,
+		RestoreFirewallIdentities: restoreFirewall,
+		RestoreNRPTIdentities:     restoreNRPT,
+		WatchdogTaskIdentities: []artifactIdentity{
+			exactArtifactIdentity("scheduled-task", "", "remove", map[string]string{"task_name": "HomeGateway-P35-Recovery", "task_path": `\`}),
+			exactArtifactIdentity("scheduled-task", "", "remove", map[string]string{"task_name": "HomeGateway-P35-Reconcile", "task_path": `\`}),
+		},
+		ProtectedConfigPathIdentity: StateRootIdentity(binding.ConfigPath),
+		CurrentConfigACLSHA256:      currentConfigACLSHA256,
+		BaselineConfigACLSHA256:     fmt.Sprintf("%x", baselineConfigACLDigest[:]),
+		ProtectedConfigSHA256:       protectedConfigSHA256,
+		ConfigACLSnapshotSHA256:     configACLSnapshotSHA256,
 		ProtectedConfigOperation:    "restore-acl",
-		HgctlSHA256:                 fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "hgctl.exe")),
-		CanaryLauncherSHA256:        fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "p35-canary.ps1")),
-		BootstrapDriverSHA256:       fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "p35-bootstrap.ps1")),
-		BootstrapPayloadSHA256:      fileSHA256IfRegular(filepath.Join(runtime.Root, "bin", "p35-bootstrap-elevated.ps1")),
+		HgctlSHA256:                 requiredHashes["hgctl"],
+		CanaryLauncherSHA256:        requiredHashes["canary launcher"],
+		BootstrapDriverSHA256:       requiredHashes["bootstrap driver"],
+		BootstrapPayloadSHA256:      requiredHashes["bootstrap payload"],
 		Counts:                      counts,
 	}
 	plan.OwnedEntryIdentities = append(plan.OwnedEntryIdentities, removeRoutes...)
@@ -768,6 +915,9 @@ func (runtime *Runtime) PlanFullRestore(ctx context.Context, journal apply.Journ
 		}
 	}
 	sortArtifactIdentities(plan.LockAtomicIdentities)
+	if err := plan.Validate(); err != nil {
+		return FullRestorePlan{}, err
+	}
 	return plan, nil
 }
 

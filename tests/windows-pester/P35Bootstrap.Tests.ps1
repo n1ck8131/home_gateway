@@ -276,7 +276,7 @@ if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore orig
             -ExpectedConfigSHA256 (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() `
             -ExpectedDriverSHA256 $driverSHA256 `
             -ExpectedPayloadSHA256 (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant() `
-            -ACLPlanSHA256 ('d' * 64) -Confirmation 'P35-RESTORE-CONFIG-ACL-0123456789ABCDEF' -PayloadPath $payload -WhatIf
+            -ACLPlanSHA256 ('d' * 64) -NetworkRestorePlanSHA256 ('e' * 64) -Confirmation 'P35-RESTORE-CONFIG-ACL-0123456789ABCDEF' -PayloadPath $payload -WhatIf
 
         $env:HG_P35_BOOTSTRAP_REQUEST_B64 | Should -Be $before
 
@@ -315,10 +315,10 @@ if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore orig
 
         $first = New-RestoreConfigAclPlan -ConfigPath 'C:\protected\profile.conf' `
             -CurrentAclSDDL 'O:S-1-5-21-current' -BaselineAclSDDL 'O:S-1-5-21-baseline' `
-            -ConfigSHA256 ('a' * 64) -DriverSHA256 ('b' * 64) -PayloadSHA256 ('c' * 64)
+            -ConfigSHA256 ('a' * 64) -DriverSHA256 ('b' * 64) -PayloadSHA256 ('c' * 64) -NetworkRestorePlanSHA256 ('d' * 64)
         $second = New-RestoreConfigAclPlan -ConfigPath 'C:\protected\profile.conf' `
             -CurrentAclSDDL 'O:S-1-5-21-changed' -BaselineAclSDDL 'O:S-1-5-21-baseline' `
-            -ConfigSHA256 ('a' * 64) -DriverSHA256 ('b' * 64) -PayloadSHA256 ('c' * 64)
+            -ConfigSHA256 ('a' * 64) -DriverSHA256 ('b' * 64) -PayloadSHA256 ('c' * 64) -NetworkRestorePlanSHA256 ('d' * 64)
 
         $first.acl_plan_sha256 | Should -Match '^[0-9a-f]{64}$'
         $first.confirmation_challenge | Should -Match '^P35-RESTORE-CONFIG-ACL-[0-9A-F]{16}$'
@@ -332,6 +332,31 @@ if (`$restored -cne [string]`$binding.sddl) { throw 'test failed to restore orig
         $text | Should -Match 'P35-RESTORE-CONFIG-ACL-'
         $text | Should -Match 'driver_sha256'
         $text | Should -Match 'payload_sha256'
+        $first.identity.network_restore_plan_sha256 | Should -BeExactly ('d' * 64)
+    }
+
+    It 'executes and reports the read-only ACL plan even when WhatIf is present' {
+        $config = Join-Path $TestDrive 'acl-plan-provider.conf'
+        $payload = Join-Path $TestDrive 'acl-plan-payload.ps1'
+        [IO.File]::WriteAllText($config,'[synthetic-profile]',[Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($payload,"'payload'",[Text.UTF8Encoding]::new($false))
+        $driverHash = (Get-FileHash -LiteralPath $script:Driver -Algorithm SHA256).Hash.ToLowerInvariant()
+        $payloadHash = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:aclPlanStartCount = 0
+        function global:Start-Process {
+            param([string]$FilePath,[string[]]$ArgumentList,[string]$Verb,[string]$WindowStyle,[switch]$Wait,[switch]$PassThru)
+            $script:aclPlanStartCount++
+            return [pscustomobject]@{ExitCode=0}
+        }
+        try {
+            $driverText = [IO.File]::ReadAllText($script:Driver,[Text.UTF8Encoding]::new($false,$true))
+            $output = & ([ScriptBlock]::Create($driverText)) -Action RestoreConfigAclPlan -ConfigPath $config -DriverPath $script:Driver `
+                -ExpectedConfigSHA256 (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant() `
+                -ExpectedDriverSHA256 $driverHash -ExpectedPayloadSHA256 $payloadHash -PayloadPath $payload `
+                -NetworkRestorePlanSHA256 ('e' * 64) -WhatIf
+        } finally { Remove-Item -LiteralPath Function:\global:Start-Process -ErrorAction SilentlyContinue }
+        $script:aclPlanStartCount | Should -Be 1
+        (($output | Out-String) | ConvertFrom-Json).action | Should -Be 'RestoreConfigAclPlan'
     }
 
     It 'launches a short pinned loader that exclusively reads and executes the approved payload' {

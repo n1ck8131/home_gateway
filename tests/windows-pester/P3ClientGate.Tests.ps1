@@ -48,4 +48,57 @@ Describe 'read-only P3 client gate' {
         $json = ConvertTo-Json -Compress -InputObject $record
         $json | Should -Not -Match '198\.51\.100\.9|guest-peer|redshield-adapter|cisco-adapter|selfhosted-adapter'
     }
+
+    It 'accepts PostRollback only with a sanitized proof that the selected profile is absent' {
+        $observationPath = Join-Path $TestDrive 'post-rollback.json'
+        $observation = [pscustomobject][ordered]@{
+            profile_sha256='';profile_absent=$true;client_sha256=('b' * 64);client_version='5.0.1.5';signature_valid=$true
+            redshield_identity='redshield';cisco_identity='cisco';selfhosted_identity='';route_interface_identity=''
+            peer_fingerprint_sha256='';handshake_fresh=$false;traffic_delta=$false;egress_values=@()
+            redshield_equals_pre=$true;cisco_equals_pre=$true
+        }
+        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
+
+        $json = & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $script:Gate -Action PostRollback -ObservationPath $observationPath `
+            -ExpectedGuestPeerFingerprintSHA256 ('a' * 64) -ExpectedEgressIdentitySHA256 ('c' * 64) `
+            -ExpectedProfileSHA256 ('d' * 64) -ExpectedClientSHA256 ('b' * 64) -ExpectedKnownHostsSHA256 ('e' * 64)
+        $LASTEXITCODE | Should -Be 0
+        ($json | ConvertFrom-Json).profile_absent | Should -BeTrue
+        $observation.profile_absent = $false
+        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
+        { & $script:Gate -Action PostRollback -ObservationPath $observationPath `
+            -ExpectedGuestPeerFingerprintSHA256 ('a' * 64) -ExpectedEgressIdentitySHA256 ('c' * 64) `
+            -ExpectedProfileSHA256 ('d' * 64) -ExpectedClientSHA256 ('b' * 64) -ExpectedKnownHostsSHA256 ('e' * 64) } | Should -Throw '*post-rollback*'
+    }
+
+    It 'fails closed on timed-out or oversized injected SSH process results' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Gate, [ref]$tokens, [ref]$errors)
+        $definition = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Invoke-BoundedSshObservation'
+        }, $true))
+        $definition.Count | Should -Be 1
+        . ([ScriptBlock]::Create($definition[0].Extent.Text))
+        { Invoke-BoundedSshObservation -Executable 'synthetic-ssh.exe' -Arguments @('arg') -TimeoutSeconds 15 -MaxOutputBytes 1024 `
+            -Runner { [pscustomobject]@{ExitCode=-1;TimedOut=$true;StdOut='';StdErr=''} } } | Should -Throw '*timed out*'
+        { Invoke-BoundedSshObservation -Executable 'synthetic-ssh.exe' -Arguments @('arg') -TimeoutSeconds 15 -MaxOutputBytes 256 `
+            -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut=('x' * 257);StdErr=''} } } | Should -Throw '*output exceeds*'
+        $value = Invoke-BoundedSshObservation -Executable 'synthetic-ssh.exe' -Arguments @('arg') -TimeoutSeconds 15 -MaxOutputBytes 1024 `
+            -Runner { [pscustomobject]@{ExitCode=0;TimedOut=$false;StdOut='{"selected_peer_fingerprint_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","handshake_fresh":true,"traffic_delta":true}';StdErr=''} }
+        $value.handshake_fresh | Should -BeTrue
+    }
+
+    It 'requires exact profile, client and known-hosts trust pins before processing an observation' {
+        $observationPath = Join-Path $TestDrive 'trust-inputs.json'
+        $observation = [pscustomobject][ordered]@{
+            profile_sha256=('c' * 64);profile_absent=$false;client_sha256=('d' * 64);client_version='5.0.1.5';signature_valid=$true
+            redshield_identity='redshield';cisco_identity='cisco';selfhosted_identity='';route_interface_identity=''
+            peer_fingerprint_sha256='';handshake_fresh=$false;traffic_delta=$false;egress_values=@();redshield_equals_pre=$true;cisco_equals_pre=$true
+        }
+        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
+        { & $script:Gate -Action Preflight -ObservationPath $observationPath `
+            -ExpectedGuestPeerFingerprintSHA256 ('a' * 64) -ExpectedEgressIdentitySHA256 ('b' * 64) } | Should -Throw
+    }
 }

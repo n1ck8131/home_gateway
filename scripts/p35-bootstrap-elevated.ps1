@@ -22,12 +22,13 @@ $action = [string]$request.action
 if ([int]$request.version -ne 1 -or $action -notin @('install', 'restore-config-acl-plan', 'restore-config-acl')) { throw 'P3.5 bootstrap request action differs' }
 $expectedProperties = @('version', 'action', 'confirmation', 'caller_sid', 'config_path', 'config_sha256')
 if ($action -ceq 'install') { $expectedProperties += @('launcher_path', 'launcher_sha256', 'hgctl_path', 'hgctl_sha256') }
-if ($action -in @('restore-config-acl-plan', 'restore-config-acl')) { $expectedProperties += @('acl_plan_sha256', 'driver_path', 'driver_sha256', 'payload_path', 'payload_sha256') }
+if ($action -in @('restore-config-acl-plan', 'restore-config-acl')) { $expectedProperties += @('acl_plan_sha256', 'network_restore_plan_sha256', 'driver_path', 'driver_sha256', 'payload_path', 'payload_sha256') }
 $actualProperties = @($request.PSObject.Properties.Name | Sort-Object)
 if (@(Compare-Object -ReferenceObject ($expectedProperties | Sort-Object) -DifferenceObject $actualProperties).Count -ne 0) { throw 'P3.5 bootstrap request schema differs' }
 if ($action -ceq 'install' -and [string]$request.confirmation -cne 'P35-BOOTSTRAP-FILESYSTEM-V1') { throw 'P3.5 bootstrap confirmation differs' }
 if ($action -ceq 'restore-config-acl' -and ([string]$request.confirmation -cnotmatch '^P35-RESTORE-CONFIG-ACL-[0-9A-F]{16}$' -or [string]$request.acl_plan_sha256 -cnotmatch '^[0-9a-f]{64}$')) { throw 'P3.5 bootstrap ACL plan approval differs' }
 if ($action -ceq 'restore-config-acl-plan' -and (-not [string]::IsNullOrWhiteSpace([string]$request.confirmation) -or -not [string]::IsNullOrWhiteSpace([string]$request.acl_plan_sha256))) { throw 'P3.5 bootstrap ACL plan must be read-only' }
+if ($action -in @('restore-config-acl-plan','restore-config-acl') -and [string]$request.network_restore_plan_sha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'network restore plan hash differs' }
 
 $script:OwnerMarker = 'home-gateway/p35/windows/v1'
 $script:ParentMarkerName = '.p35-parent-owner.v1'
@@ -141,7 +142,8 @@ function New-RestoreConfigAclPlan(
     [string]$BaselineAclSDDL,
     [string]$ConfigSHA256,
     [string]$DriverSHA256,
-    [string]$PayloadSHA256
+    [string]$PayloadSHA256,
+    [string]$NetworkRestorePlanSHA256
 ) {
     $identity = [pscustomobject][ordered]@{
         schema = 'home-gateway/windows-restore-config-acl/v1'
@@ -151,6 +153,7 @@ function New-RestoreConfigAclPlan(
         config_sha256 = $ConfigSHA256
         bootstrap_driver_sha256 = $DriverSHA256
         bootstrap_payload_sha256 = $PayloadSHA256
+        network_restore_plan_sha256 = $NetworkRestorePlanSHA256
         operation = 'restore-config-acl'
     }
     $planHash = Get-TextSHA256 -Value (ConvertTo-Json -Compress -InputObject $identity)
@@ -427,14 +430,14 @@ function Protect-ConfigSource([string]$Path, [string]$Expected, [object]$Binding
     } finally { $stream.Dispose() }
 }
 
-function Restore-ConfigSourceACL([string]$Path, [string]$Expected, [object]$Binding, [string]$DriverSHA256, [string]$PayloadSHA256, [string]$PlanSHA256, [string]$Confirmation) {
+function Restore-ConfigSourceACL([string]$Path, [string]$Expected, [object]$Binding, [string]$DriverSHA256, [string]$PayloadSHA256, [string]$NetworkRestorePlanSHA256, [string]$PlanSHA256, [string]$Confirmation) {
     $stream = Open-ConfigSecurityStream -Path $Path
     try {
         Assert-ConfigStreamBinding -Binding $Binding -Stream $stream -Path $Path -Expected $Expected
         $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
         $currentSDDL = $stream.GetAccessControl().GetSecurityDescriptorSddlForm($sections)
         $plan = New-RestoreConfigAclPlan -ConfigPath $Path -CurrentAclSDDL $currentSDDL -BaselineAclSDDL ([string]$Binding.sddl) `
-            -ConfigSHA256 $Expected -DriverSHA256 $DriverSHA256 -PayloadSHA256 $PayloadSHA256
+            -ConfigSHA256 $Expected -DriverSHA256 $DriverSHA256 -PayloadSHA256 $PayloadSHA256 -NetworkRestorePlanSHA256 $NetworkRestorePlanSHA256
         if ($PlanSHA256 -cne $plan.acl_plan_sha256 -or $Confirmation -cne $plan.confirmation_challenge) { throw 'ACL restore plan hash or challenge is stale' }
         $security = [Security.AccessControl.FileSecurity]::new()
         $security.SetSecurityDescriptorSddlForm([string]$Binding.sddl, $sections)
@@ -445,14 +448,14 @@ function Restore-ConfigSourceACL([string]$Path, [string]$Expected, [object]$Bind
     } finally { $stream.Dispose() }
 }
 
-function Get-RestoreConfigAclPlan([string]$Path, [string]$Expected, [object]$Binding, [string]$DriverSHA256, [string]$PayloadSHA256) {
+function Get-RestoreConfigAclPlan([string]$Path, [string]$Expected, [object]$Binding, [string]$DriverSHA256, [string]$PayloadSHA256, [string]$NetworkRestorePlanSHA256) {
     $stream = Open-ConfigSecurityStream -Path $Path
     try {
         Assert-ConfigStreamBinding -Binding $Binding -Stream $stream -Path $Path -Expected $Expected
         $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
         $currentSDDL = $stream.GetAccessControl().GetSecurityDescriptorSddlForm($sections)
         return New-RestoreConfigAclPlan -ConfigPath $Path -CurrentAclSDDL $currentSDDL -BaselineAclSDDL ([string]$Binding.sddl) `
-            -ConfigSHA256 $Expected -DriverSHA256 $DriverSHA256 -PayloadSHA256 $PayloadSHA256
+            -ConfigSHA256 $Expected -DriverSHA256 $DriverSHA256 -PayloadSHA256 $PayloadSHA256 -NetworkRestorePlanSHA256 $NetworkRestorePlanSHA256
     } finally { $stream.Dispose() }
 }
 
@@ -486,7 +489,7 @@ if ($action -in @('restore-config-acl-plan', 'restore-config-acl')) {
     Assert-FileSHA256 -Path $payloadPath -Expected ([string]$request.payload_sha256) -Label 'bootstrap payload'
     if ($action -ceq 'restore-config-acl-plan') {
         $aclPlan = Get-RestoreConfigAclPlan -Path $configSource -Expected ([string]$request.config_sha256) -Binding $binding `
-            -DriverSHA256 ([string]$request.driver_sha256) -PayloadSHA256 ([string]$request.payload_sha256)
+            -DriverSHA256 ([string]$request.driver_sha256) -PayloadSHA256 ([string]$request.payload_sha256) -NetworkRestorePlanSHA256 ([string]$request.network_restore_plan_sha256)
         [Console]::Out.WriteLine((ConvertTo-Json -Compress -Depth 4 -InputObject ([pscustomobject][ordered]@{
             mode = 'restore-config-acl-plan'
             live_mutation_performed = $false
@@ -498,7 +501,7 @@ if ($action -in @('restore-config-acl-plan', 'restore-config-acl')) {
     }
     Restore-ConfigSourceACL -Path $configSource -Expected ([string]$request.config_sha256) -Binding $binding `
         -DriverSHA256 ([string]$request.driver_sha256) -PayloadSHA256 ([string]$request.payload_sha256) `
-        -PlanSHA256 ([string]$request.acl_plan_sha256) -Confirmation ([string]$request.confirmation)
+        -NetworkRestorePlanSHA256 ([string]$request.network_restore_plan_sha256) -PlanSHA256 ([string]$request.acl_plan_sha256) -Confirmation ([string]$request.confirmation)
     [Console]::Out.WriteLine((ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{
         version = 1
         ok = $true

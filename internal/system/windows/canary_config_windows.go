@@ -3,8 +3,10 @@
 package windows
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,19 @@ import (
 
 	xwindows "golang.org/x/sys/windows"
 )
+
+func configACLIdentity(path string) (string, error) {
+	descriptor, err := xwindows.GetNamedSecurityInfo(path, xwindows.SE_FILE_OBJECT, xwindows.OWNER_SECURITY_INFORMATION|xwindows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return "", errors.New("inspect protected config ACL")
+	}
+	sddl := descriptor.String()
+	if sddl == "" {
+		return "", errors.New("inspect protected config ACL")
+	}
+	digest := sha256.Sum256([]byte(sddl))
+	return fmt.Sprintf("%x", digest[:]), nil
+}
 
 const canaryInstalledConfigPinName = "tunnel.sha256"
 

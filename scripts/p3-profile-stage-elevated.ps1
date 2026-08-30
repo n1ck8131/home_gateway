@@ -38,6 +38,38 @@ function Get-StreamSHA256([IO.Stream]$Stream) {
     try { return ([BitConverter]::ToString($sha.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
 }
 
+function Invoke-PinnedProfileInspection(
+    [string]$HgctlPath,
+    [string]$ExpectedHgctlSHA256,
+    [string]$ProfilePath,
+    [scriptblock]$Runner,
+    [scriptblock]$OnVerified
+) {
+    $profileItem = Get-Item -LiteralPath $ProfilePath -Force -ErrorAction Stop
+    $hgctlItem = Get-Item -LiteralPath $HgctlPath -Force -ErrorAction Stop
+    foreach ($item in @($profileItem,$hgctlItem)) {
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'profile inspection input must be a regular non-reparse file' }
+    }
+    $source = [IO.File]::Open($ProfilePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    $hgctlStream = [IO.File]::Open($HgctlPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+        $profileSHA256 = Get-StreamSHA256 $source
+        if ((Get-StreamSHA256 $hgctlStream) -cne $ExpectedHgctlSHA256) { throw 'hgctl hash differs' }
+        $arguments = @('tunnel','inspect','--config',$ProfilePath,'--json')
+        if ($null -eq $Runner) {
+            $Runner = { param($Executable,$Arguments,$LockedProfilePath) $null = & $Executable @Arguments; return $LASTEXITCODE }
+        }
+        $exitCode = & $Runner $HgctlPath $arguments $ProfilePath
+        if ([int]$exitCode -ne 0) { throw 'profile inspection failed' }
+        $source.Position = 0
+        if ($null -ne $OnVerified) { & $OnVerified $source $profileSHA256 }
+        return [pscustomobject]@{ profile_sha256 = $profileSHA256 }
+    } finally {
+        $hgctlStream.Dispose()
+        $source.Dispose()
+    }
+}
+
 function New-StageSecurity([Security.Principal.SecurityIdentifier]$CurrentSID) {
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetAccessRuleProtection($true, $false)
@@ -118,14 +150,9 @@ $null = Test-StageManifest $names Verify
 if (-not [string]::Equals([IO.Path]::GetFullPath([string]$request.export_path),$export,[StringComparison]::OrdinalIgnoreCase)) { throw 'profile export path differs' }
 $exportItem = Get-Item -LiteralPath $export -Force -ErrorAction Stop
 if ($exportItem.PSIsContainer -or ($exportItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'profile export must be a regular non-reparse file' }
-$source = [IO.File]::Open($export,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
-try {
-    $profileSHA256 = Get-StreamSHA256 $source
-    $hgctl = Assert-CleanPath ([string]$request.hgctl_path) 'hgctl'
-    $hgctlStream = [IO.File]::Open($hgctl,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
-    try { if ((Get-StreamSHA256 $hgctlStream) -cne [string]$request.hgctl_sha256) { throw 'hgctl hash differs' } } finally { $hgctlStream.Dispose() }
-    $null = & $hgctl tunnel inspect --config $export --json
-    if ($LASTEXITCODE -ne 0) { throw 'profile inspection failed' }
+$hgctl = Assert-CleanPath ([string]$request.hgctl_path) 'hgctl'
+$inspection = Invoke-PinnedProfileInspection -HgctlPath $hgctl -ExpectedHgctlSHA256 ([string]$request.hgctl_sha256) -ProfilePath $export -OnVerified {
+    param($source,$profileSHA256)
     $secrets = Join-Path $stateRoot 'secrets'
     $destination = Join-Path $secrets 'tunnel.conf'
     Install-ExactFile $source $destination $profileSHA256
@@ -133,5 +160,6 @@ try {
     $pinNext = $pin + '.next'
     [IO.File]::WriteAllText($pinNext,$profileSHA256,[Text.Encoding]::ASCII)
     if ([IO.File]::Exists($pin)) { [IO.File]::Replace($pinNext,$pin,$null,$true) } else { [IO.File]::Move($pinNext,$pin) }
-} finally { $source.Dispose() }
+}
+$profileSHA256 = [string]$inspection.profile_sha256
 [Console]::Out.WriteLine((ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{schema='home-gateway/p3-profile-stage/v1';action='verify';profile_sha256=$profileSHA256;profile_count=1;installed=$true;live_mutation_performed=$false})))

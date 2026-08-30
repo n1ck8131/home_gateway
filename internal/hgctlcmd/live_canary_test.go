@@ -3,6 +3,7 @@ package hgctlcmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,7 @@ type trackingPersistentWatchdog struct {
 
 func exactFullRestoreCommand(t *testing.T, root string, dependencies dependencies) canaryLiveCommand {
 	t.Helper()
+	seedFullRestoreIdentityFiles(t, root)
 	journal, err := (apply.FileJournal{Path: filepath.Join(root, "journal.json")}).Load()
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +71,42 @@ func exactFullRestoreCommand(t *testing.T, root string, dependencies dependencie
 		plan:               canaryPlanCommand{stateRoot: root},
 		recoveryConfirm:    plan.ConfirmationChallenge(root),
 		recoveryPlanSHA256: plan.IdentitySHA256(),
+	}
+}
+
+func seedFullRestoreIdentityFiles(t *testing.T, root string) {
+	t.Helper()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"hgctl.exe", "p35-canary.ps1", "p35-bootstrap.ps1", "p35-bootstrap-elevated.ps1"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("synthetic-"+name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "boot-marker.v1.json"), []byte(`{"boot":"synthetic"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "native-ownership.v1.json"), []byte(`{"version":1,"entries":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "source.conf")
+	config := []byte("[synthetic-profile]")
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDigest := sha256.Sum256(config)
+	binding := map[string]any{
+		"version": 1, "config_path": configPath, "config_sha256": fmt.Sprintf("%x", configDigest[:]),
+		"volume_serial": "00000000", "file_index": "0000000000000000", "sddl": "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)",
+	}
+	data, err := json.Marshal(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "config-source-before.v1.json"), data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -380,6 +418,7 @@ func TestRunCanaryLiveAppliesConfirmsAndFullyRestoresFakeWindowsState(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedFullRestoreIdentityFiles(t, root)
 	var restorePlanStdout, restorePlanStderr bytes.Buffer
 	if code := runCanaryFullRestorePlan(canaryFullRestorePlanCommand{stateRoot: root}, &restorePlanStdout, &restorePlanStderr, deps); code != 0 {
 		t.Fatalf("full restore plan code = %d, stderr = %q", code, restorePlanStderr.String())
@@ -728,6 +767,30 @@ func TestParseCanaryLiveRequiresExactCandidateSHA256ForApplyAndConfirm(t *testin
 	withCandidate[len(withCandidate)-2] = strings.Repeat("B", 64)
 	if _, ok := parseCanaryLiveCommand(withCandidate); ok {
 		t.Fatal("uppercase candidate SHA-256 was accepted")
+	}
+}
+
+func TestReadOnlyJournalRejectsPathSubstitutionAfterIdentityCheck(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "journal.json")
+	approved := []byte(`{"state":"idle"}`)
+	if err := os.WriteFile(path, approved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute := filepath.Join(directory, "substitute.json")
+	if err := os.WriteFile(substitute, []byte(`{"state":"restored","rollback_result":"substituted"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadCanaryJournalReadOnlyBound(path, func() {
+		if renameErr := os.Rename(path, filepath.Join(directory, "approved.json")); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if renameErr := os.Rename(substitute, path); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("path substitution error = %v", err)
 	}
 }
 

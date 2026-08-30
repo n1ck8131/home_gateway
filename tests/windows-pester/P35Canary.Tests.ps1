@@ -213,8 +213,51 @@ Describe 'scripts/p35-canary.ps1' {
         $text = $script:Ast.Extent.Text
         $text | Should -Match 'QuickCheckRecordPath'
         $text | Should -Match 'QuickCheckRecordSHA256'
-        $text | Should -Match 'QuickCheckElapsedSeconds -gt 90'
-        $text | Should -Match 'Get-LockedFileSHA256 -Path \$quickCheckPath'
+        $text | Should -Match 'Test-TrustedQuickCheckRecord'
+        $text | Should -Match 'Get-CanaryPendingStatus'
         $text | Should -Match 'at least 30 seconds watchdog safety margin'
+    }
+
+    It 'strictly binds quick-check candidate, root, pending deadline and trusted clock before Confirm' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Canary,[ref]$tokens,[ref]$errors)
+        $definitions = foreach ($name in @('Get-TextSHA256','Get-StreamSHA256','Test-TrustedQuickCheckRecord')) {
+            $definition = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+            },$true))
+            $definition.Count | Should -Be 1
+            $definition[0].Extent.Text
+        }
+        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
+        $now = [DateTimeOffset]::Parse('2030-01-01T00:00:20Z')
+        $deadline = '2030-01-01T00:01:40.0000000+00:00'
+        $candidate = 'a' * 64
+        $rootIdentity = 'b' * 64
+        $record = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-windows-field-matrix/v1';action='pendingquickcheck';candidate_sha256=$candidate;state_root_identity=$rootIdentity
+            pending_deadline_utc=$deadline;created_utc='2030-01-01T00:00:10.0000000+00:00';target_identity_sha256=@('c' * 64);target_count=1
+            direct_egress_identity_sha256='';selfhosted_egress_identity_sha256=('d' * 64);cisco_egress_identity_sha256=''
+            dns_ok=$true;ipv4_ok=$true;ipv6_ok=$true;mtu_ok=$true;transport_pass_count=3;tunnel_down_blocked=$false;process_recovered=$false
+            adapter_loss_blocked=$false;reboot_recovered=$false;emergency_disable_required=$false;emergency_disabled=$false
+            redshield_equals_pre=$true;cisco_equals_pre=$true;selfhosted_absent=$false;elapsed_seconds=20;live_mutation_performed=$false
+        }
+        $path = Join-Path $TestDrive 'quick-check.json'
+        [IO.File]::WriteAllText($path,(ConvertTo-Json -Compress -InputObject $record),[Text.UTF8Encoding]::new($false))
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $status = [pscustomobject]@{state='pending-confirmation';has_pending_revision=$true;pending_deadline=$deadline}
+
+        $verified = Test-TrustedQuickCheckRecord -Path $path -ExpectedFileSHA256 $hash -ExpectedCandidateSHA256 $candidate `
+            -ExpectedStateRootIdentity $rootIdentity -PendingStatus $status -Now $now
+        $verified.remaining_watchdog_seconds | Should -Be 80
+        { Test-TrustedQuickCheckRecord -Path $path -ExpectedFileSHA256 $hash -ExpectedCandidateSHA256 ('e' * 64) `
+            -ExpectedStateRootIdentity $rootIdentity -PendingStatus $status -Now $now } | Should -Throw '*candidate*'
+        $record.pending_deadline_utc = '2030-01-01T00:00:40.0000000+00:00'
+        [IO.File]::WriteAllText($path,(ConvertTo-Json -Compress -InputObject $record),[Text.UTF8Encoding]::new($false))
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $status.pending_deadline = $record.pending_deadline_utc
+        { Test-TrustedQuickCheckRecord -Path $path -ExpectedFileSHA256 $hash -ExpectedCandidateSHA256 $candidate `
+            -ExpectedStateRootIdentity $rootIdentity -PendingStatus $status -Now $now } | Should -Throw '*safety margin*'
     }
 }

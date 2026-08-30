@@ -53,4 +53,50 @@ Describe 'bounded P3 Windows field matrix' {
         { ConvertTo-FieldMatrixRecord -Action PendingQuickCheck -Observation $observation -MaxDurationSeconds 90 } | Should -Throw '*failed*'
         { ConvertTo-FieldMatrixRecord -Action PendingQuickCheck -Observation $observation -MaxDurationSeconds 120 } | Should -Throw '*safety margin*'
     }
+
+    It 'emits a fresh candidate/root/deadline-bound PendingQuickCheck record' {
+        $observationPath = Join-Path $TestDrive 'pending-observation.json'
+        $observation = [pscustomobject][ordered]@{
+            target_identities=@('target-one'); direct_egress_identity=''; selfhosted_egress_identity='self'; cisco_egress_identity=''
+            dns_ok=$true; ipv4_ok=$true; ipv6_ok=$true; mtu_ok=$true; tcp_ok=$true; udp_ok=$true; quic_ok=$true
+            tunnel_down_blocked=$false; process_recovered=$false; adapter_loss_blocked=$false; reboot_recovered=$false; emergency_disabled=$false
+            emergency_disable_required=$false; redshield_equals_pre=$true; cisco_equals_pre=$true; selfhosted_absent=$false; elapsed_seconds=20
+        }
+        [IO.File]::WriteAllText($observationPath,(ConvertTo-Json -Compress -InputObject $observation),[Text.UTF8Encoding]::new($false))
+        $candidate = 'a' * 64
+        $rootIdentity = 'b' * 64
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(100).ToString('O')
+
+        $json = & pwsh.exe -NoLogo -NoProfile -NonInteractive -File $script:Matrix -Action PendingQuickCheck `
+            -ObservationPath $observationPath -MaxDurationSeconds 90 -CandidateSHA256 $candidate `
+            -StateRootIdentity $rootIdentity -PendingDeadlineUtc $deadline
+        $LASTEXITCODE | Should -Be 0
+
+        $record = $json | ConvertFrom-Json
+        $record.action | Should -Be 'pendingquickcheck'
+        $record.candidate_sha256 | Should -BeExactly $candidate
+        $record.state_root_identity | Should -BeExactly $rootIdentity
+        ([DateTimeOffset]$record.pending_deadline_utc).ToUniversalTime() | Should -Be ([DateTimeOffset]::Parse($deadline)).ToUniversalTime()
+        ([DateTimeOffset]$record.created_utc) | Should -BeLessThan ([DateTimeOffset]::UtcNow.AddSeconds(2))
+    }
+
+    It 'requires emergency-disable evidence only when that rollback path was used' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($script:Matrix,[ref]$tokens,[ref]$errors)
+        $definition = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'ConvertTo-FieldMatrixRecord'
+        },$true))
+        . ([ScriptBlock]::Create($definition[0].Extent.Text))
+        $observation = [pscustomobject]@{
+            target_identities=@('one'); direct_egress_identity=''; selfhosted_egress_identity=''; cisco_egress_identity=''
+            dns_ok=$false;ipv4_ok=$false;ipv6_ok=$false;mtu_ok=$false;tcp_ok=$false;udp_ok=$false;quic_ok=$false
+            tunnel_down_blocked=$false;process_recovered=$false;adapter_loss_blocked=$false;reboot_recovered=$false
+            emergency_disable_required=$false;emergency_disabled=$false;redshield_equals_pre=$true;cisco_equals_pre=$true;selfhosted_absent=$true;elapsed_seconds=1
+        }
+        (ConvertTo-FieldMatrixRecord -Action RollbackVerify -Observation $observation -MaxDurationSeconds 90).action | Should -Be 'rollbackverify'
+        $observation.emergency_disable_required = $true
+        { ConvertTo-FieldMatrixRecord -Action RollbackVerify -Observation $observation -MaxDurationSeconds 90 } | Should -Throw '*failed*'
+    }
 }

@@ -13,8 +13,8 @@ The actions are `PreApply`, `PendingQuickCheck`, `CommittedMatrix`, `TunnelDown`
 Use two elevated PowerShell sessions after exact live approval:
 
 1. Session A starts candidate-bound `p35-canary.ps1 -Action Apply` with the exact `CandidateSHA256` and `P35-APPLY-*` challenge. It waits for resolution. Record its child exit code.
-2. Session B immediately captures the bounded observation and runs `p3-windows-field-matrix.ps1 -Action PendingQuickCheck -MaxDurationSeconds 90`. Save the single sanitized JSON record, calculate its SHA-256, and record the matrix child exit code.
-3. Only if PendingQuickCheck exit is zero and elapsed time is at most 90 seconds, Session B invokes exact candidate-bound `Confirm` with `QuickCheckRecordPath`, `QuickCheckRecordSHA256` and `QuickCheckElapsedSeconds`.
+2. Session B immediately captures the bounded observation and runs `p3-windows-field-matrix.ps1 -Action PendingQuickCheck -MaxDurationSeconds 90` with the exact `CandidateSHA256`, `StateRootIdentity` and pending deadline returned by the trusted `hgctl windows canary status` record. Save the single sanitized JSON record, calculate its SHA-256, and record the matrix child exit code.
+3. Only if PendingQuickCheck exit is zero and elapsed time is at most 90 seconds, Session B invokes exact candidate-bound `Confirm` with `QuickCheckRecordPath` and `QuickCheckRecordSHA256`. Confirm re-reads trusted pending status immediately, strictly parses the hashed record, verifies candidate/root/deadline/creation-time binding, and calculates the remaining watchdog time itself; `QuickCheckElapsedSeconds`, when supplied for compatibility, must equal the record and is never the trusted clock.
 4. The canary watchdog deadline is 120 seconds. The 90-second combined quick-check ceiling preserves at least a 30-second safety margin. Timeout, stale/missing record, any failed check or any nonzero child exit causes no Confirm; Session A must observe automatic rollback.
 5. Capture the Confirm child exit code and Session A final exit code. Do not infer success from a launched process or partial output.
 
@@ -24,4 +24,4 @@ Run `PreApply` before Apply, `CommittedMatrix` only after successful confirmatio
 
 For a client anomaly, remove only the new local Amnezia profile and preserve the server Guest pending separate approval. For a server anomaly, use the candidate-specific official-UI receipt; emergency exact-one-peer rollback is separate. `Clear server from Amnezia software` remains prohibited. Finish with `RollbackVerify`, requiring self-hosted absence, RedShield/Cisco equality to PRE and emergency-disable evidence where applicable.
 
-P3 is terminal only after network `FullRestore` and the independently planned/approved `RestoreConfigAcl` both pass. Offline/Pester results are not live field acceptance.
+P3 is terminal only after network `FullRestore` and the independently planned/approved `RestoreConfigAcl` both pass. Pass the completed network `RecoveryPlanSHA256` as `NetworkRestorePlanSHA256` to both `RestoreConfigAclPlan` and `RestoreConfigAcl`; the one-way binding preserves the monotonic network-then-ACL contract without retrying network restoration. Offline/Pester results are not live field acceptance.

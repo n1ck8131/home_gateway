@@ -94,25 +94,29 @@ def await_stable(
     observe: Callable[[], dict[str, Any]],
     *,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
     timeout_seconds: int = 180,
 ) -> dict[str, Any]:
     if timeout_seconds < 5 or timeout_seconds > 180:
         raise ValueError("convergence timeout is outside the bounded contract")
-    elapsed = 0
+    deadline = monotonic() + timeout_seconds
+    if monotonic() + 2 > deadline:
+        raise TimeoutError("candidate convergence timed out")
     sleep(2)
-    elapsed += 2
-    while elapsed <= timeout_seconds:
+    while monotonic() <= deadline:
         first = observe()
         first_hash = semantic_hash(first)
+        if monotonic() + 5 > deadline:
+            break
         sleep(5)
-        elapsed += 5
         second = observe()
         if semantic_hash(second) == first_hash and _canonical(second) == _canonical(
             first
         ):
             return second
+        if monotonic() + 2 > deadline:
+            break
         sleep(2)
-        elapsed += 2
     raise TimeoutError("candidate convergence timed out")
 
 

@@ -1231,6 +1231,96 @@ func TestFullRestorePlanIdentityBindsExactObjectsNotOnlyCounts(t *testing.T) {
 	}
 }
 
+func TestBoundFileHashRejectsPathSubstitutionAfterIdentityCheck(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "artifact.bin")
+	original := []byte("approved-artifact")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	substitute := filepath.Join(directory, "substitute.bin")
+	if err := os.WriteFile(substitute, []byte("substituted-artifact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fileSHA256Bound(path, func() {
+		if renameErr := os.Rename(path, filepath.Join(directory, "original.bin")); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if renameErr := os.Rename(substitute, path); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("path substitution error = %v", err)
+	}
+}
+
+func TestFullRestorePlanValidationRequiresTerminalAndACLCrossBindingIdentities(t *testing.T) {
+	plan := FullRestorePlan{Schema: "home-gateway/windows-full-restore/v1"}
+	if err := plan.Validate(); err == nil {
+		t.Fatal("incomplete restore plan passed validation")
+	}
+	hash := strings.Repeat("a", 64)
+	plan.StateRootIdentity = hash
+	plan.JournalFileSHA256 = hash
+	plan.OwnershipRegistrySHA256 = hash
+	plan.BootMarkerSHA256 = hash
+	plan.InstallSnapshotSHA256 = hash
+	plan.CurrentManagedSHA256 = hash
+	plan.PreservedForeignSHA256 = hash
+	plan.WatchdogTaskIdentities = []artifactIdentity{{Type: "scheduled-task", Role: "remove", SHA256: hash}}
+	plan.ProtectedConfigPathIdentity = hash
+	plan.CurrentConfigACLSHA256 = hash
+	plan.BaselineConfigACLSHA256 = hash
+	plan.ProtectedConfigSHA256 = hash
+	plan.ConfigACLSnapshotSHA256 = hash
+	plan.ProtectedConfigOperation = "restore-acl"
+	plan.HgctlSHA256 = hash
+	plan.CanaryLauncherSHA256 = hash
+	plan.BootstrapDriverSHA256 = hash
+	plan.BootstrapPayloadSHA256 = hash
+	if err := plan.Validate(); err == nil {
+		t.Fatal("restore plan with only one watchdog task identity passed validation")
+	}
+	plan.WatchdogTaskIdentities = append(plan.WatchdogTaskIdentities, artifactIdentity{Type: "scheduled-task", Role: "remove", SHA256: strings.Repeat("b", 64)})
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("complete restore plan rejected: %v", err)
+	}
+}
+
+func TestConfigACLSnapshotRejectsPathSubstitutionBeforeOpen(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config-source-before.v1.json")
+	configPath := filepath.Join(root, "tunnel.conf")
+	writeBinding := func(target, digest string) {
+		t.Helper()
+		data, err := json.Marshal(configACLRestoreBinding{
+			Version: 1, ConfigPath: configPath, ConfigSHA256: digest,
+			VolumeSerial: "01234567", FileIndex: "0123456789abcdef", SDDL: "O:BAG:BAD:(A;;FA;;;SY)",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeBinding(path, strings.Repeat("a", 64))
+	substitute := filepath.Join(root, "substitute.json")
+	writeBinding(substitute, strings.Repeat("b", 64))
+	_, _, err := readConfigACLRestoreBindingBound(root, func() {
+		if renameErr := os.Rename(path, filepath.Join(root, "original.json")); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if renameErr := os.Rename(substitute, path); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("config ACL snapshot substitution error = %v", err)
+	}
+}
+
 func TestWindowsEmergencyDisableFailsWhenRetainedSinkDisappears(t *testing.T) {
 	backend := newSafeBackend()
 	root := filepath.Join(t.TempDir(), "runtime")

@@ -93,6 +93,31 @@ class PeerGuardTests(unittest.TestCase):
         self.assertEqual(stable["peers"], ["candidate"])
         self.assertIn(5, sleeps)
 
+    def test_stable_convergence_never_sleeps_or_samples_past_monotonic_deadline(self):
+        clock = [1000.0]
+        sleeps = []
+        observations = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        def observe():
+            observations.append(clock[0])
+            return snapshot(peer=f"candidate-{len(observations)}")
+
+        with self.assertRaisesRegex(TimeoutError, "timed out"):
+            guard.await_stable(
+                observe,
+                sleep=sleep,
+                monotonic=lambda: clock[0],
+                timeout_seconds=6,
+            )
+
+        self.assertLessEqual(clock[0], 1006.0)
+        self.assertTrue(all(value <= 1006.0 for value in observations))
+        self.assertEqual(sleeps, [2])
+
     def test_emergency_rollback_is_exact_one_peer_and_one_syncconf(self):
         baseline = snapshot()
         baseline["peers"] = ["baseline"]

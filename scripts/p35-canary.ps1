@@ -339,12 +339,69 @@ function Invoke-CheckedHgctl {
     if ($LASTEXITCODE -ne 0) { throw "hgctl failed with exit code $LASTEXITCODE" }
 }
 
+function Get-TextSHA256 {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value)))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+function Test-TrustedQuickCheckRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedFileSHA256,
+        [Parameter(Mandatory = $true)][string]$ExpectedCandidateSHA256,
+        [Parameter(Mandatory = $true)][string]$ExpectedStateRootIdentity,
+        [Parameter(Mandatory = $true)][object]$PendingStatus,
+        [Parameter(Mandatory = $true)][DateTimeOffset]$Now
+    )
+    foreach ($value in @($ExpectedFileSHA256,$ExpectedCandidateSHA256,$ExpectedStateRootIdentity)) {
+        if ($value -cnotmatch '^[0-9a-f]{64}$') { throw 'PendingQuickCheck identity must be one lowercase SHA-256 value' }
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $item.Length -le 0 -or $item.Length -gt 131072) { throw 'PendingQuickCheck record must be one bounded regular file' }
+    $stream = [IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
+    try {
+        $actualHash = Get-StreamSHA256 -Stream $stream
+        if ($actualHash -cne $ExpectedFileSHA256) { throw 'PendingQuickCheck record hash differs' }
+        $stream.Position = 0
+        $reader = [IO.StreamReader]::new($stream,[Text.UTF8Encoding]::new($false,$true),$true)
+        try { $record = ConvertFrom-Json -InputObject $reader.ReadToEnd() -ErrorAction Stop } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+    $expectedProperties = @('schema','action','candidate_sha256','state_root_identity','pending_deadline_utc','created_utc','target_identity_sha256','target_count','direct_egress_identity_sha256','selfhosted_egress_identity_sha256','cisco_egress_identity_sha256','dns_ok','ipv4_ok','ipv6_ok','mtu_ok','transport_pass_count','tunnel_down_blocked','process_recovered','adapter_loss_blocked','reboot_recovered','emergency_disable_required','emergency_disabled','redshield_equals_pre','cisco_equals_pre','selfhosted_absent','elapsed_seconds','live_mutation_performed')
+    $actualProperties = @($record.PSObject.Properties.Name)
+    if (@(Compare-Object -ReferenceObject ($expectedProperties | Sort-Object) -DifferenceObject ($actualProperties | Sort-Object)).Count -ne 0) { throw 'PendingQuickCheck record schema differs' }
+    if ([string]$record.schema -cne 'home-gateway/p3-windows-field-matrix/v1' -or [string]$record.action -cne 'pendingquickcheck') { throw 'PendingQuickCheck record type differs' }
+    if ([string]$record.candidate_sha256 -cne $ExpectedCandidateSHA256) { throw 'PendingQuickCheck candidate differs' }
+    if ([string]$record.state_root_identity -cne $ExpectedStateRootIdentity) { throw 'PendingQuickCheck state-root identity differs' }
+    if ([int]$record.target_count -le 0 -or -not [bool]$record.dns_ok -or -not [bool]$record.ipv4_ok -or -not [bool]$record.ipv6_ok -or -not [bool]$record.mtu_ok -or [int]$record.transport_pass_count -ne 3 -or [bool]$record.live_mutation_performed) { throw 'PendingQuickCheck record did not pass' }
+    if ([int]$record.elapsed_seconds -lt 0 -or [int]$record.elapsed_seconds -gt 90) { throw 'PendingQuickCheck elapsed time differs' }
+    if ([string]$PendingStatus.state -cne 'pending-confirmation' -or -not [bool]$PendingStatus.has_pending_revision) { throw 'trusted canary status is not pending' }
+    $recordDeadline = [DateTimeOffset]::Parse([string]$record.pending_deadline_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $trustedDeadline = [DateTimeOffset]::Parse([string]$PendingStatus.pending_deadline,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $created = [DateTimeOffset]::Parse([string]$record.created_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    $nowUtc = $Now.ToUniversalTime()
+    if ($recordDeadline -ne $trustedDeadline) { throw 'PendingQuickCheck pending deadline differs' }
+    if ($created -gt $nowUtc.AddSeconds(1) -or $created -lt $trustedDeadline.AddSeconds(-120) -or ($nowUtc - $created).TotalSeconds -gt 90) { throw 'PendingQuickCheck trusted creation time differs' }
+    $remaining = [int][Math]::Floor(($trustedDeadline - $nowUtc).TotalSeconds)
+    if ($remaining -le 30 -or $remaining -gt 120) { throw 'PendingQuickCheck lacks at least 30 seconds watchdog safety margin' }
+    $record | Add-Member -NotePropertyName remaining_watchdog_seconds -NotePropertyValue $remaining
+    return $record
+}
+
 function Invoke-HgctlPlan {
     param([Parameter(Mandatory = $true)][string]$Executable, [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments)
     & $Executable @Arguments
     $exitCode = $LASTEXITCODE
     if ($exitCode -eq 3) { exit 3 }
     if ($exitCode -ne 0) { throw "hgctl failed with exit code $exitCode" }
+}
+
+function Get-CanaryPendingStatus {
+    param([Parameter(Mandatory = $true)][string]$Executable,[Parameter(Mandatory = $true)][string]$StateRoot)
+    $output = @(& $Executable windows canary status --state-root $StateRoot --json)
+    if ($LASTEXITCODE -ne 0) { throw "hgctl status failed with exit code $LASTEXITCODE" }
+    if ($output.Count -ne 1 -or [Text.Encoding]::UTF8.GetByteCount([string]$output[0]) -gt 65536) { throw 'hgctl pending status output differs' }
+    return ConvertFrom-Json -InputObject ([string]$output[0]) -ErrorAction Stop
 }
 
 if ([string]::IsNullOrWhiteSpace($StateRoot)) { $StateRoot = Get-ProductionStateRoot }
@@ -394,17 +451,21 @@ if ($Action -in @('Apply', 'Confirm')) {
     Assert-ProtectedStateRoot -Path $resolvedStateRoot
     $resolvedHgctl = Resolve-InstalledHgctl -Root $resolvedStateRoot
     $installedConfig = Resolve-InstalledConfig -Root $resolvedStateRoot
-    if ($Action -eq 'Confirm') {
-        if ($QuickCheckElapsedSeconds -lt 1 -or $QuickCheckElapsedSeconds -gt 90 -or [string]::IsNullOrWhiteSpace($QuickCheckRecordPath) -or $QuickCheckRecordSHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Confirm requires a successful bounded PendingQuickCheck record with at least 30 seconds watchdog safety margin' }
-        $quickCheckPath = Resolve-CleanAbsolutePath -Path $QuickCheckRecordPath -Label 'PendingQuickCheck record path'
-        Assert-RegularFile -Path $quickCheckPath -Label 'PendingQuickCheck record'
-        if ((Get-LockedFileSHA256 -Path $quickCheckPath) -cne $QuickCheckRecordSHA256) { throw 'PendingQuickCheck record hash differs' }
-    }
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
         $requestedConfig = Resolve-CleanAbsolutePath -Path $ConfigPath -Label 'tunnel config path'
         if (-not [string]::Equals($requestedConfig, $installedConfig.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'live P3.5 accepts only the protected installed tunnel config' }
     }
     if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSHA256) -and $ExpectedConfigSHA256 -cne $installedConfig.SHA256) { throw 'requested tunnel config SHA-256 differs from the protected pin' }
+    if ($Action -eq 'Confirm') {
+        if ([string]::IsNullOrWhiteSpace($QuickCheckRecordPath) -or $QuickCheckRecordSHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Confirm requires a successful bounded PendingQuickCheck record with at least 30 seconds watchdog safety margin' }
+        $quickCheckPath = Resolve-CleanAbsolutePath -Path $QuickCheckRecordPath -Label 'PendingQuickCheck record path'
+        Assert-RegularFile -Path $quickCheckPath -Label 'PendingQuickCheck record'
+        $pendingStatus = Get-CanaryPendingStatus -Executable $resolvedHgctl -StateRoot $resolvedStateRoot
+        $stateRootIdentity = Get-TextSHA256 -Value $resolvedStateRoot.ToLowerInvariant()
+        $trustedQuickCheck = Test-TrustedQuickCheckRecord -Path $quickCheckPath -ExpectedFileSHA256 $QuickCheckRecordSHA256 `
+            -ExpectedCandidateSHA256 $CandidateSHA256 -ExpectedStateRootIdentity $stateRootIdentity -PendingStatus $pendingStatus -Now ([DateTimeOffset]::UtcNow)
+        if ($QuickCheckElapsedSeconds -ne 0 -and $QuickCheckElapsedSeconds -ne [int]$trustedQuickCheck.elapsed_seconds) { throw 'PendingQuickCheck elapsed time differs' }
+    }
     $arguments = @('windows', 'canary', $Action.ToLowerInvariant(), '--config', $installedConfig.Path, '--config-sha256', $installedConfig.SHA256, '--state-root', $resolvedStateRoot, '--revision', $Revision)
     foreach ($address in @($Target)) { $arguments += @('--target', $address) }
     $arguments += @('--dns-namespace', $DnsNamespace, '--candidate-sha256', $CandidateSHA256, '--confirm-live', $Challenge, '--json')

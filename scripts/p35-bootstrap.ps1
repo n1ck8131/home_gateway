@@ -10,6 +10,7 @@ param(
     [string]$ExpectedHgctlSHA256,
     [string]$Confirmation,
     [string]$ACLPlanSHA256,
+    [string]$NetworkRestorePlanSHA256,
     [string]$DriverPath,
     [string]$PayloadPath,
     [string]$LauncherPath,
@@ -37,7 +38,8 @@ function New-RestoreConfigAclPlan(
     [string]$BaselineAclSDDL,
     [string]$ConfigSHA256,
     [string]$DriverSHA256,
-    [string]$PayloadSHA256
+    [string]$PayloadSHA256,
+    [string]$NetworkRestorePlanSHA256
 ) {
     $identity = [pscustomobject][ordered]@{
         schema = 'home-gateway/windows-restore-config-acl/v1'
@@ -47,6 +49,7 @@ function New-RestoreConfigAclPlan(
         config_sha256 = $ConfigSHA256
         bootstrap_driver_sha256 = $DriverSHA256
         bootstrap_payload_sha256 = $PayloadSHA256
+        network_restore_plan_sha256 = $NetworkRestorePlanSHA256
         operation = 'restore-config-acl'
     }
     $planHash = Get-TextSHA256 -Value (ConvertTo-Json -Compress -InputObject $identity)
@@ -184,6 +187,9 @@ Assert-FileSHA256 -Path $resolvedPayload -Expected $ExpectedPayloadSHA256 -Label
 if ($Action -ceq 'RestoreConfigAclPlan') {
     if (-not [string]::IsNullOrWhiteSpace($Confirmation) -or -not [string]::IsNullOrWhiteSpace($ACLPlanSHA256)) { throw 'RestoreConfigAclPlan does not accept mutation approval' }
 }
+if ($Action -in @('RestoreConfigAclPlan','RestoreConfigAcl')) {
+    Assert-SHA256 -Value $NetworkRestorePlanSHA256 -Label 'network restore plan hash'
+}
 if ($Action -ceq 'RestoreConfigAcl') {
     Assert-SHA256 -Value $ACLPlanSHA256 -Label 'ACL plan hash'
     if ($Confirmation -cnotmatch '^P35-RESTORE-CONFIG-ACL-[0-9A-F]{16}$') { throw 'P3.5 ACL restore challenge differs' }
@@ -217,6 +223,7 @@ if ($Action -ceq 'Install') {
         config_path = $resolvedConfig
         config_sha256 = $ExpectedConfigSHA256
         acl_plan_sha256 = $ACLPlanSHA256
+        network_restore_plan_sha256 = $NetworkRestorePlanSHA256
         driver_path = $resolvedDriver
         driver_sha256 = $ExpectedDriverSHA256
         payload_path = $resolvedPayload
@@ -233,17 +240,16 @@ $trustedPowerShell = [IO.Path]::Combine($windows, 'System32', 'WindowsPowerShell
 $null = Resolve-LocalCleanPath -Path $trustedPowerShell -Label 'trusted Windows PowerShell'
 Assert-FileSHA256 -Path $resolvedPayload -Expected $ExpectedPayloadSHA256 -Label 'bootstrap payload'
 Assert-FileSHA256 -Path $resolvedDriver -Expected $ExpectedDriverSHA256 -Label 'bootstrap driver'
-if (-not $PSCmdlet.ShouldProcess('protected P3.5 filesystem state and the selected config ACL', "$Action via pinned elevated EncodedCommand")) { return }
+if ($Action -cne 'RestoreConfigAclPlan' -and -not $PSCmdlet.ShouldProcess('protected P3.5 filesystem state and the selected config ACL', "$Action via pinned elevated EncodedCommand")) { return }
 
 $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $payloadCommandBase64)
 $commandLength = $trustedPowerShell.Length + 1 + (($arguments | ForEach-Object { [string]$_ }) -join ' ').Length
 if ($commandLength -ge 32767) { throw 'P3.5 bootstrap command exceeds CreateProcess command length budget' }
 $process = Start-Process -FilePath $trustedPowerShell -Verb RunAs -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
 if ($null -eq $process -or $process.ExitCode -ne 0) { throw "P3.5 elevated bootstrap failed with exit code $($process.ExitCode)" }
-if ($Action -ceq 'RestoreConfigAclPlan') { return }
-[Console]::Out.WriteLine((ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{
+Write-Output (ConvertTo-Json -Compress -InputObject ([pscustomobject][ordered]@{
     version = 1
     ok = $true
     action = $Action
     elevated_exit_code = $process.ExitCode
-})))
+}))

@@ -10,6 +10,9 @@ param(
     [string]$Challenge,
     [string]$CandidateSHA256,
     [string]$RecoveryPlanSHA256,
+    [string]$QuickCheckRecordPath,
+    [string]$QuickCheckRecordSHA256,
+    [int]$QuickCheckElapsedSeconds,
     [switch]$ConfirmLiveMutation,
     [switch]$ConfirmRecovery,
     [string]$HgctlPath,
@@ -391,6 +394,12 @@ if ($Action -in @('Apply', 'Confirm')) {
     Assert-ProtectedStateRoot -Path $resolvedStateRoot
     $resolvedHgctl = Resolve-InstalledHgctl -Root $resolvedStateRoot
     $installedConfig = Resolve-InstalledConfig -Root $resolvedStateRoot
+    if ($Action -eq 'Confirm') {
+        if ($QuickCheckElapsedSeconds -lt 1 -or $QuickCheckElapsedSeconds -gt 90 -or [string]::IsNullOrWhiteSpace($QuickCheckRecordPath) -or $QuickCheckRecordSHA256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Confirm requires a successful bounded PendingQuickCheck record with at least 30 seconds watchdog safety margin' }
+        $quickCheckPath = Resolve-CleanAbsolutePath -Path $QuickCheckRecordPath -Label 'PendingQuickCheck record path'
+        Assert-RegularFile -Path $quickCheckPath -Label 'PendingQuickCheck record'
+        if ((Get-LockedFileSHA256 -Path $quickCheckPath) -cne $QuickCheckRecordSHA256) { throw 'PendingQuickCheck record hash differs' }
+    }
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
         $requestedConfig = Resolve-CleanAbsolutePath -Path $ConfigPath -Label 'tunnel config path'
         if (-not [string]::Equals($requestedConfig, $installedConfig.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'live P3.5 accepts only the protected installed tunnel config' }

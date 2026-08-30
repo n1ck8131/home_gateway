@@ -26,7 +26,17 @@ func loadCanaryJournalReadOnly(path string) (apply.Journal, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 64<<10 {
 		return apply.Journal{}, errors.New("journal is not one bounded regular file")
 	}
-	data, err := os.ReadFile(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return apply.Journal{}, err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return apply.Journal{}, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, (64<<10)+1))
 	if err != nil {
 		return apply.Journal{}, err
 	}

@@ -208,4 +208,13 @@ Describe 'scripts/p35-canary.ps1' {
             -RecoveryPlanSHA256 ('a' * 64) -Challenge 'P35-FULL-RESTORE-0123456789ABCDEF' -WhatIf
         $state | Should -Not -Exist
     }
+
+    It 'binds Confirm to a hashed PendingQuickCheck record within the watchdog safety margin' {
+        $text = $script:Ast.Extent.Text
+        $text | Should -Match 'QuickCheckRecordPath'
+        $text | Should -Match 'QuickCheckRecordSHA256'
+        $text | Should -Match 'QuickCheckElapsedSeconds -gt 90'
+        $text | Should -Match 'Get-LockedFileSHA256 -Path \$quickCheckPath'
+        $text | Should -Match 'at least 30 seconds watchdog safety margin'
+    }
 }

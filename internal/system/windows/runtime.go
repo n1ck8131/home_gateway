@@ -183,12 +183,21 @@ func fileSHA256IfRegular(path string) string {
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	data, err := os.ReadFile(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return ""
 	}
-	digest := sha256.Sum256(data)
-	return fmt.Sprintf("%x", digest[:])
+	defer root.Close()
+	file, err := root.Open(filepath.Base(path))
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))
 }
 
 func (plan FullRestorePlan) IdentitySHA256() string { return sha256JSON(plan) }

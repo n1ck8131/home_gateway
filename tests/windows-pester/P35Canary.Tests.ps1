@@ -88,7 +88,7 @@ Describe 'scripts/p35-canary.ps1' {
             Should -BeGreaterThan 1
     }
 
-    It 'uses protected ProgramData state, pinned executable bytes, and a restricted config source' {
+    It 'uses the provider-neutral protected ProgramData config for Plan Apply and Confirm' {
         $text = Get-Content -LiteralPath $script:Canary -Raw
 
 		$text | Should -Match 'CommonApplicationData'
@@ -101,9 +101,14 @@ Describe 'scripts/p35-canary.ps1' {
 		$text | Should -Match 'Assert-RestrictedConfigSource'
 		$text | Should -Match 'Assert-InstalledConfigFile'
 		$text | Should -Match 'ExpectedConfigSHA256'
-		$text | Should -Match 'redshield\.sha256'
+		$text | Should -Match 'secrets\\tunnel\.conf'
+		$text | Should -Match 'secrets\\tunnel\.sha256'
+		$text | Should -Not -Match 'secrets\\redshield\.conf'
+		$text | Should -Not -Match 'secrets\\redshield\.sha256'
 		$text | Should -Match '--config-sha256'
-		$text | Should -Match 'live P3\.5 accepts only the protected installed RedShield config'
+		$text | Should -Match 'live P3\.5 accepts only the protected installed tunnel config'
+		$text | Should -Match 'if \(\$Action -eq ''Plan''\)[\s\S]*Resolve-InstalledConfig'
+		$text | Should -Match 'if \(\$Action -in @\(''Apply'', ''Confirm''\)\)[\s\S]*Resolve-InstalledConfig'
 		$text | Should -Match 'AreAccessRulesProtected'
 		$text | Should -Match 'grants an unauthorized principal'
 		$text | Should -Match 'bin\\p35-canary\.ps1'
@@ -112,21 +117,80 @@ Describe 'scripts/p35-canary.ps1' {
 		$text | Should -Not -Match '\$identity\.User\.Value.*FullControl'
     }
 
-    It 'performs no filesystem or native mutation under Apply WhatIf' {
-        $config = Join-Path $TestDrive 'provider.conf'
-        Set-Content -LiteralPath $config -Value '[redacted-test-placeholder]'
-        $state = Join-Path $TestDrive 'state'
+    It 'resolves one exact regular provider-neutral config and rejects stale hash or reparse state' -Skip:(-not $script:IsNativeWindows) {
+        $required = @(
+            'Assert-LocalNonReparsePath',
+            'Assert-RegularFile',
+            'Get-StreamSHA256',
+            'Get-LockedFileSHA256',
+            'Assert-ExpectedSHA256',
+            'Read-ExactSHA256Pin',
+            'Resolve-InstalledConfig'
+        )
+        $definitions = foreach ($name in $required) {
+            $definition = @($script:Ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+            }, $true))
+            $definition.Count | Should -Be 1
+            $definition[0].Extent.Text
+        }
+        . ([ScriptBlock]::Create(($definitions -join "`r`n")))
+        function Assert-ProtectedStateRoot { param([string]$Path) }
+        function Assert-ProtectedDirectory { param([string]$Path, [string]$MarkerName) }
+        function Assert-InstalledConfigFile {
+            param([string]$Path)
+            Assert-RegularFile -Path $Path -Label 'installed tunnel config'
+        }
+        $script:SecretsMarkerName = '.p35-secrets-owner.v1'
 
-        & $script:Canary -Action Apply `
-            -ConfigPath $config `
-            -StateRoot $state `
-            -Target '1.1.1.1' `
-            -DnsNamespace '.one.one.one.one' `
-            -Challenge 'P35-APPLY-0011223344556677' `
-            -ConfirmLiveMutation `
-            -HgctlPath (Join-Path $TestDrive 'missing-hgctl.exe') `
-            -WhatIf
+        $root = Join-Path $TestDrive 'installed'
+        $secrets = Join-Path $root 'secrets'
+        New-Item -ItemType Directory -Path $secrets | Out-Null
+        $config = Join-Path $secrets 'tunnel.conf'
+        $pin = Join-Path $secrets 'tunnel.sha256'
+        [IO.File]::WriteAllText($config, '[synthetic-provider-profile]', [Text.UTF8Encoding]::new($false))
+        $expected = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash.ToLowerInvariant()
+        [IO.File]::WriteAllText($pin, $expected, [Text.Encoding]::ASCII)
 
-        $state | Should -Not -Exist
+        $resolved = Resolve-InstalledConfig -Root $root
+        $resolved.Path | Should -Be $config
+        $resolved.SHA256 | Should -BeExactly $expected
+
+        [IO.File]::WriteAllText($pin, ('0' * 64), [Text.Encoding]::ASCII)
+        { Resolve-InstalledConfig -Root $root } | Should -Throw '*protected pin*'
+        [IO.File]::WriteAllText($pin, $expected, [Text.Encoding]::ASCII)
+
+        Remove-Item -LiteralPath $config
+        New-Item -ItemType Directory -Path $config | Out-Null
+        { Resolve-InstalledConfig -Root $root } | Should -Throw '*regular non-reparse file*'
+
+        $junctionRoot = Join-Path $TestDrive 'junction-root'
+        $realSecrets = Join-Path $TestDrive 'real-secrets'
+        New-Item -ItemType Directory -Path $junctionRoot, $realSecrets | Out-Null
+        [IO.File]::WriteAllText((Join-Path $realSecrets 'tunnel.conf'), '[synthetic-provider-profile]', [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $realSecrets 'tunnel.sha256'), $expected, [Text.Encoding]::ASCII)
+        New-Item -ItemType Junction -Path (Join-Path $junctionRoot 'secrets') -Target $realSecrets | Out-Null
+        { Resolve-InstalledConfig -Root $junctionRoot } | Should -Throw '*reparse point*'
+    }
+
+    It 'performs no filesystem or native mutation under Apply or Confirm WhatIf' {
+        foreach ($action in @('Apply', 'Confirm')) {
+            $config = Join-Path $TestDrive ($action + '-provider.conf')
+            Set-Content -LiteralPath $config -Value '[redacted-test-placeholder]'
+            $state = Join-Path $TestDrive ($action + '-state')
+
+            & $script:Canary -Action $action `
+                -ConfigPath $config `
+                -StateRoot $state `
+                -Target '1.1.1.1' `
+                -DnsNamespace '.one.one.one.one' `
+                -Challenge 'P35-APPLY-0011223344556677' `
+                -ConfirmLiveMutation `
+                -HgctlPath (Join-Path $TestDrive 'missing-hgctl.exe') `
+                -WhatIf
+
+            $state | Should -Not -Exist
+        }
     }
 }

@@ -92,44 +92,44 @@ function Assert-RegularFile {
 
 function Assert-RestrictedConfigSource {
     param([Parameter(Mandatory = $true)][string]$Path)
-    Assert-RegularFile -Path $Path -Label 'RedShield config'
+    Assert-RegularFile -Path $Path -Label 'tunnel config'
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $allowed = @($currentSid, 'S-1-5-18', 'S-1-5-32-544')
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-    if (-not $acl.AreAccessRulesProtected) { throw 'RedShield config ACL inherits access and is not approved for live use' }
+    if (-not $acl.AreAccessRulesProtected) { throw 'tunnel config ACL inherits access and is not approved for live use' }
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if ($owner -notin $allowed) { throw 'RedShield config has an unauthorized owner' }
+    if ($owner -notin $allowed) { throw 'tunnel config has an unauthorized owner' }
     $currentUserCanRead = $false
     foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
         $sid = $rule.IdentityReference.Value
         if ($rule.IsInherited -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $sid -notin $allowed) {
-            throw 'RedShield config ACL grants an unauthorized principal'
+            throw 'tunnel config ACL grants an unauthorized principal'
         }
         if ($sid -ceq $currentSid -and (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::ReadData) -ne 0)) {
             $currentUserCanRead = $true
         }
     }
-    if (-not $currentUserCanRead) { throw 'RedShield config ACL does not grant the current owner explicit read access' }
+    if (-not $currentUserCanRead) { throw 'tunnel config ACL does not grant the current owner explicit read access' }
 }
 
 function Assert-InstalledConfigFile {
     param([Parameter(Mandatory = $true)][string]$Path)
-    Assert-RegularFile -Path $Path -Label 'installed RedShield config'
+    Assert-RegularFile -Path $Path -Label 'installed tunnel config'
     $allowed = @('S-1-5-18', 'S-1-5-32-544')
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if ($owner -notin $allowed) { throw 'installed RedShield config has an unauthorized owner' }
+    if ($owner -notin $allowed) { throw 'installed tunnel config has an unauthorized owner' }
     $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-    if ($rules.Count -ne 2) { throw 'installed RedShield config ACL count differs' }
+    if ($rules.Count -ne 2) { throw 'installed tunnel config ACL count differs' }
     $seen = @{}
     foreach ($rule in $rules) {
         $sid = $rule.IdentityReference.Value
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or $sid -notin $allowed -or $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or $seen.ContainsKey($sid)) {
-            throw 'installed RedShield config ACL is not the exact SYSTEM/Administrators contract'
+            throw 'installed tunnel config ACL is not the exact SYSTEM/Administrators contract'
         }
         $seen[$sid] = $true
     }
-    foreach ($sid in $allowed) { if (-not $seen.ContainsKey($sid)) { throw 'installed RedShield config lacks a required administrative ACE' } }
+    foreach ($sid in $allowed) { if (-not $seen.ContainsKey($sid)) { throw 'installed tunnel config lacks a required administrative ACE' } }
 }
 
 function New-ProtectedDirectorySecurity {
@@ -300,10 +300,10 @@ function Resolve-InstalledConfig {
     param([Parameter(Mandatory = $true)][string]$Root)
     Assert-ProtectedStateRoot -Path $Root
     Assert-ProtectedDirectory -Path (Join-Path $Root 'secrets') -MarkerName $script:SecretsMarkerName
-    $path = Join-Path $Root 'secrets\redshield.conf'
+    $path = Join-Path $Root 'secrets\tunnel.conf'
     Assert-InstalledConfigFile -Path $path
-    $pin = Read-ExactSHA256Pin -Path (Join-Path $Root 'secrets\redshield.sha256') -Label 'installed RedShield config pin'
-    if ((Get-LockedFileSHA256 -Path $path) -cne $pin) { throw 'installed RedShield config differs from its protected pin' }
+    $pin = Read-ExactSHA256Pin -Path (Join-Path $Root 'secrets\tunnel.sha256') -Label 'installed tunnel config pin'
+    if ((Get-LockedFileSHA256 -Path $path) -cne $pin) { throw 'installed tunnel config differs from its protected pin' }
     return [pscustomobject]@{ Path = $path; SHA256 = $pin }
 }
 
@@ -349,12 +349,13 @@ if ($Action -eq 'Plan') {
     Assert-ProductionStateRoot -Path $resolvedStateRoot
     if (Test-ElevatedWindows) { throw 'run P3.5 Plan from a non-elevated session' }
     if ([string]::IsNullOrWhiteSpace($ConfigPath) -or @($Target).Count -eq 0 -or [string]::IsNullOrWhiteSpace($ExpectedConfigSHA256)) { throw 'Plan requires ConfigPath, ExpectedConfigSHA256 and Target' }
-    $resolvedConfig = Resolve-CleanAbsolutePath -Path $ConfigPath -Label 'RedShield config path'
-    Assert-RestrictedConfigSource -Path $resolvedConfig
+    $installedConfig = Resolve-InstalledConfig -Root $resolvedStateRoot
+    $requestedConfig = Resolve-CleanAbsolutePath -Path $ConfigPath -Label 'tunnel config path'
+    if (-not [string]::Equals($requestedConfig, $installedConfig.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'P3.5 Plan accepts only the protected installed tunnel config' }
     Assert-ExpectedSHA256 -Expected $ExpectedConfigSHA256
-    if ((Get-LockedFileSHA256 -Path $resolvedConfig) -cne $ExpectedConfigSHA256) { throw 'RedShield config differs from the approved SHA-256' }
+    if ($ExpectedConfigSHA256 -cne $installedConfig.SHA256) { throw 'requested tunnel config SHA-256 differs from the protected pin' }
     $resolvedHgctl = Resolve-HgctlSource -ExplicitPath $HgctlPath -Expected $ExpectedHgctlSHA256
-    $arguments = @('windows', 'canary', 'plan', '--config', $resolvedConfig, '--config-sha256', $ExpectedConfigSHA256, '--state-root', $resolvedStateRoot, '--revision', $Revision)
+    $arguments = @('windows', 'canary', 'plan', '--config', $installedConfig.Path, '--config-sha256', $installedConfig.SHA256, '--state-root', $resolvedStateRoot, '--revision', $Revision)
     foreach ($address in @($Target)) { $arguments += @('--target', $address) }
     $arguments += @('--dns-namespace', $DnsNamespace, '--json')
     Invoke-HgctlPlan -Executable $resolvedHgctl -Arguments $arguments
@@ -379,10 +380,10 @@ if ($Action -in @('Apply', 'Confirm')) {
     $resolvedHgctl = Resolve-InstalledHgctl -Root $resolvedStateRoot
     $installedConfig = Resolve-InstalledConfig -Root $resolvedStateRoot
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
-        $requestedConfig = Resolve-CleanAbsolutePath -Path $ConfigPath -Label 'RedShield config path'
-        if (-not [string]::Equals($requestedConfig, $installedConfig.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'live P3.5 accepts only the protected installed RedShield config' }
+        $requestedConfig = Resolve-CleanAbsolutePath -Path $ConfigPath -Label 'tunnel config path'
+        if (-not [string]::Equals($requestedConfig, $installedConfig.Path, [StringComparison]::OrdinalIgnoreCase)) { throw 'live P3.5 accepts only the protected installed tunnel config' }
     }
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSHA256) -and $ExpectedConfigSHA256 -cne $installedConfig.SHA256) { throw 'requested RedShield config SHA-256 differs from the protected pin' }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedConfigSHA256) -and $ExpectedConfigSHA256 -cne $installedConfig.SHA256) { throw 'requested tunnel config SHA-256 differs from the protected pin' }
     $arguments = @('windows', 'canary', $Action.ToLowerInvariant(), '--config', $installedConfig.Path, '--config-sha256', $installedConfig.SHA256, '--state-root', $resolvedStateRoot, '--revision', $Revision)
     foreach ($address in @($Target)) { $arguments += @('--target', $address) }
     $arguments += @('--dns-namespace', $DnsNamespace, '--confirm-live', $Challenge, '--json')

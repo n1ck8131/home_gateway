@@ -81,6 +81,8 @@ Describe 'scripts/p35-bootstrap-elevated.ps1' {
         $text | Should -Match 'Install-PinnedConfig\s+-Source\s+\$configSource'
         $text | Should -Match "secrets, 'tunnel\.conf'"
         $text | Should -Match "secrets, 'tunnel\.sha256'"
+        $text | Should -Not -Match "secrets, 'redshield\.conf'"
+        $text | Should -Not -Match "secrets, 'redshield\.sha256'"
         $text | Should -Match 'FileShare\]::None'
         $text | Should -Not -Match 'ReadAllText|ReadAllBytes'
     }

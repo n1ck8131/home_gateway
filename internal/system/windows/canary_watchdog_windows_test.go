@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,178 @@ func TestObserveWatchdogTasksUsesBoundedExactStructuredReceipt(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestObserveWatchdogTasksExecutesEmbeddedPowerShellAgainstSyntheticScheduledTasks(t *testing.T) {
+	paths, err := resolveNativeInventoryPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := buildCanaryWatchdogCommand(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := writeSyntheticScheduledTasksModule(t)
+	for index, value := range command.Environment {
+		if strings.HasPrefix(value, "HG_TASKSCHEDULER_MANIFEST=") {
+			command.Environment[index] = "HG_TASKSCHEDULER_MANIFEST=" + manifest
+		}
+	}
+	root, err := ProductionCanaryStateRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(root, "bin", "hgctl.exe")
+	absentStateSHA256 := "1663065c4175b4939a929dc139ad41ba3ff4dc865d2e7a7a95e409c98fc4a74c"
+	observations := make(map[string][]WatchdogTaskIdentity)
+	for _, scenario := range []string{"committed", "absent", "armed"} {
+		t.Run(scenario, func(t *testing.T) {
+			spec := command
+			spec.Environment = append(append([]string(nil), command.Environment...), "HG_SYNTHETIC_TASK_SCENARIO="+scenario)
+			got, observeErr := observeWatchdogTasks(t.Context(), root, executable, spec, nativeExecMutationRunner{})
+			if observeErr != nil {
+				t.Fatal(observeErr)
+			}
+			if len(got) != 2 {
+				t.Fatalf("observed task identities = %d", len(got))
+			}
+			if got[0].IdentitySHA256 != "2d58ac8b637df61862670dffe7100d6c425aac2347d7d2d3843dd3ce0130f571" ||
+				got[1].IdentitySHA256 != "f5e1d15dbb7b3e43d6e74e84763ae4487a35a673e608806acf5990ecbbd46fc9" {
+				t.Fatalf("observed task identities = %#v", got)
+			}
+			wantRecoveryAbsent := scenario != "armed"
+			wantReconcileAbsent := scenario == "absent"
+			if (got[0].ObservedStateSHA256 == absentStateSHA256) != wantRecoveryAbsent ||
+				(got[1].ObservedStateSHA256 == absentStateSHA256) != wantReconcileAbsent {
+				t.Fatalf("observed task presence for %s = %#v", scenario, got)
+			}
+			observations[scenario] = got
+		})
+	}
+	for _, scenario := range []string{"ambiguous", "malformed"} {
+		t.Run(scenario, func(t *testing.T) {
+			spec := command
+			spec.Environment = append(append([]string(nil), command.Environment...), "HG_SYNTHETIC_TASK_SCENARIO="+scenario)
+			if _, observeErr := observeWatchdogTasks(t.Context(), root, executable, spec, nativeExecMutationRunner{}); observeErr == nil {
+				t.Fatal("invalid synthetic Scheduled Task shape passed embedded observer")
+			}
+		})
+	}
+
+	backend := newSafeBackend()
+	runtime, journal := prepareFullRestorePlan(t, backend)
+	backend.watchdogTasks = observations["committed"]
+	committedPlan, err := runtime.PlanFullRestore(t.Context(), journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.watchdogTasks = observations["armed"]
+	armedPlan, err := runtime.PlanFullRestore(t.Context(), journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committedPlan.IdentitySHA256() == armedPlan.IdentitySHA256() {
+		t.Fatal("watchdog presence drift reused the full restore plan hash")
+	}
+}
+
+func writeSyntheticScheduledTasksModule(t *testing.T) string {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "ScheduledTasks")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := filepath.Join(directory, "ScheduledTasks.psd1")
+	manifestBody := `@{
+RootModule = 'ScheduledTasks.psm1'
+ModuleVersion = '1.0.0'
+GUID = 'd2d3451e-7f1f-4b13-ac98-31971bb87f69'
+FunctionsToExport = @('Get-ScheduledTask')
+CmdletsToExport = @()
+VariablesToExport = @()
+AliasesToExport = @()
+}`
+	moduleBody := `Set-StrictMode -Version Latest
+
+function New-SyntheticTrigger([string]$ClassName, [bool]$Recovery) {
+    $start = if ($ClassName -ceq 'MSFT_TaskTimeTrigger') {
+        if ($Recovery) { [DateTimeOffset]::Now.AddMinutes(5).ToString('o') } else { [DateTime]::Today.AddMinutes(7).ToString('o') }
+    } else { '' }
+    $daysInterval = if ($ClassName -ceq 'MSFT_TaskTimeTrigger' -and -not $Recovery) { 1 } else { 0 }
+    $interval = if ($ClassName -ceq 'MSFT_TaskTimeTrigger' -and $Recovery) { 'PT1M' } else { '' }
+    $duration = if ($ClassName -ceq 'MSFT_TaskTimeTrigger' -and $Recovery) { 'P3650D' } else { '' }
+    return [pscustomobject]@{
+        CimClass = [pscustomobject]@{ CimClassName = $ClassName }
+        Enabled = $true
+        StartBoundary = $start
+        EndBoundary = ''
+        Delay = ''
+        RandomDelay = ''
+        DaysInterval = $daysInterval
+        Repetition = [pscustomobject]@{
+            Interval = $interval
+            Duration = $duration
+        }
+    }
+}
+
+function New-SyntheticTask([string]$Name, [bool]$Malformed) {
+    $recovery = $Name -ceq 'HomeGateway-P35-Recovery'
+    $root = [IO.Path]::Combine($env:ProgramData, 'HomeGateway', 'P35')
+    $description = if ($recovery) { 'Home Gateway P3.5 durable commit-confirm recovery' } else { 'Home Gateway P3.5 committed startup reconciliation' }
+    if ($Malformed) { $description = 'foreign task' }
+    $restartCount = if ($recovery) { 3 } else { 30 }
+    return [pscustomobject]@{
+        TaskName = $Name
+        TaskPath = '\'
+        Description = $description
+        State = 'Ready'
+        Actions = @([pscustomobject]@{
+            Execute = [IO.Path]::Combine($root, 'bin', 'hgctl.exe')
+            Arguments = 'windows canary recover --state-root "' + $root + '" --confirm-recovery P35-RECOVER --json'
+            WorkingDirectory = $root
+        })
+        Principal = [pscustomobject]@{ UserId = 'SYSTEM'; LogonType = 'ServiceAccount'; RunLevel = 'Highest' }
+        Settings = [pscustomobject]@{
+            Enabled = $true
+            StartWhenAvailable = $true
+            RestartCount = $restartCount
+            RestartInterval = 'PT1M'
+            ExecutionTimeLimit = 'PT5M'
+            DisallowStartIfOnBatteries = $false
+            StopIfGoingOnBatteries = $false
+            RunOnlyIfIdle = $false
+            RunOnlyIfNetworkAvailable = $false
+            MultipleInstances = 'IgnoreNew'
+        }
+        Triggers = @(
+            New-SyntheticTrigger 'MSFT_TaskBootTrigger' $recovery
+            New-SyntheticTrigger 'MSFT_TaskTimeTrigger' $recovery
+        )
+    }
+}
+
+function Get-ScheduledTask {
+    [CmdletBinding()]
+    param()
+    switch ($env:HG_SYNTHETIC_TASK_SCENARIO) {
+        'committed' { return @(New-SyntheticTask 'HomeGateway-P35-Reconcile' $false) }
+        'absent' { return @() }
+        'armed' { return @((New-SyntheticTask 'HomeGateway-P35-Recovery' $false), (New-SyntheticTask 'HomeGateway-P35-Reconcile' $false)) }
+        'ambiguous' { return @((New-SyntheticTask 'HomeGateway-P35-Recovery' $false), (New-SyntheticTask 'HomeGateway-P35-Recovery' $false), (New-SyntheticTask 'HomeGateway-P35-Reconcile' $false)) }
+        'malformed' { return @((New-SyntheticTask 'HomeGateway-P35-Recovery' $true), (New-SyntheticTask 'HomeGateway-P35-Reconcile' $false)) }
+        default { throw 'unknown synthetic scenario' }
+    }
+}
+Export-ModuleMember -Function Get-ScheduledTask
+`
+	if err := os.WriteFile(manifest, []byte(manifestBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "ScheduledTasks.psm1"), []byte(moduleBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
 }
 
 func boolPointer(value bool) *bool { return &value }

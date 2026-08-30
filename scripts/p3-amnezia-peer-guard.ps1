@@ -26,6 +26,13 @@ function Get-TextSHA256([string]$Value) {
     try { return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Value)))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
 }
 
+function New-PeerGuardAutomaticArguments([string]$Payload,[string]$ExpectedPayloadSHA256,[string]$ExpectedProtocolSHA256) {
+    if ([string]::IsNullOrWhiteSpace($Payload) -or $ExpectedPayloadSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $ExpectedProtocolSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'peer guard automatic arguments differ'
+    }
+    return @($Payload,'--automatic','--json','--expected-payload-sha256',$ExpectedPayloadSHA256,'--expected-protocol-sha256',$ExpectedProtocolSHA256)
+}
+
 function Test-CurrentEgress([string[]]$Endpoints,[string]$ExpectedCIDRSHA256,[scriptblock]$Runner) {
     if ($ExpectedCIDRSHA256 -cnotmatch '^[0-9a-f]{64}$' -or @($Endpoints).Count -ne 3) { throw 'current egress pins differ' }
     if ($null -eq $Runner) { $Runner = { param($endpoint) Invoke-RestMethod -Uri ([Uri]$endpoint) -Method Get -TimeoutSec 10 -MaximumRedirection 0 -ErrorAction Stop } }
@@ -108,8 +115,10 @@ if ($knownHostsHash -cne [string]$pins.known_hosts_sha256) { throw 'known-hosts 
 $null = Test-CurrentEgress -Endpoints @($pins.egress_https_endpoints) -ExpectedCIDRSHA256 ([string]$pins.current_egress_cidr_sha256)
 $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $ssh = [IO.Path]::Combine($windows,'System32','OpenSSH','ssh.exe')
+$remoteGuardArguments = New-PeerGuardAutomaticArguments -Payload '/usr/local/libexec/home-gateway-p3-peer-guard' `
+    -ExpectedPayloadSHA256 ([string]$pins.remote_payload_sha256) -ExpectedProtocolSHA256 ([string]$pins.remote_protocol_sha256)
 $arguments = @('-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=yes','-o',"UserKnownHostsFile=$knownHosts",'-o','ConnectTimeout=10',
-    "$([string]$pins.ssh_user)@$([string]$pins.ssh_host)","sudo /usr/local/libexec/home-gateway-p3-peer-guard --automatic --json --expected-payload-sha256 $([string]$pins.remote_payload_sha256) --expected-protocol-sha256 $([string]$pins.remote_protocol_sha256)")
+    "$([string]$pins.ssh_user)@$([string]$pins.ssh_host)",('sudo ' + ($remoteGuardArguments -join ' ')))
 $null = Invoke-BoundedPeerGuard -Executable $ssh -Arguments $arguments -ExpectedPayloadSHA256 ([string]$pins.remote_payload_sha256) `
     -ExpectedProtocolSHA256 ([string]$pins.remote_protocol_sha256) -TimeoutSeconds 25 -MaxOutputBytes 16384
 [Console]::Out.WriteLine('READY_FOR_UI=YES')

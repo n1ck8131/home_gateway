@@ -122,9 +122,16 @@ func buildCanaryWatchdogCommand(paths nativeInventoryPaths) (nativeMutationComma
 	if err != nil {
 		return nativeMutationCommand{}, errors.New("trusted Task Scheduler paths are invalid")
 	}
+	root, err := ProductionCanaryStateRoot()
+	if err != nil {
+		return nativeMutationCommand{}, errors.New("trusted ProgramData path is invalid")
+	}
 	modulesRoot := filepath.Join(base.Directory, "WindowsPowerShell", "v1.0", "Modules")
 	environment := append([]string(nil), base.Environment...)
-	environment = append(environment, "HG_TASKSCHEDULER_MANIFEST="+filepath.Join(modulesRoot, "ScheduledTasks", "ScheduledTasks.psd1"))
+	environment = append(environment,
+		"ProgramData="+filepath.Dir(filepath.Dir(root)),
+		"HG_TASKSCHEDULER_MANIFEST="+filepath.Join(modulesRoot, "ScheduledTasks", "ScheduledTasks.psd1"),
+	)
 	return nativeMutationCommand{
 		Executable: base.Executable,
 		Arguments: []string{
@@ -242,7 +249,7 @@ $inputText = [Console]::In.ReadToEnd()
 if ([Text.Encoding]::UTF8.GetByteCount($inputText) -gt 1048576) { throw 'structured input limit exceeded' }
 $request = Microsoft.PowerShell.Utility\ConvertFrom-Json -InputObject $inputText -ErrorAction Stop
 if ([int]$request.version -ne 1) { throw 'unsupported request version' }
-$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$programData = [IO.Path]::GetFullPath($env:ProgramData)
 $expectedRoot = [IO.Path]::Combine($programData, 'HomeGateway', 'P35')
 $expectedExecutable = [IO.Path]::Combine($expectedRoot, 'bin', 'hgctl.exe')
 if (-not [string]::Equals([string]$request.root, $expectedRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'unexpected watchdog root' }
@@ -415,7 +422,14 @@ function Get-TaskProperty([object]$value, [string]$name) {
 	return $property.Value
 }
 
-function Get-ObservedTaskStateSHA256([object]$task) {
+function Get-ObservedTaskStateSHA256([AllowNull()][object]$task) {
+	if ($null -eq $task) {
+		$absent = [pscustomobject][ordered]@{
+			schema = 'home-gateway/watchdog-task-state/v1'
+			presence = 'absent'
+		}
+		return Get-TextSHA256 (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $absent -Compress)
+	}
 	$triggers = @()
 	foreach ($trigger in @($task.Triggers)) {
 		$repetition = Get-TaskProperty $trigger 'Repetition'
@@ -432,6 +446,8 @@ function Get-ObservedTaskStateSHA256([object]$task) {
 		}
 	}
 	$state = [pscustomobject][ordered]@{
+		schema = 'home-gateway/watchdog-task-state/v1'
+		presence = 'present'
 		description = [string]$task.Description
 		state = [string]$task.State
 		enabled = Test-TaskEnabled $task
@@ -447,7 +463,7 @@ function Get-ObservedTaskStateSHA256([object]$task) {
 	return Get-TextSHA256 (Microsoft.PowerShell.Utility\ConvertTo-Json -InputObject $state -Compress -Depth 5)
 }
 
-function New-ObservedTask([object]$task, [string]$identitySHA256) {
+function New-ObservedTask([AllowNull()][object]$task, [string]$identitySHA256) {
 	return [pscustomobject][ordered]@{
 		type = 'scheduled-task'
 		role = 'remove'
@@ -473,12 +489,20 @@ switch ([string]$request.operation) {
 	'observe' {
 		$recovery = @(Get-ExactTask $recoveryTaskName)
 		$reconcile = @(Get-ExactTask $reconcileTaskName)
-		if ($recovery.Count -ne 1 -or $reconcile.Count -ne 1) { throw 'scheduled watchdog observation is incomplete or ambiguous' }
-		Assert-OwnedRecoveryTask $recovery[0]
-		Assert-OwnedReconcileTask $reconcile[0]
+		if ($recovery.Count -gt 1 -or $reconcile.Count -gt 1) { throw 'scheduled watchdog observation is ambiguous' }
+		$recoveryTask = $null
+		$reconcileTask = $null
+		if ($recovery.Count -eq 1) {
+			Assert-OwnedRecoveryTask $recovery[0]
+			$recoveryTask = $recovery[0]
+		}
+		if ($reconcile.Count -eq 1) {
+			Assert-OwnedReconcileTask $reconcile[0]
+			$reconcileTask = $reconcile[0]
+		}
 		$observedTasks = @(
-			New-ObservedTask $recovery[0] '2d58ac8b637df61862670dffe7100d6c425aac2347d7d2d3843dd3ce0130f571'
-			New-ObservedTask $reconcile[0] 'f5e1d15dbb7b3e43d6e74e84763ae4487a35a673e608806acf5990ecbbd46fc9'
+			New-ObservedTask $recoveryTask '2d58ac8b637df61862670dffe7100d6c425aac2347d7d2d3843dd3ce0130f571'
+			New-ObservedTask $reconcileTask 'f5e1d15dbb7b3e43d6e74e84763ae4487a35a673e608806acf5990ecbbd46fc9'
 		)
 	}
 	default { throw 'unsupported watchdog operation' }

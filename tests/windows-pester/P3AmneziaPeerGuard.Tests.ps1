@@ -85,7 +85,7 @@ Describe 'bounded P3 Amnezia peer guard' {
         $tokens = $null
         $errors = $null
         $ast = [Management.Automation.Language.Parser]::ParseFile($script:Launcher,[ref]$tokens,[ref]$errors)
-        $definitions = foreach ($name in @('Invoke-BoundedNativeProcess','Invoke-BoundedPeerGuard')) {
+        $definitions = foreach ($name in @('New-PeerGuardAutomaticArguments','Invoke-BoundedNativeProcess','Invoke-BoundedPeerGuard')) {
             $definition = @($ast.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -97,7 +97,7 @@ Describe 'bounded P3 Amnezia peer guard' {
         $python = (Get-Command python.exe).Source
         $payloadHash = (Get-FileHash -LiteralPath $script:Payload -Algorithm SHA256).Hash.ToLowerInvariant()
         $protocolHash = '79f5908e0c944d8076e2646595ca0342b192765a36288224a6cab071f59354c8'
-        $arguments = @($script:Payload,'--automatic','--json','--expected-payload-sha256',$payloadHash,'--expected-protocol-sha256',$protocolHash)
+        $arguments = New-PeerGuardAutomaticArguments -Payload $script:Payload -ExpectedPayloadSHA256 $payloadHash -ExpectedProtocolSHA256 $protocolHash
 
         $receipt = Invoke-BoundedPeerGuard -Executable $python -Arguments $arguments -ExpectedPayloadSHA256 $payloadHash `
             -ExpectedProtocolSHA256 $protocolHash -TimeoutSeconds 10 -MaxOutputBytes 4096

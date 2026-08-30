@@ -12,6 +12,8 @@
 
 **Reconciliation baseline:** [Gate 6.4/6.5C reconciliation](../../reports/2026-08-30-p3-gate64-65c-reconciliation.md) records Gates 6.1-6.3 passed, Gate 6.4 current state pending read-only reconciliation, Gate 6.5C `rollback-complete`, protected profile absent, and all Windows field gates open.
 
+**Pre-live amendment:** Accepted [Task 6A design](../specs/2026-08-30-p3-task6a-prelive-guard-design.md) and its [implementation plan](2026-08-30-p3-task6a-prelive-guard.md) must be implemented, fully validated, committed, and independently reviewed before Task 7 or any new SSH/UI/live action.
+
 ## Global Constraints
 
 - Do not disconnect, restart, reconfigure, or remove RedShield or Cisco without a separately named approval.
@@ -435,6 +437,22 @@
 
   Review spec coverage, exact candidate/restore binding, secret handling, SSH trust, peer rollback, client profile-only rollback, two-session timing, RedShield/Cisco preservation, and all observation-only claims. Fix every Critical/Important finding, commit the fixes, rerun only affected focused checks plus the full validation batch once, and obtain final GO. No live gate starts on an uncommitted or unreviewed tree.
 
+### Task 6A: Close the pre-live guard and reconciliation gaps
+
+**Detailed plan:** `docs/superpowers/plans/2026-08-30-p3-task6a-prelive-guard.md`
+
+**Interfaces:**
+- Consumes: accepted design commit `d7cd440`, offline Tasks 1-6 GO on `1ad8dc7`, and the Task 7 pre-live NO-GO review.
+- Produces: protected runtime trust bundle, one-key Git OpenSSH agent lifecycle, exact inert remote-helper lifecycle, complete reconciliation, guarded Admin/Guest events, nonce-bound client observation, full offline validation, and consolidated QA/security GO.
+
+- [ ] **Step 1: Execute the detailed Task 6A plan offline**
+
+  Use one implementation agent sequentially and preserve all ignored runtime evidence. No live/SSH/UI/network action is part of implementation.
+
+- [ ] **Step 2: Stop for the exact Gate 6.4L candidate**
+
+  After committed validation and review GO, generate but do not execute the first sanitized runtime/agent candidate. Every later live gate remains separately approved.
+
 ### Task 7: Run live Gate 6.5 and Gate 6.6
 
 **Files:**
@@ -442,7 +460,7 @@
 - Tracked evidence after PASS: `docs/reports/2026-08-30-p3-profile-client-field.md`
 
 **Interfaces:**
-- Consumes: committed Tasks 1–6 with QA/security GO, exact server baseline, protected staging root, and memory-only SSH agent.
+- Consumes: committed Tasks 1–6A with QA/security GO, exact server baseline, protected staging root, and memory-only SSH agent.
 - Produces: final accepted peer topology, protected static Guest profile, Guest/profile identity hashes, observed adapter/route/handshake/egress evidence, and tested client profile-only rollback.
 
 - [ ] **Step 1: Perform read-only Gate 6.4/6.5 baseline reconciliation**

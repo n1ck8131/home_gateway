@@ -1,6 +1,6 @@
 # Close P3 pre-live guard gaps
 
-Status: Draft for owner review
+Status: Accepted by owner on 2026-08-30 (`d7cd440`)
 
 Audience: Home Gateway maintainers and the P3 field operator
 
@@ -289,4 +289,4 @@ Ignored runtime scripts do not satisfy the tracked, committed, and reviewed guar
 
 ## Open questions
 
-No open architecture question blocks implementation planning. The owner must review this written design before the implementation plan is amended.
+No open architecture question blocks implementation. Live gates remain separately approved against their exact candidates.

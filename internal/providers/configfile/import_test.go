@@ -32,6 +32,9 @@ func TestInterfacePublicFingerprintSHA256DerivesX25519PublicBytes(t *testing.T) 
 	if got != want || got == hex.EncodeToString(privateBytes) || strings.Contains(fmt.Sprintf("%#v", config), syntheticKey(1)) {
 		t.Fatalf("public fingerprint contract differs: got=%q want=%q", got, want)
 	}
+	if !bytes.Equal(config.privateKey.bytes[:], make([]byte, len(config.privateKey.bytes))) {
+		t.Fatal("private key buffer was not cleared after fingerprint derivation")
+	}
 }
 
 func TestImportFilePinnedBindsParsedBytesToLowercaseSHA256(t *testing.T) {

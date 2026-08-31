@@ -202,6 +202,76 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
                 -ExpectedProfileAclIdentitySHA256 ('5' * 64) -NowUtc $now.AddMinutes(1) } | Should -Throw '*profile identity*'
     }
 
+    It 'records and consumes one protected management receipt after exact approval' {
+        $client = Join-Path $TestDrive 'management-client.exe';[IO.File]::WriteAllText($client,'synthetic-client')
+        $candidate = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-local-guard-receipt/v2';operation='admin';ready_emitted=$true;candidate_received=$true
+            candidate_fingerprint_sha256=('b'*64);pre_peer_set_sha256=('9'*64);post_peer_set_sha256=('a'*64)
+            nonce_sha256=('8'*64);live_mutation_performed=$false
+        }
+        $input=[pscustomobject]@{
+            manifest_sha256=('1'*64);candidate_receipt=$candidate;candidate_nonce_sha256=('8'*64)
+            pre_peer_set_sha256=('9'*64);post_peer_set_sha256=('a'*64);candidate_fingerprint_sha256=('b'*64)
+            runtime_identity_sha256=('c'*64);subject=[pscustomobject]@{
+                client_binary_path=$client;client_version_sha256=('4'*64);source_mapping_sha256=('5'*64)
+                ui_action_class_sha256=('6'*64);selected_entry_sha256=('7'*64)
+            }
+        }
+        $root=Join-Path $TestDrive 'management-evidence';$plan=Invoke-P3ProtectedEvidenceAction ManagementReceiptPlan $root $input '' '' $null
+        $planIdentity=[ordered]@{};foreach($property in $plan.PSObject.Properties){if($property.Name -notin @('plan_sha256','confirmation_challenge')){$planIdentity[$property.Name]=$property.Value}}
+        (Get-P3GuardCanonicalSHA256 ([pscustomobject]$planIdentity))|Should -BeExactly $plan.plan_sha256
+        $receipt=Invoke-P3ProtectedEvidenceAction -SelectedAction ManagementReceiptRecord -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+            -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner={[DateTime]::UtcNow}})
+        $receipt.owner_observed|Should -BeTrue;$receipt.server_role_confirmed|Should -BeFalse
+        $consumed=Invoke-P3ProtectedEvidenceAction -SelectedAction ManagementReceiptConsume -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+            -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner={[DateTime]::UtcNow}})
+        $consumed.receipt_sha256|Should -Match '^[0-9a-f]{64}$'
+        {Invoke-P3ProtectedEvidenceAction -SelectedAction ManagementReceiptConsume -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+                -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner={[DateTime]::UtcNow}})}|Should -Throw
+    }
+
+    It 'runs the pinned Guest inspector and persists only its candidate-matched fingerprint' {
+        $hgctl=Join-Path $TestDrive 'hgctl.exe';$profile=Join-Path $TestDrive 'guest.conf'
+        [IO.File]::WriteAllText($hgctl,'synthetic-hgctl');[IO.File]::WriteAllText($profile,'synthetic-private-profile')
+        $candidate=[pscustomobject][ordered]@{
+            schema='home-gateway/p3-local-guard-receipt/v2';operation='guest';ready_emitted=$true;candidate_received=$true
+            candidate_fingerprint_sha256=('b'*64);pre_peer_set_sha256=('9'*64);post_peer_set_sha256=('a'*64)
+            nonce_sha256=('8'*64);live_mutation_performed=$false
+        }
+        $input=[pscustomobject]@{manifest_sha256=('1'*64);candidate_receipt=$candidate;candidate_nonce_sha256=('8'*64)
+            pre_peer_set_sha256=('9'*64);post_peer_set_sha256=('a'*64);candidate_fingerprint_sha256=('b'*64)
+            runtime_identity_sha256=('c'*64);subject=[pscustomobject]@{hgctl_path=$hgctl;profile_path=$profile}}
+        $root=Join-Path $TestDrive 'guest-evidence';$plan=Invoke-P3ProtectedEvidenceAction GuestProfilePlan $root $input '' '' $null
+        $inspectorCalls=[Collections.Generic.List[string]]::new()
+        $boundaries=[pscustomobject]@{ClockRunner={[DateTime]::UtcNow};ProfileInspectorRunner={
+            param($exe,$arguments,$timeout,$maximum)$inspectorCalls.Add('inspect');$exe|Should -BeExactly $hgctl
+            $arguments|Should -Be @('tunnel','inspect','--config',$profile,'--json')
+            [pscustomobject]@{ExitCode=0;TimedOut=$false;Oversized=$false;StdErr='';StdOut=([ordered]@{
+                metadata=@{};status=@{};capabilities=@{};interface_public_fingerprint_sha256=('b'*64)}|ConvertTo-Json -Compress)}
+        }.GetNewClosure()}
+        $receipt=Invoke-P3ProtectedEvidenceAction -SelectedAction GuestProfileInspect -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+            -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries $boundaries
+        $inspectorCalls.Count|Should -Be 1;$receipt.derived_public_fingerprint_sha256|Should -BeExactly ('b'*64)
+        $receipt.raw_key_exposed|Should -BeFalse
+        (Get-Content (Join-Path $root 'receipt.json') -Raw)|Should -Not -Match 'synthetic-private-profile'
+    }
+
+    It 'rejects protected evidence approval or Guest fingerprint mismatch without a durable receipt' {
+        $hgctl=Join-Path $TestDrive 'blocked-hgctl.exe';$profile=Join-Path $TestDrive 'blocked-guest.conf'
+        [IO.File]::WriteAllText($hgctl,'synthetic-hgctl');[IO.File]::WriteAllText($profile,'synthetic-profile')
+        $candidate=[pscustomobject][ordered]@{schema='home-gateway/p3-local-guard-receipt/v2';operation='guest';ready_emitted=$true;candidate_received=$true
+            candidate_fingerprint_sha256=('b'*64);pre_peer_set_sha256=('9'*64);post_peer_set_sha256=('a'*64);nonce_sha256=('8'*64);live_mutation_performed=$false}
+        $input=[pscustomobject]@{manifest_sha256=('1'*64);candidate_receipt=$candidate;candidate_nonce_sha256=('8'*64);pre_peer_set_sha256=('9'*64)
+            post_peer_set_sha256=('a'*64);candidate_fingerprint_sha256=('b'*64);runtime_identity_sha256=('c'*64);subject=[pscustomobject]@{hgctl_path=$hgctl;profile_path=$profile}}
+        $root=Join-Path $TestDrive 'blocked-evidence';$plan=Invoke-P3ProtectedEvidenceAction GuestProfilePlan $root $input '' '' $null;$script:InspectorCalls=0
+        $boundaries=[pscustomobject]@{ClockRunner={[DateTime]::UtcNow};ProfileInspectorRunner={param($exe,$arguments,$timeout,$maximum)$script:InspectorCalls++
+            [pscustomobject]@{ExitCode=0;TimedOut=$false;Oversized=$false;StdErr='';StdOut=([ordered]@{metadata=@{};status=@{};capabilities=@{};interface_public_fingerprint_sha256=('0'*64)}|ConvertTo-Json -Compress)}}}
+        {Invoke-P3ProtectedEvidenceAction -SelectedAction GuestProfileInspect -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) -ExpectedPlanSHA256 ('0'*64) -Confirmation $plan.confirmation_challenge -Boundaries $boundaries}|Should -Throw '*plan*'
+        $script:InspectorCalls|Should -Be 0;Test-Path $root|Should -BeFalse
+        {Invoke-P3ProtectedEvidenceAction -SelectedAction GuestProfileInspect -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries $boundaries}|Should -Throw '*fingerprint*'
+        Test-Path $root|Should -BeFalse
+    }
+
     It 'builds only fixed strict protocol v2 requests' {
         $nonce = 'A' * 64
         $request = New-P3RemoteRequest -Context $script:Context -Mode 'guard' -Operation 'guest' -Nonce $nonce

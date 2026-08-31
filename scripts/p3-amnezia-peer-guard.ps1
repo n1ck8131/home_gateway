@@ -1,11 +1,14 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'ValidateOnly', 'Reconcile', 'GuardAdmin', 'GuardGuest', 'ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback')]
+    [ValidateSet('', 'ValidateOnly', 'Reconcile', 'GuardAdmin', 'GuardGuest', 'ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback',
+        'ManagementReceiptPlan', 'ManagementReceiptRecord', 'ManagementReceiptConsume',
+        'GuestProfilePlan', 'GuestProfileInspect', 'GuestProfileConsume')]
     [string]$Action = '',
     [string]$RuntimeRoot,
     [string]$ExpectedManifestSHA256,
     [string]$ExpectedPlanSHA256,
-    [string]$Confirmation
+    [string]$Confirmation,
+    [string]$EvidenceRoot
 )
 
 Set-StrictMode -Version Latest
@@ -211,6 +214,201 @@ function Test-P3GuestProfileIdentityReceipt(
             [string]$Receipt.profile_acl_identity_sha256 -cne $ExpectedProfileAclIdentitySHA256) -or
         [bool]$Receipt.raw_key_exposed -or [bool]$Receipt.consumed) { throw 'Guest profile identity receipt differs' }
     return $Receipt
+}
+
+function Import-P3GuardRuntime {
+    if ($null -eq (Get-Command Resolve-P3FixedCleanPath -ErrorAction SilentlyContinue)) {
+        $savedAction = $Action
+        try { . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1') }
+        finally { $Action = $savedAction }
+    }
+}
+
+function Get-P3EvidenceFileFacts([string]$Path, [int]$MaximumBytes, [string]$Label) {
+    Import-P3GuardRuntime
+    $resolved = Assert-P3RegularFile $Path $Label
+    $stream = [IO.File]::Open($resolved, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($stream.Length -le 0 -or $stream.Length -gt $MaximumBytes) { throw "$Label size differs" }
+        $identity = Get-P3StreamIdentity $stream
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $contentSHA256 = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+        $acl = Get-Acl -LiteralPath $resolved -ErrorAction Stop
+        $aclText = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        return [pscustomobject]@{
+            path=$resolved;content_sha256=$contentSHA256
+            file_identity_sha256=Get-P3GuardTextSHA256 $identity
+            acl_identity_sha256=Get-P3GuardTextSHA256 $aclText
+        }
+    } finally { $stream.Dispose() }
+}
+
+function New-P3ProtectedEvidencePlan([string]$Kind, [string]$Root, [object]$InputObject) {
+    Import-P3GuardRuntime
+    if ($Kind -notin @('management','guest')) { throw 'protected evidence kind differs' }
+    $resolvedRoot = Resolve-P3FixedCleanPath $Root 'protected evidence root'
+    Assert-P3GuardExactProperties $InputObject @(
+        'candidate_fingerprint_sha256','candidate_nonce_sha256','candidate_receipt','manifest_sha256',
+        'post_peer_set_sha256','pre_peer_set_sha256','runtime_identity_sha256','subject'
+    ) 'protected evidence plan input'
+    Assert-P3GuardExactProperties $InputObject.candidate_receipt $script:P3LocalGuardProperties 'candidate receipt'
+    $candidateReceiptSHA256 = Get-P3GuardCanonicalSHA256 $InputObject.candidate_receipt
+    foreach ($name in @('candidate_fingerprint_sha256','candidate_nonce_sha256','manifest_sha256','post_peer_set_sha256',
+            'pre_peer_set_sha256','runtime_identity_sha256')) { Assert-P3GuardSHA256 ([string]$InputObject.$name) $name }
+    if ([string]$InputObject.candidate_receipt.candidate_fingerprint_sha256 -cne [string]$InputObject.candidate_fingerprint_sha256 -or
+        [string]$InputObject.candidate_receipt.nonce_sha256 -cne [string]$InputObject.candidate_nonce_sha256 -or
+        [string]$InputObject.candidate_receipt.pre_peer_set_sha256 -cne [string]$InputObject.pre_peer_set_sha256 -or
+        [string]$InputObject.candidate_receipt.post_peer_set_sha256 -cne [string]$InputObject.post_peer_set_sha256) {
+        throw 'protected evidence candidate differs'
+    }
+    $identity = [ordered]@{
+        schema='home-gateway/p3-protected-evidence-plan/v1';kind=$Kind;evidence_root=$resolvedRoot
+        manifest_sha256=[string]$InputObject.manifest_sha256;candidate_receipt_sha256=$candidateReceiptSHA256
+        candidate_nonce_sha256=[string]$InputObject.candidate_nonce_sha256;pre_peer_set_sha256=[string]$InputObject.pre_peer_set_sha256
+        post_peer_set_sha256=[string]$InputObject.post_peer_set_sha256;candidate_fingerprint_sha256=[string]$InputObject.candidate_fingerprint_sha256
+        runtime_identity_sha256=[string]$InputObject.runtime_identity_sha256
+    }
+    if ($Kind -ceq 'management') {
+        Assert-P3GuardExactProperties $InputObject.subject @(
+            'client_binary_path','client_version_sha256','selected_entry_sha256','source_mapping_sha256','ui_action_class_sha256'
+        ) 'management evidence subject'
+        $client = Get-P3EvidenceFileFacts ([string]$InputObject.subject.client_binary_path) 67108864 'management client binary'
+        foreach ($name in @('client_version_sha256','selected_entry_sha256','source_mapping_sha256','ui_action_class_sha256')) {
+            Assert-P3GuardSHA256 ([string]$InputObject.subject.$name) $name
+        }
+        $identity.client_binary_path=$client.path;$identity.client_binary_sha256=$client.content_sha256
+        $identity.client_binary_file_identity_sha256=$client.file_identity_sha256;$identity.client_binary_acl_identity_sha256=$client.acl_identity_sha256
+        foreach ($name in @('client_version_sha256','selected_entry_sha256','source_mapping_sha256','ui_action_class_sha256')) {
+            $identity[$name]=[string]$InputObject.subject.$name
+        }
+    } else {
+        Assert-P3GuardExactProperties $InputObject.subject @('hgctl_path','profile_path') 'Guest evidence subject'
+        $hgctl = Get-P3EvidenceFileFacts ([string]$InputObject.subject.hgctl_path) 67108864 'pinned hgctl'
+        $profile = Get-P3EvidenceFileFacts ([string]$InputObject.subject.profile_path) 1048576 'protected Guest profile'
+        $identity.hgctl_path=$hgctl.path;$identity.hgctl_sha256=$hgctl.content_sha256
+        $identity.profile_path=$profile.path;$identity.profile_sha256=$profile.content_sha256
+        $identity.profile_file_identity_sha256=$profile.file_identity_sha256;$identity.profile_acl_identity_sha256=$profile.acl_identity_sha256
+    }
+    $planSHA256 = Get-P3GuardCanonicalSHA256 ([pscustomobject]$identity)
+    $plan = [ordered]@{};foreach($pair in $identity.GetEnumerator()){$plan[$pair.Key]=$pair.Value}
+    $plan.plan_sha256=$planSHA256;$plan.confirmation_challenge='P3-EVIDENCE-' + $planSHA256.Substring(0,16).ToUpperInvariant()
+    return [pscustomobject]$plan
+}
+
+function Assert-P3ProtectedEvidenceRoot([string]$Root, [object]$Plan, [string[]]$ExpectedFiles) {
+    Import-P3GuardRuntime
+    $resolved = Resolve-P3FixedCleanPath $Root 'protected evidence root'
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'protected evidence root differs' }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $resolved -ErrorAction Stop
+    if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $sid.Value) { throw 'protected evidence ACL differs' }
+    $marker = [Text.Encoding]::UTF8.GetString((Read-P3BoundedStableBytes (Join-Path $resolved '.home-gateway-p3-evidence-owner.v1') 128 'evidence marker'))
+    if ($marker -cne 'home-gateway/p3-protected-evidence-owner/v1') { throw 'protected evidence marker differs' }
+    $storedPlan = Open-P3BoundedStableJson (Join-Path $resolved 'plan.json') 65536 @($Plan.PSObject.Properties.Name)
+    if ((Get-P3GuardCanonicalSHA256 $storedPlan) -cne (Get-P3GuardCanonicalSHA256 $Plan)) { throw 'protected evidence plan differs' }
+    $candidatePath=Join-Path $resolved 'candidate-receipt.json'
+    $storedCandidate=Open-P3BoundedStableJson $candidatePath 65536 $script:P3LocalGuardProperties
+    if((Get-P3ExactFileSHA256 $candidatePath 'protected candidate receipt') -cne [string]$Plan.candidate_receipt_sha256 -or
+        [string]$storedCandidate.candidate_fingerprint_sha256 -cne [string]$Plan.candidate_fingerprint_sha256 -or
+        [string]$storedCandidate.nonce_sha256 -cne [string]$Plan.candidate_nonce_sha256 -or
+        [string]$storedCandidate.pre_peer_set_sha256 -cne [string]$Plan.pre_peer_set_sha256 -or
+        [string]$storedCandidate.post_peer_set_sha256 -cne [string]$Plan.post_peer_set_sha256){throw 'protected evidence candidate differs'}
+    $children=@(Get-ChildItem -LiteralPath $resolved -Force)
+    foreach($child in $children){if($child.Name -notin $ExpectedFiles -or $child.PSIsContainer -or ($child.Attributes -band [IO.FileAttributes]::ReparsePoint)){throw 'foreign protected evidence content is present'}}
+    foreach($name in $ExpectedFiles){if(-not [IO.File]::Exists((Join-Path $resolved $name))){throw 'required protected evidence file is missing'}}
+    return $resolved
+}
+
+function Initialize-P3ProtectedEvidenceRoot([string]$Root, [object]$Plan, [object]$CandidateReceipt) {
+    Import-P3GuardRuntime
+    $resolved = Resolve-P3FixedCleanPath $Root 'protected evidence root'
+    if ([IO.File]::Exists($resolved) -or [IO.Directory]::Exists($resolved)) { throw 'protected evidence root already exists' }
+    $null=[IO.Directory]::CreateDirectory($resolved)
+    try {
+        Set-Acl -LiteralPath $resolved -AclObject (New-P3RuntimeAcl) -ErrorAction Stop
+        $marker=[Text.UTF8Encoding]::new($false).GetBytes('home-gateway/p3-protected-evidence-owner/v1')
+        $null=Install-P3ExactRuntimeFile $marker (Join-Path $resolved '.home-gateway-p3-evidence-owner.v1') (Get-P3SHA256Bytes $marker)
+        $planBytes=ConvertTo-P3CanonicalJson $Plan;$null=Install-P3ExactRuntimeFile $planBytes (Join-Path $resolved 'plan.json') (Get-P3SHA256Bytes $planBytes)
+        $candidateBytes=ConvertTo-P3CanonicalJson $CandidateReceipt
+        if((Get-P3SHA256Bytes $candidateBytes) -cne [string]$Plan.candidate_receipt_sha256){throw 'protected evidence candidate differs'}
+        $null=Install-P3ExactRuntimeFile $candidateBytes (Join-Path $resolved 'candidate-receipt.json') ([string]$Plan.candidate_receipt_sha256)
+        return Assert-P3ProtectedEvidenceRoot $resolved $Plan @('.home-gateway-p3-evidence-owner.v1','plan.json','candidate-receipt.json')
+    } catch { if([IO.Directory]::Exists($resolved)){[IO.Directory]::Delete($resolved,$true)};throw }
+}
+
+function Invoke-P3ProtectedEvidenceAction(
+    [string]$SelectedAction,[string]$Root,[object]$InputObject,[string]$ExpectedPlanSHA256,[string]$Confirmation,[object]$Boundaries
+) {
+    $savedEvidenceAction = $Action
+    $savedEvidenceExpectedPlan = $ExpectedPlanSHA256
+    $savedEvidenceConfirmation = $Confirmation
+    . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+    $Action = $savedEvidenceAction
+    $ExpectedPlanSHA256 = $savedEvidenceExpectedPlan
+    $Confirmation = $savedEvidenceConfirmation
+    $kind = if($SelectedAction.StartsWith('Management',[StringComparison]::Ordinal)){'management'}else{'guest'}
+    if($SelectedAction -in @('ManagementReceiptPlan','GuestProfilePlan')){return New-P3ProtectedEvidencePlan $kind $Root $InputObject}
+    Assert-P3GuardExactProperties $InputObject @('candidate_receipt','plan') 'protected evidence action input'
+    $plan=$InputObject.plan;$identity=[ordered]@{};foreach($property in $plan.PSObject.Properties){if($property.Name -notin @('plan_sha256','confirmation_challenge')){$identity[$property.Name]=$property.Value}}
+    if((Get-P3GuardCanonicalSHA256 ([pscustomobject]$identity)) -cne [string]$plan.plan_sha256){throw 'protected evidence plan identity differs'}
+    if([string]$plan.plan_sha256 -cne $ExpectedPlanSHA256){throw 'protected evidence expected plan differs'}
+    if([string]$plan.confirmation_challenge -cne $Confirmation -or $Confirmation -cnotmatch '^P3-EVIDENCE-[0-9A-F]{16}$'){throw 'protected evidence confirmation differs'}
+    if([string]$plan.kind -cne $kind -or [string]$plan.evidence_root -cne (Resolve-P3FixedCleanPath $Root 'protected evidence root')){throw 'protected evidence approval differs'}
+    if($SelectedAction.EndsWith('Consume',[StringComparison]::Ordinal)){
+        $expected=@('.home-gateway-p3-evidence-owner.v1','plan.json','candidate-receipt.json','receipt.json')
+        $resolved=Assert-P3ProtectedEvidenceRoot $Root $plan $expected
+        $receiptPath=Join-Path $resolved 'receipt.json';$receiptSHA256=Get-P3ExactFileSHA256 $receiptPath 'protected evidence receipt'
+        $receiptProperties=if($kind -ceq 'management'){$script:P3ManagementOperationReceiptProperties}else{$script:P3GuestProfileReceiptProperties}
+        $storedReceipt=Open-P3BoundedStableJson $receiptPath 65536 $receiptProperties
+        $now=([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
+        if($kind -ceq 'management'){
+            $null=Test-P3ManagementOperationContextReceipt $storedReceipt $plan.manifest_sha256 $plan.candidate_receipt_sha256 $plan.ui_action_class_sha256 $now
+        }else{
+            $null=Test-P3GuestProfileIdentityReceipt $storedReceipt $plan.manifest_sha256 $plan.candidate_receipt_sha256 $plan.candidate_fingerprint_sha256 $plan.profile_acl_identity_sha256 $now
+        }
+        $marker=[pscustomobject][ordered]@{receipt_sha256=$receiptSHA256;schema='home-gateway/p3-protected-evidence-consumption/v1'}
+        $bytes=ConvertTo-P3CanonicalJson $marker;$null=Install-P3ExactRuntimeFile $bytes (Join-Path $resolved 'consumed.json') (Get-P3SHA256Bytes $bytes)
+        $null=Assert-P3ProtectedEvidenceRoot $Root $plan @($expected+'consumed.json')
+        return $marker
+    }
+    $resolved=Initialize-P3ProtectedEvidenceRoot $Root $plan $InputObject.candidate_receipt
+    try {
+        $now=([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
+        if($kind -ceq 'management'){
+            $current=Get-P3EvidenceFileFacts ([string]$plan.client_binary_path) 67108864 'management client binary'
+            if($current.content_sha256 -cne [string]$plan.client_binary_sha256 -or $current.file_identity_sha256 -cne [string]$plan.client_binary_file_identity_sha256 -or $current.acl_identity_sha256 -cne [string]$plan.client_binary_acl_identity_sha256){throw 'management client binary differs'}
+            $receipt=New-P3ManagementOperationContextReceipt -ManifestSHA256 $plan.manifest_sha256 -CandidateReceiptSHA256 $plan.candidate_receipt_sha256 `
+                -ClientBinarySHA256 $plan.client_binary_sha256 -ClientVersionSHA256 $plan.client_version_sha256 -SourceMappingSHA256 $plan.source_mapping_sha256 `
+                -UiActionClassSHA256 $plan.ui_action_class_sha256 -SelectedEntrySHA256 $plan.selected_entry_sha256 -CandidateNonceSHA256 $plan.candidate_nonce_sha256 `
+                -PrePeerSetSHA256 $plan.pre_peer_set_sha256 -PostPeerSetSHA256 $plan.post_peer_set_sha256 -CandidateFingerprintSHA256 $plan.candidate_fingerprint_sha256 `
+                -RuntimeIdentitySHA256 $plan.runtime_identity_sha256 -NowUtc $now
+        }else{
+            $profile=Get-P3EvidenceFileFacts ([string]$plan.profile_path) 1048576 'protected Guest profile';$hgctl=Get-P3EvidenceFileFacts ([string]$plan.hgctl_path) 67108864 'pinned hgctl'
+            if($profile.content_sha256 -cne [string]$plan.profile_sha256 -or $profile.file_identity_sha256 -cne [string]$plan.profile_file_identity_sha256 -or $profile.acl_identity_sha256 -cne [string]$plan.profile_acl_identity_sha256 -or $hgctl.content_sha256 -cne [string]$plan.hgctl_sha256){throw 'Guest inspection input differs'}
+            $result=& $Boundaries.ProfileInspectorRunner $plan.hgctl_path @('tunnel','inspect','--config',$plan.profile_path,'--json') 30 65536
+            $null=Test-P3ProcessResult $result 65536 'Guest profile inspector'
+            $profileAfter=Get-P3EvidenceFileFacts ([string]$plan.profile_path) 1048576 'protected Guest profile';$hgctlAfter=Get-P3EvidenceFileFacts ([string]$plan.hgctl_path) 67108864 'pinned hgctl'
+            if($profileAfter.content_sha256 -cne $profile.content_sha256 -or $profileAfter.file_identity_sha256 -cne $profile.file_identity_sha256 -or
+                $profileAfter.acl_identity_sha256 -cne $profile.acl_identity_sha256 -or $hgctlAfter.content_sha256 -cne $hgctl.content_sha256 -or
+                $hgctlAfter.file_identity_sha256 -cne $hgctl.file_identity_sha256){throw 'Guest inspection input changed'}
+            try{$inspection=ConvertFrom-Json ([string]$result.StdOut) -ErrorAction Stop}catch{throw 'Guest profile inspection receipt differs'}
+            Assert-P3GuardExactProperties $inspection @('capabilities','interface_public_fingerprint_sha256','metadata','status') 'Guest profile inspection receipt'
+            Assert-P3GuardSHA256 ([string]$inspection.interface_public_fingerprint_sha256) 'Guest derived public fingerprint'
+            $receipt=New-P3GuestProfileIdentityReceipt -ManifestSHA256 $plan.manifest_sha256 -CandidateReceiptSHA256 $plan.candidate_receipt_sha256 `
+                -ProfileSHA256 $plan.profile_sha256 -ProfileFileIdentitySHA256 $plan.profile_file_identity_sha256 -ProfileAclIdentitySHA256 $plan.profile_acl_identity_sha256 `
+                -CandidateNonceSHA256 $plan.candidate_nonce_sha256 -PrePeerSetSHA256 $plan.pre_peer_set_sha256 -PostPeerSetSHA256 $plan.post_peer_set_sha256 `
+                -DerivedPublicFingerprintSHA256 $inspection.interface_public_fingerprint_sha256 -CandidateFingerprintSHA256 $plan.candidate_fingerprint_sha256 `
+                -RuntimeIdentitySHA256 $plan.runtime_identity_sha256 -NowUtc $now
+            $result.StdOut='';$inspection=$null
+        }
+        $bytes=ConvertTo-P3CanonicalJson $receipt;$hash=Get-P3SHA256Bytes $bytes;$null=Install-P3ExactRuntimeFile $bytes (Join-Path $resolved 'receipt.json') $hash
+        $reopened=Open-P3BoundedStableJson (Join-Path $resolved 'receipt.json') 65536 @($receipt.PSObject.Properties.Name)
+        if((Get-P3GuardCanonicalSHA256 $reopened) -cne (Get-P3GuardCanonicalSHA256 $receipt)){throw 'protected evidence receipt differs'}
+        $null=Assert-P3ProtectedEvidenceRoot $Root $plan @('.home-gateway-p3-evidence-owner.v1','plan.json','candidate-receipt.json','receipt.json')
+        return $reopened
+    }catch{if([IO.Directory]::Exists($resolved)){[IO.Directory]::Delete($resolved,$true)};throw}
 }
 
 function Test-P3GuardExactEgressReceipt([object]$Receipt, [object[]]$ExpectedEgress, [string]$ExpectedSource, [DateTime]$NowUtc) {
@@ -833,7 +1031,8 @@ function Invoke-P3OwnedGuardAction(
 
 if (-not [string]::IsNullOrEmpty($Action)) {
     $selectedAction = $Action
-    $input = if ($selectedAction -in @('ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback')) {
+    $evidenceActions=@('ManagementReceiptPlan','ManagementReceiptRecord','ManagementReceiptConsume','GuestProfilePlan','GuestProfileInspect','GuestProfileConsume')
+    $input = if ($selectedAction -in (@('ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback') + $evidenceActions)) {
         ConvertFrom-Json ([Console]::In.ReadToEnd()) -ErrorAction Stop
     } else { $null }
     $boundaries = [pscustomobject]@{
@@ -857,9 +1056,18 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         StreamRunner = $script:P3NativeStreamRunner
         ClockRunner = { [DateTime]::UtcNow }
     }
-    $result = Invoke-P3OwnedGuardAction -SelectedAction $selectedAction -RuntimeRoot $RuntimeRoot `
-        -ExpectedManifestSHA256 $ExpectedManifestSHA256 -InputObject $input -ExpectedBodyPlanSHA256 $ExpectedPlanSHA256 `
-        -BodyConfirmation $Confirmation -Boundaries $boundaries
+    if($selectedAction -in $evidenceActions){
+        $boundaries | Add-Member -NotePropertyName ProfileInspectorRunner -NotePropertyValue {
+            param($Executable,$Arguments,$TimeoutSeconds,$MaximumBytes)
+            & $script:P3NativeJsonRunner $Executable $Arguments '{}' $TimeoutSeconds $MaximumBytes
+        }
+        $result=Invoke-P3ProtectedEvidenceAction -SelectedAction $selectedAction -Root $EvidenceRoot -InputObject $input `
+            -ExpectedPlanSHA256 $ExpectedPlanSHA256 -Confirmation $Confirmation -Boundaries $boundaries
+    }else{
+        $result = Invoke-P3OwnedGuardAction -SelectedAction $selectedAction -RuntimeRoot $RuntimeRoot `
+            -ExpectedManifestSHA256 $ExpectedManifestSHA256 -InputObject $input -ExpectedBodyPlanSHA256 $ExpectedPlanSHA256 `
+            -BodyConfirmation $Confirmation -Boundaries $boundaries
+    }
     if ($selectedAction -ceq 'Reconcile') { [Console]::Out.WriteLine('PRELIVE_READY=YES') }
     else { $result | ConvertTo-Json -Depth 32 -Compress }
 }

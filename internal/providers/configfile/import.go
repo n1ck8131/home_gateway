@@ -88,10 +88,11 @@ func (config Config) Metadata() tunnel.Metadata {
 
 // InterfacePublicFingerprintSHA256 derives the X25519 public key in memory and
 // returns only the lowercase SHA-256 of its raw 32-byte representation.
-func (config Config) InterfacePublicFingerprintSHA256() string {
+func (config *Config) InterfacePublicFingerprintSHA256() string {
 	privateBytes := make([]byte, len(config.privateKey.bytes))
 	copy(privateBytes, config.privateKey.bytes[:])
 	defer clear(privateBytes)
+	defer clear(config.privateKey.bytes[:])
 	privateKey, err := ecdh.X25519().NewPrivateKey(privateBytes)
 	if err != nil {
 		return ""

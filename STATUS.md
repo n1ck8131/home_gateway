@@ -32,7 +32,7 @@ Release level: P2-software-verified; P3-gate65c-rollback-complete; self-hosted-c
 
 ## P3 self-hosted Windows pilot
 
-- State: `gate65c-rollback-complete`; the corrected pre-live prerequisite and container contracts are implemented offline and await consolidated review; `LIVE_ACTION_PERFORMED=NO`. A separately approved read-only prerequisite observation must precede Gate 6.4L and helper installation. The Gate 6.5C Admin candidate was removed and the baseline peer-set hash restored; no protected PC profile exists. All Windows client, network, recovery and `pc-core-ready` field gates remain open
+- State: `gate65c-rollback-complete`; the corrected pre-live prerequisite, durable rollback, and protected management/Guest evidence contracts are implemented offline and await consolidated review; `LIVE_ACTION_PERFORMED=NO`. A separately approved read-only prerequisite observation must precede Gate 6.4L and helper installation. The Gate 6.5C Admin candidate was removed and the baseline peer-set hash restored; no protected PC profile exists. All Windows client, network, recovery and `pc-core-ready` field gates remain open
 - Plan: [P3 Windows implementation plan](docs/superpowers/plans/2026-08-24-p03-redshield-windows.md) and [self-hosted DigitalOcean bootstrap plan](docs/superpowers/plans/2026-08-27-p3-self-hosted-digitalocean-bootstrap.md)
 - Architecture: [ADR-0011](docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md) keeps policy/API semantics independent from platform/provider; [ADR-0016](docs/adr/ADR-0016-p3-self-hosted-digitalocean-bootstrap.md) moves the first own VPS and static PC peer into P3 while leaving automation, mobile lifecycle and telemetry in P8
 - Offline mutation architecture: [ADR-0012](docs/adr/ADR-0012-windows-offline-mutation-ownership.md) defines strict project ownership, qualified endpoint binding, additive-first fail-closed ordering, durable commit-confirm/recovery states and exact restoration boundaries
@@ -67,7 +67,7 @@ Release level: P2-software-verified; P3-gate65c-rollback-complete; self-hosted-c
 
 - P1 software blockers: none
 - P2 software blockers: none
-- P3 self-hosted offline software blockers: corrected prerequisite/container implementation and consolidated QA/security review must pass before any exact read-only prerequisite candidate is generated. Server bootstrap passed through Gate 6.3; Gate 6.5C rolled back, the protected profile is absent, and every live Windows/server gate remains separately authorized and open.
+- P3 self-hosted offline software blockers: consolidated QA/security review of the corrected prerequisite, durable recovery and protected evidence implementation must pass before any exact read-only prerequisite candidate is generated. Server bootstrap passed through Gate 6.3; Gate 6.5C rolled back, the protected profile is absent, and every live Windows/server gate remains separately authorized and open.
 - The DigitalOcean resource, dedicated SSH key and hardened operator access are available. The protected self-hosted PC profile does not yet exist; provider handshake and egress are field gates, never inferred from server/container or local adapter status.
 - `pc-core-ready` remains open until real direct/self-hosted/Cisco, IPv4/IPv6 fail-closed, restart/recovery and terminal journaled `FullRestore` evidence passes on the current Windows PC.
 - P2 does not claim Windows field acceptance, Flint 2 hardware compatibility or throughput.

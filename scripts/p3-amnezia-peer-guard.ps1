@@ -56,6 +56,17 @@ $script:P3EmergencyReceiptProperties = @(
 $script:P3GuardEgressReceiptProperties = @(
     'live_mutation_performed', 'management_source_cidr_sha256', 'observations', 'observed_at_utc', 'schema'
 )
+$script:P3ManagementOperationReceiptProperties = @(
+    'schema', 'manifest_sha256', 'candidate_receipt_sha256', 'client_binary_sha256', 'client_version_sha256',
+    'source_mapping_sha256', 'ui_action_class_sha256', 'selected_entry_sha256', 'candidate_nonce_sha256',
+    'pre_peer_set_sha256', 'post_peer_set_sha256', 'candidate_fingerprint_sha256', 'runtime_identity_sha256',
+    'observed_at_utc', 'owner_observed', 'server_role_confirmed', 'classification', 'raw_identity_exposed', 'consumed'
+)
+$script:P3GuestProfileReceiptProperties = @(
+    'schema', 'manifest_sha256', 'candidate_receipt_sha256', 'profile_sha256', 'profile_file_identity_sha256',
+    'profile_acl_identity_sha256', 'candidate_nonce_sha256', 'pre_peer_set_sha256', 'post_peer_set_sha256',
+    'derived_public_fingerprint_sha256', 'runtime_identity_sha256', 'observed_at_utc', 'raw_key_exposed', 'consumed'
+)
 $script:P3GuardEgressObservationProperties = @('authority_sha256', 'observed_at_utc', 'source_cidr_sha256')
 
 function Get-P3GuardTextSHA256([string]$Value) {
@@ -111,6 +122,95 @@ function Get-P3GuardUtc([object]$Value, [string]$Label) {
     }
     try { return [DateTime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
     catch { throw "$Label timestamp differs" }
+}
+
+function Assert-P3GuardReceiptFresh([object]$Value, [DateTime]$NowUtc, [string]$Label) {
+    $observed = Get-P3GuardUtc -Value $Value -Label $Label
+    $now = $NowUtc.ToUniversalTime()
+    if ($observed -gt $now.AddSeconds(5) -or $observed -lt $now.AddMinutes(-10)) { throw "$Label is stale" }
+    return $observed
+}
+
+function New-P3ManagementOperationContextReceipt(
+    [string]$ManifestSHA256, [string]$CandidateReceiptSHA256, [string]$ClientBinarySHA256,
+    [string]$ClientVersionSHA256, [string]$SourceMappingSHA256, [string]$UiActionClassSHA256,
+    [string]$SelectedEntrySHA256, [string]$CandidateNonceSHA256, [string]$PrePeerSetSHA256,
+    [string]$PostPeerSetSHA256, [string]$CandidateFingerprintSHA256, [string]$RuntimeIdentitySHA256,
+    [DateTime]$NowUtc
+) {
+    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+        if ($entry.Key -ne 'NowUtc') { Assert-P3GuardSHA256 ([string]$entry.Value) $entry.Key }
+    }
+    return [pscustomobject][ordered]@{
+        schema='home-gateway/p3-management-operation-context-receipt/v1';manifest_sha256=$ManifestSHA256
+        candidate_receipt_sha256=$CandidateReceiptSHA256;client_binary_sha256=$ClientBinarySHA256
+        client_version_sha256=$ClientVersionSHA256;source_mapping_sha256=$SourceMappingSHA256
+        ui_action_class_sha256=$UiActionClassSHA256;selected_entry_sha256=$SelectedEntrySHA256
+        candidate_nonce_sha256=$CandidateNonceSHA256;pre_peer_set_sha256=$PrePeerSetSHA256
+        post_peer_set_sha256=$PostPeerSetSHA256;candidate_fingerprint_sha256=$CandidateFingerprintSHA256
+        runtime_identity_sha256=$RuntimeIdentitySHA256;observed_at_utc=$NowUtc.ToUniversalTime().ToString('o')
+        owner_observed=$true;server_role_confirmed=$false;classification='source_pinned_management_operation'
+        raw_identity_exposed=$false;consumed=$false
+    }
+}
+
+function Test-P3ManagementOperationContextReceipt(
+    [object]$Receipt, [string]$ExpectedManifestSHA256, [string]$ExpectedCandidateReceiptSHA256,
+    [string]$ExpectedUiActionClassSHA256, [DateTime]$NowUtc
+) {
+    Assert-P3GuardExactProperties $Receipt $script:P3ManagementOperationReceiptProperties 'management operation context receipt'
+    foreach ($name in $script:P3ManagementOperationReceiptProperties | Where-Object { $_ -match '_sha256$' }) {
+        Assert-P3GuardSHA256 ([string]$Receipt.$name) $name
+    }
+    $null = Assert-P3GuardReceiptFresh $Receipt.observed_at_utc $NowUtc 'management operation context receipt'
+    if ([string]$Receipt.schema -cne 'home-gateway/p3-management-operation-context-receipt/v1' -or
+        [string]$Receipt.manifest_sha256 -cne $ExpectedManifestSHA256 -or
+        [string]$Receipt.candidate_receipt_sha256 -cne $ExpectedCandidateReceiptSHA256 -or
+        [string]$Receipt.ui_action_class_sha256 -cne $ExpectedUiActionClassSHA256 -or
+        -not [bool]$Receipt.owner_observed -or [bool]$Receipt.server_role_confirmed -or
+        [string]$Receipt.classification -cne 'source_pinned_management_operation' -or
+        [bool]$Receipt.raw_identity_exposed -or [bool]$Receipt.consumed) { throw 'management operation context receipt differs' }
+    return $Receipt
+}
+
+function New-P3GuestProfileIdentityReceipt(
+    [string]$ManifestSHA256, [string]$CandidateReceiptSHA256, [string]$ProfileSHA256,
+    [string]$ProfileFileIdentitySHA256, [string]$ProfileAclIdentitySHA256, [string]$CandidateNonceSHA256,
+    [string]$PrePeerSetSHA256, [string]$PostPeerSetSHA256, [string]$DerivedPublicFingerprintSHA256,
+    [string]$CandidateFingerprintSHA256, [string]$RuntimeIdentitySHA256, [DateTime]$NowUtc
+) {
+    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+        if ($entry.Key -ne 'NowUtc') { Assert-P3GuardSHA256 ([string]$entry.Value) $entry.Key }
+    }
+    if ($DerivedPublicFingerprintSHA256 -cne $CandidateFingerprintSHA256) { throw 'Guest derived public fingerprint differs' }
+    return [pscustomobject][ordered]@{
+        schema='home-gateway/p3-guest-profile-identity-receipt/v1';manifest_sha256=$ManifestSHA256
+        candidate_receipt_sha256=$CandidateReceiptSHA256;profile_sha256=$ProfileSHA256
+        profile_file_identity_sha256=$ProfileFileIdentitySHA256;profile_acl_identity_sha256=$ProfileAclIdentitySHA256
+        candidate_nonce_sha256=$CandidateNonceSHA256;pre_peer_set_sha256=$PrePeerSetSHA256
+        post_peer_set_sha256=$PostPeerSetSHA256;derived_public_fingerprint_sha256=$DerivedPublicFingerprintSHA256
+        runtime_identity_sha256=$RuntimeIdentitySHA256;observed_at_utc=$NowUtc.ToUniversalTime().ToString('o')
+        raw_key_exposed=$false;consumed=$false
+    }
+}
+
+function Test-P3GuestProfileIdentityReceipt(
+    [object]$Receipt, [string]$ExpectedManifestSHA256, [string]$ExpectedCandidateReceiptSHA256,
+    [string]$ExpectedCandidateFingerprintSHA256, [string]$ExpectedProfileAclIdentitySHA256 = '', [DateTime]$NowUtc
+) {
+    Assert-P3GuardExactProperties $Receipt $script:P3GuestProfileReceiptProperties 'Guest profile identity receipt'
+    foreach ($name in $script:P3GuestProfileReceiptProperties | Where-Object { $_ -match '_sha256$' }) {
+        Assert-P3GuardSHA256 ([string]$Receipt.$name) $name
+    }
+    $null = Assert-P3GuardReceiptFresh $Receipt.observed_at_utc $NowUtc 'Guest profile identity receipt'
+    if ([string]$Receipt.schema -cne 'home-gateway/p3-guest-profile-identity-receipt/v1' -or
+        [string]$Receipt.manifest_sha256 -cne $ExpectedManifestSHA256 -or
+        [string]$Receipt.candidate_receipt_sha256 -cne $ExpectedCandidateReceiptSHA256 -or
+        [string]$Receipt.derived_public_fingerprint_sha256 -cne $ExpectedCandidateFingerprintSHA256 -or
+        (-not [string]::IsNullOrEmpty($ExpectedProfileAclIdentitySHA256) -and
+            [string]$Receipt.profile_acl_identity_sha256 -cne $ExpectedProfileAclIdentitySHA256) -or
+        [bool]$Receipt.raw_key_exposed -or [bool]$Receipt.consumed) { throw 'Guest profile identity receipt differs' }
+    return $Receipt
 }
 
 function Test-P3GuardExactEgressReceipt([object]$Receipt, [object[]]$ExpectedEgress, [string]$ExpectedSource, [DateTime]$NowUtc) {

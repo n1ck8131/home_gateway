@@ -8,15 +8,16 @@ The protected profile staging, sanitized Windows observation schema and distinct
 
 Task 6A is offline evidence only. It grants no authority to execute any gate below, and no later gate inherits approval from an earlier one.
 
-1. **Gate 6.4L:** prepare the protected runtime bundle and prove the read-only `AgentPlan`. Do not start a standalone or persistent operator-owned session. Stop on any manifest, ACL, toolchain, host-key, key-count or fingerprint mismatch.
-2. **Gate 6.4R-pre:** invoke the `p3-remote-helper.ps1` `RemoteInstallPlan` action to form the read-only plan inside its own short-lived protected agent batch, then record separately owner-observed Cloud Firewall and current local-baseline receipts. The batch must tear down its exact agent in `finally`. Execute no install and no server mutation.
-3. **Gate 6.4P:** after its own exact approval, invoke a new `p3-remote-helper.ps1` `RemoteInstall` batch to install one exact helper at `/usr/local/libexec/home-gateway-p3-peer-guard`. The helper is inert when not invoked and remains installed through P3 so every later observation uses the same attested payload.
-4. **Gate 6.4R-post:** attest the installed helper and run the server and combined reconciliation. Require the exact container, image, listener, host policy, public ingress, baseline peer set, zero leftovers, payload and protocol identities.
-5. **Gate 6.5A:** after a separate candidate approval, arm the Admin guard and perform exactly one Admin GUI action. Preserve the pre-existing baseline peer and accept only the candidate-bound exact-plus-one transition.
-6. **Gate 6.5B:** after a separate candidate approval, arm the Guest guard, perform exactly one Guest GUI action and export exactly one native AmneziaWG profile directly to its protected destination. Never display or retain its contents.
-7. **Gate 6.6:** after a separate candidate approval, import and connect only that exact profile, then run the nonce-bound client observation described in the Windows activation runbook.
-8. **Gate 7.2, adapter-loss recovery, reboot recovery and Gate 7.3** remain separately planned, candidate-bound and approved operations. None is authorized by success at Gate 6.6.
-9. **Emergency rollback** is a separate exact candidate only. It may remove only the candidate bound in its receipt and cannot substitute for the supported official-UI rollback.
+1. **Read-only prerequisite observation (before Gate 6.4L):** after its own exact hash/challenge approval, use `p3-prelive-prerequisite.ps1` for the prerequisite-scoped agent and transient observer batch plus three controller HTTPS observations. Assemble and validate one protected prerequisite receipt; `AgentStop` is mandatory in `finally`, and teardown failure is terminal. This approval does not authorize runtime preparation or helper installation.
+2. **Gate 6.4L:** only after the prerequisite receipt is independently accepted, form `PreparePlan` and prepare the protected runtime that binds that immutable receipt and the canonical 27-field server baseline. Start no standalone or persistent operator-owned session.
+3. **Gate 6.4R-pre:** invoke `p3-remote-helper.ps1` `RemoteInstallPlan` inside its own short-lived protected agent batch. Execute no install and no server mutation.
+4. **Gate 6.4P:** after its own exact approval, invoke `RemoteInstall` to install one exact inert helper at `/usr/local/libexec/home-gateway-p3-peer-guard`.
+5. **Gate 6.4R-post:** attest the helper and reconcile the exact `amnezia-awg2` container, `/opt/amnezia/awg/awg0.conf`, `/opt/amnezia/awg/clientsTable`, `awg0`, image, listeners, host policy, ingress, peer set and zero leftovers.
+6. **Gate 6.5A:** after a separate candidate approval, perform exactly one source-pinned full-access management GUI action. `clientName` is mutable display metadata; acceptance requires the protected management operation-context receipt.
+7. **Gate 6.5B:** after a separate candidate approval, perform exactly one Guest GUI action and export one native profile directly to its protected destination. Guest identity requires the protected inspector's X25519 public fingerprint receipt; never display or retain profile/key contents.
+8. **Gate 6.6:** after a separate candidate approval, import and connect only that exact profile, then run the nonce-bound client observation.
+9. **Gate 7.2, adapter-loss recovery, reboot recovery and Gate 7.3** remain separately planned, candidate-bound and approved operations.
+10. **Emergency rollback** is a separate exact candidate only. It may remove only the candidate bound in its receipt and cannot substitute for the supported official-UI rollback.
 
 Use the pinned Windows AmneziaVPN `5.0.1.5` **Self-hosted VPN** GUI flow with **AmneziaWG only**. Do not call internal Amnezia shell scripts as a stable API. The accepted terminal topology is exactly the preserved baseline Admin, one `homegateway` management Admin and one static PC Guest; any other delta stops the gate. **Clear server from Amnezia software** remains prohibited without a new destructive-action approval.
 

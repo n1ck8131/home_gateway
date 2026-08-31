@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import copy
 import hashlib
@@ -35,9 +36,8 @@ def sha(value):
     return hashlib.sha256(value).hexdigest()
 
 
-def server_snapshot(*, peers=None, classes=None, **changes):
+def server_snapshot(*, peers=None, **changes):
     peers = peers or ["1" * 64]
-    classes = classes or {peer: "baseline" for peer in peers}
     result = {
         "container_count": 1,
         "container_running": True,
@@ -53,10 +53,13 @@ def server_snapshot(*, peers=None, classes=None, **changes):
         "ipv6_non_mutation": True,
         "ipv6_policy_sha256": "8" * 64,
         "peer_fingerprint_sha256": list(peers),
-        "peer_classes": dict(classes),
         "persistent_peer_set_sha256": sha(sorted(peers)),
         "live_peer_set_sha256": sha(sorted(peers)),
         "metadata_peer_set_sha256": sha(sorted(peers)),
+        "persistent_config_sha256": "9" * 64,
+        "metadata_sha256": "a" * 64,
+        "temporary_state_sha256": "b" * 64,
+        "runtime_identity_sha256": "c" * 64,
         "candidate_leftover_count": 0,
         "temporary_leftover_count": 0,
         "atomic_leftover_count": 0,
@@ -84,13 +87,17 @@ def server_identity(snapshot):
         "ipv6_non_mutation",
         "ipv6_policy_sha256",
         "peer_fingerprint_sha256",
+        "persistent_config_sha256",
         "persistent_peer_set_sha256",
         "live_peer_set_sha256",
         "metadata_peer_set_sha256",
+        "metadata_sha256",
         "candidate_leftover_count",
         "temporary_leftover_count",
         "atomic_leftover_count",
         "firewall_identity_sha256",
+        "runtime_identity_sha256",
+        "temporary_state_sha256",
         "payload_sha256",
         "protocol_sha256",
     )
@@ -117,9 +124,9 @@ def reconcile_request(snapshot=None):
         "expected_server_baseline_sha256": server_identity(snapshot),
         "expected_firewall_identity_sha256": snapshot["firewall_identity_sha256"],
         "expected_ipv6_policy_sha256": snapshot["ipv6_policy_sha256"],
-        "persistent_config_path": "/opt/amnezia/awg/wg0.conf",
-        "metadata_path": "/opt/amnezia/awg/peers.json",
-        "temporary_path": "/run/home-gateway-p3-peer-guard/candidate.tmp",
+        "persistent_config_path": "/opt/amnezia/awg/awg0.conf",
+        "metadata_path": "/opt/amnezia/awg/clientsTable",
+        "temporary_path": "/tmp",
     }
 
 
@@ -173,6 +180,16 @@ class FakeClock:
 
 
 class PeerGuardProtocolTests(unittest.TestCase):
+    def test_golden_baseline_v2_hash_is_stable(self):
+        fixture = json.loads(
+            (ROOT / "tests" / "fixtures" / "p3" / "server-baseline-v2.json").read_text()
+        )
+        self.assertEqual(len(fixture), 27)
+        self.assertEqual(
+            guard.server_baseline_sha256(fixture),
+            "68943c7693ed9a442b206749572dc44e2e44a595af080e254836f29ff73ebb1f",
+        )
+
     def test_public_protocol_is_exact_v2(self):
         self.assertEqual(guard.PUBLIC_PROTOCOL, EXPECTED_PROTOCOL)
         self.assertEqual(guard.public_protocol_sha256(), sha(EXPECTED_PROTOCOL))
@@ -238,7 +255,7 @@ class PeerGuardProtocolTests(unittest.TestCase):
                     guard.validate_request(mode, request)
 
     def test_reconcile_returns_only_sanitized_exact_aggregates(self):
-        snapshot = server_snapshot(raw_peer="raw-peer", raw_network="172.18.0.1")
+        snapshot = server_snapshot()
         receipt = guard.run_reconcile(
             reconcile_request(snapshot), FakeCollector(snapshot)
         )
@@ -248,6 +265,42 @@ class PeerGuardProtocolTests(unittest.TestCase):
         encoded = json.dumps(receipt, sort_keys=True)
         for forbidden in ("raw-peer", "172.18.", "docker0", "iptables -A"):
             self.assertNotIn(forbidden, encoded)
+
+    def test_reconcile_requires_the_exact_27_field_baseline_contract(self):
+        snapshot = server_snapshot()
+        self.assertEqual(set(snapshot), set(guard.SERVER_BASELINE_KEYS))
+        self.assertNotIn("prepared_syncconf_sha256", snapshot)
+        receipt = guard.run_reconcile(
+            reconcile_request(snapshot), FakeCollector(snapshot)
+        )
+        self.assertEqual(receipt["server_baseline_sha256"], server_identity(snapshot))
+
+        mutations = []
+        missing = copy.deepcopy(snapshot)
+        missing.pop("persistent_config_sha256")
+        mutations.append(missing)
+        extra = copy.deepcopy(snapshot)
+        extra["prepared_syncconf_sha256"] = "0" * 64
+        mutations.append(extra)
+        wrong_type = copy.deepcopy(snapshot)
+        wrong_type["container_restart_count"] = "0"
+        mutations.append(wrong_type)
+        malformed_hash = copy.deepcopy(snapshot)
+        malformed_hash["metadata_sha256"] = "not-a-hash"
+        mutations.append(malformed_hash)
+        wrong_count = copy.deepcopy(snapshot)
+        wrong_count["public_listener_class_count"] = 0
+        mutations.append(wrong_count)
+        wrong_boolean = copy.deepcopy(snapshot)
+        wrong_boolean["container_running"] = 1
+        mutations.append(wrong_boolean)
+
+        for changed in mutations:
+            with (
+                self.subTest(changed=changed),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                guard.run_reconcile(reconcile_request(snapshot), FakeCollector(changed))
 
     def test_reconcile_rejects_each_mismatched_server_fact(self):
         cases = {
@@ -291,62 +344,111 @@ class PeerGuardProtocolTests(unittest.TestCase):
     def test_system_collector_uses_independent_persistent_live_metadata_and_temp_sources(
         self,
     ):
-        public_key = "synthetic-baseline-key"
-        fingerprint = sha(public_key.encode())
+        public_bytes = bytes(range(32))
+        public_key = base64.b64encode(public_bytes).decode()
+        fingerprint = sha(public_bytes)
         ipv4 = b"*filter\nCOMMIT\n"
         ipv6 = b"*filter\nCOMMIT\n"
+        nft = b"table inet filter { counter packets 17 bytes 99 }\n"
+        config = f"[Interface]\nPrivateKey = omitted\n[Peer]\nPublicKey = {public_key}\n".encode()
+        clients = json.dumps(
+            [{"clientId": public_key, "userData": {"clientName": "renamed freely"}}],
+            separators=(",", ":"),
+        ).encode()
         outputs = {
-            ("/usr/bin/docker", "ps"): b"container|image|0.0.0.0:38556->38556/udp\n",
-            ("/usr/bin/docker", "inspect"): b"0|image-id\n",
-            ("/usr/bin/ss", "-H"): b"udp UNCONN 0 0 0.0.0.0:38556\n",
+            (
+                "/usr/bin/docker",
+                "ps",
+                "-a",
+                "--filter",
+                "name=^/amnezia-awg2$",
+                "--format",
+                "{{json .}}",
+            ): b'{"ID":"container-id","Image":"image-ref","Names":"amnezia-awg2","State":"running"}\n',
+            (
+                "/usr/bin/docker",
+                "inspect",
+                "container-id",
+            ): b'[{"Id":"container-id","Image":"image-id","Name":"/amnezia-awg2","RestartCount":0,"State":{"Running":true,"Restarting":false},"HostConfig":{"RestartPolicy":{"Name":"unless-stopped"}}}]',
+            (
+                "/usr/bin/docker",
+                "image",
+                "inspect",
+                "image-id",
+            ): b'[{"Id":"image-id","RepoDigests":["repo@example.invalid/digest"]}]',
+            (
+                "/usr/bin/docker",
+                "port",
+                "container-id",
+                "38556/udp",
+            ): b"0.0.0.0:38556\n[::]:38556\n",
+            (
+                "/usr/bin/docker",
+                "exec",
+                "container-id",
+                "cat",
+                "/opt/amnezia/awg/awg0.conf",
+            ): config,
+            (
+                "/usr/bin/docker",
+                "exec",
+                "container-id",
+                "cat",
+                "/opt/amnezia/awg/clientsTable",
+            ): clients,
+            (
+                "/usr/bin/docker",
+                "exec",
+                "container-id",
+                "/usr/bin/awg",
+                "show",
+                "awg0",
+                "peers",
+            ): (public_key + "\n").encode(),
+            (
+                "/usr/bin/docker",
+                "exec",
+                "container-id",
+                "/bin/bash",
+                "-c",
+                'shopt -s nullglob; for f in /tmp/*.tmp; do [ -f "$f" ] && printf \'%s\\0\' "${f##*/}"; done',
+            ): b"",
+            ("/usr/bin/ss", "-H", "-lntu"): b"udp UNCONN 0 0 0.0.0.0:38556 0.0.0.0:*\n",
             ("/usr/sbin/iptables-save",): ipv4,
             ("/usr/sbin/ip6tables-save",): ipv6,
-            ("/usr/bin/systemctl",): b"active\n",
-            ("/usr/bin/awg", "show"): (public_key + "\n").encode(),
+            ("/usr/sbin/nft", "list", "ruleset"): nft,
+            (
+                "/usr/bin/systemctl",
+                "is-active",
+                "netfilter-persistent.service",
+            ): b"active\n",
         }
+        seen = []
 
         def runner(arguments, _timeout, _maximum):
-            key = tuple(arguments[:2])
-            if arguments[0] in {"/usr/sbin/iptables-save", "/usr/sbin/ip6tables-save"}:
-                key = (arguments[0],)
-            if arguments[0] == "/usr/bin/systemctl":
-                key = (arguments[0],)
+            key = tuple(arguments)
+            seen.append(key)
             return guard.CommandResult(0, outputs[key], b"")
 
-        files = {
-            "/opt/amnezia/awg/wg0.conf": f"[Interface]\nPrivateKey = omitted\n[Peer]\nPublicKey = {public_key}\n".encode(),
-            "/opt/amnezia/awg/peers.json": json.dumps(
-                {"peers": [{"public_key": public_key, "role": "baseline"}]}
-            ).encode(),
-        }
         request = reconcile_request()
-        request["expected_ipv6_policy_sha256"] = sha(ipv6)
-        request["expected_firewall_identity_sha256"] = sha(ipv4 + b"\0" + ipv6)
-        snapshot = guard.collect_server_snapshot(
-            request,
-            runner=runner,
-            reader=lambda path, _maximum: files[str(path).replace("\\", "/")],
-            lister=lambda _path: [],
-        )
+        request["expected_ipv6_policy_sha256"] = guard.normalized_policy_sha256(ipv6)
+        snapshot = guard.collect_server_snapshot(request, runner=runner)
         self.assertEqual(snapshot["peer_fingerprint_sha256"], [fingerprint])
-        self.assertEqual(snapshot["peer_classes"], {fingerprint: "baseline"})
         self.assertEqual(snapshot["persistent_peer_set_sha256"], sha([fingerprint]))
         self.assertEqual(snapshot["live_peer_set_sha256"], sha([fingerprint]))
         self.assertEqual(snapshot["metadata_peer_set_sha256"], sha([fingerprint]))
+        self.assertEqual(snapshot["persistent_config_sha256"], sha(config))
+        self.assertEqual(snapshot["metadata_sha256"], sha(clients))
         self.assertTrue(snapshot["ipv6_non_mutation"])
         self.assertEqual(snapshot["temporary_leftover_count"], 0)
-
-        malformed = dict(files)
-        malformed["/opt/amnezia/awg/wg0.conf"] = (
-            b"[Interface]\n[Peer]\nAllowedIPs = 10.0.0.2/32\n"
-        )
-        with self.assertRaisesRegex(ValueError, "persistent peer"):
-            guard.collect_server_snapshot(
-                request,
-                runner=runner,
-                reader=lambda path, _maximum: malformed[str(path).replace("\\", "/")],
-                lister=lambda _path: [],
+        self.assertNotIn(("/usr/bin/awg", "show", "all", "public-keys"), seen)
+        self.assertTrue(
+            all(
+                "/opt/amnezia/awg/wg0.conf" != argument
+                for call in seen
+                for argument in call
             )
+        )
 
     def test_cli_sanitizes_system_adapter_schema_exceptions_without_traceback(self):
         request = reconcile_request()
@@ -364,8 +466,7 @@ class PeerGuardProtocolTests(unittest.TestCase):
 class PeerGuardStreamingTests(unittest.TestCase):
     def candidate(self, operation="admin", fingerprint="8" * 64):
         peers = ["1" * 64, fingerprint]
-        classes = {"1" * 64: "baseline", fingerprint: operation}
-        return server_snapshot(peers=peers, classes=classes)
+        return server_snapshot(peers=peers)
 
     def test_admin_and_guest_require_two_identical_exact_plus_one_snapshots(self):
         for operation in ("admin", "guest"):
@@ -404,9 +505,9 @@ class PeerGuardStreamingTests(unittest.TestCase):
         self.assertEqual(events[-1]["event"], "candidate")
         self.assertEqual(clock.sleeps, [2, 2, 5])
 
-    def test_unknown_removal_or_metadata_class_emits_sanitized_stopped(self):
+    def test_unknown_removal_emits_sanitized_stopped(self):
         baseline = server_snapshot()
-        removed = server_snapshot(peers=["9" * 64], classes={"9" * 64: "admin"})
+        removed = server_snapshot(peers=["9" * 64])
         events = list(
             guard.run_guard(
                 "admin",
@@ -540,6 +641,33 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             "P3-EMERGENCY-ROLLBACK-" + request["rollback_plan_sha256"][:16].upper()
         )
         return request
+
+    def test_container_rollback_staging_and_writer_are_nonce_bound(self):
+        config_stage, clients_stage = guard.container_staging_paths("d" * 64)
+        self.assertEqual(
+            config_stage,
+            "/opt/amnezia/awg/.p3-next-dddddddddddddddddddddddddddddddd.conf",
+        )
+        self.assertEqual(
+            clients_stage,
+            "/opt/amnezia/awg/.p3-next-dddddddddddddddddddddddddddddddd.clients",
+        )
+        arguments = guard.container_writer_arguments(
+            "container-id",
+            "/opt/amnezia/awg/awg0.conf",
+            config_stage,
+            123,
+        )
+        self.assertEqual(
+            arguments[:4], ["/usr/bin/docker", "exec", "-i", "container-id"]
+        )
+        self.assertEqual(
+            arguments[-4:],
+            ["p3-writer", "/opt/amnezia/awg/awg0.conf", config_stage, "123"],
+        )
+        self.assertNotIn("d" * 64, " ".join(arguments))
+        with self.assertRaisesRegex(ValueError, "nonce"):
+            guard.container_staging_paths("not-a-nonce")
 
     def test_emergency_rollback_is_exact_candidate_bound_and_one_syncconf(self):
         calls = []

@@ -1,5 +1,7 @@
 # Close P3 pre-live guard gaps
 
+> Superseded for storage, baseline, bootstrap, Cloud Firewall provenance, and Admin/Guest identity by `2026-08-31-p3-prelive-prerequisite-closure-design.md`. Retained as historical context only; do not use it to form a live candidate.
+
 Status: Accepted by owner on 2026-08-30 (`d7cd440`)
 
 Audience: Home Gateway maintainers and the P3 field operator

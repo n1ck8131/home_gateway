@@ -3,8 +3,10 @@ $ErrorActionPreference = 'Stop'
 Describe 'P3 protected pre-live runtime' {
     BeforeAll {
         $script:Runtime = Join-Path $PSScriptRoot '..\..\scripts\p3-prelive-runtime.ps1'
+        $script:Prerequisite = Join-Path $PSScriptRoot '..\..\scripts\p3-prelive-prerequisite.ps1'
         $script:Root = Join-Path $TestDrive 'protected-v1'
         . $script:Runtime
+        . $script:Prerequisite
 
         function Get-TestTextSHA256([string]$Text) {
             $sha = [Security.Cryptography.SHA256]::Create()
@@ -28,14 +30,14 @@ Describe 'P3 protected pre-live runtime' {
                 management_source_cidr_sha256 = ('2' * 64); udp_38556_all_ipv4_count = 1
                 udp_ipv6_count = 0; extra_inbound_rule_count = 0; observed_at_utc = [DateTime]::UtcNow.ToString('o')
             }
-            return [ordered]@{
+            $trust = [ordered]@{
                 schema = 'home-gateway/p3-prelive-trust-input/v1'
                 ssh_host = '192.0.2.10'
                 ssh_user = 'homegateway'
                 known_hosts_path = $files.known_hosts
                 public_key_path = $files.'operator.pub'
                 private_key_path = (Join-Path $Root 'operator')
-                public_key_fingerprint_sha256 = ('1' * 64)
+                public_key_fingerprint_sha256 = Get-TestTextSHA256 'SHA256:synthetic-key'
                 management_source_cidr_sha256 = ('2' * 64)
                 git_ssh_agent_path = $files.'ssh-agent.exe'
                 git_ssh_add_path = $files.'ssh-add.exe'
@@ -52,7 +54,7 @@ Describe 'P3 protected pre-live runtime' {
                     host_policy_loaded = $true; host_policy_sha256 = ('7' * 64); ipv6_non_mutation = $true
                     ipv6_policy_sha256 = ('b' * 64); persistent_config_sha256 = ('c' * 64)
                     metadata_sha256 = ('d' * 64); temporary_state_sha256 = ('e' * 64)
-                    runtime_identity_sha256 = ('f' * 64); prepared_syncconf_sha256 = ('0' * 64)
+                    runtime_identity_sha256 = ('f' * 64)
                     peer_fingerprint_sha256 = @(('8' * 64)); persistent_peer_set_sha256 = $peerSetHash
                     live_peer_set_sha256 = $peerSetHash; metadata_peer_set_sha256 = $peerSetHash
                     candidate_leftover_count = 0; temporary_leftover_count = 0; atomic_leftover_count = 0
@@ -60,13 +62,49 @@ Describe 'P3 protected pre-live runtime' {
                 }
                 accepted_cloud_firewall_sha256 = Get-P3CloudFirewallIdentitySHA256 $cloudObservation
                 rollback_paths = [ordered]@{
-                    persistent_config_path = '/opt/amnezia/awg/wg0.conf'
-                    metadata_path = '/opt/amnezia/awg/peers.json'
+                    persistent_config_path = '/opt/amnezia/awg/awg0.conf'
+                    metadata_path = '/opt/amnezia/awg/clientsTable'
                     temporary_path = '/run/home-gateway-p3-peer-guard/candidate.tmp'
                     syncconf_path = '/run/home-gateway-p3-peer-guard/awg.conf'
                 }
                 egress_authority_sha256 = @(('7' * 64), ('8' * 64), ('9' * 64))
             }
+            $now = [DateTime]::UtcNow
+            $sshTrustSHA256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson ([pscustomobject][ordered]@{
+                known_hosts_sha256=(Get-FileHash $files.known_hosts -Algorithm SHA256).Hash.ToLowerInvariant()
+                public_key_fingerprint_sha256=[string]$trust.public_key_fingerprint_sha256
+                git_ssh_agent_sha256=(Get-FileHash $files.'ssh-agent.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+                git_ssh_add_sha256=(Get-FileHash $files.'ssh-add.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+                git_ssh_sha256=(Get-FileHash $files.'ssh.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+                git_scp_sha256=(Get-FileHash $files.'scp.exe' -Algorithm SHA256).Hash.ToLowerInvariant()
+            }))
+            $preManifest = [pscustomobject][ordered]@{
+                schema='home-gateway/p3-prelive-prerequisite-manifest/v1';manifest_sha256=('a' * 64)
+                payload_sha256=$payloadHash;protocol_sha256=[string]$trust.protocol_sha256;ssh_trust_sha256=$sshTrustSHA256
+                management_source_cidr_sha256=[string]$trust.management_source_cidr_sha256
+                egress_authority_sha256=@($trust.egress_authority_sha256);firewall_resource_sha256=('1' * 64)
+                droplet_resource_sha256=('6' * 64);inbound_union_sha256=('3' * 64);outbound_union_sha256=('4' * 64)
+            }
+            $cloudV2 = [pscustomobject][ordered]@{
+                schema='home-gateway/p3-prelive-cloud-firewall-observation/v2';firewall_resource_sha256=('1' * 64)
+                droplet_resource_sha256=('6' * 64);droplet_association_count=1
+                management_source_cidr_sha256=[string]$trust.management_source_cidr_sha256
+                tcp_22_management_source_count=1;udp_38556_all_ipv4_count=1;udp_ipv6_count=0;extra_inbound_rule_count=0
+                inbound_union_sha256=('3' * 64);outbound_union_sha256=('4' * 64);outbound_icmp_all_count=2
+                outbound_tcp_all_count=2;outbound_udp_all_count=2;extra_outbound_rule_count=0
+                observed_at_utc=$now.ToString('o');owner_observed=$true;server_confirmed=$false;live_mutation_performed=$false
+            }
+            $egressV2 = foreach ($authority in $trust.egress_authority_sha256) {
+                [pscustomobject][ordered]@{schema='home-gateway/p3-prelive-egress-observation/v1';authority_sha256=$authority
+                    source_cidr_sha256=[string]$trust.management_source_cidr_sha256;observed_at_utc=$now.ToString('o')}
+            }
+            $receipt = New-P3PrerequisiteReceipt -Manifest $preManifest -ServerBaseline ([pscustomobject]$trust.accepted_server_baseline) `
+                -CloudObservation $cloudV2 -EgressObservations @($egressV2) -NowUtc $now
+            $receiptPath = Join-Path $Root 'prerequisite-receipt.json'
+            [IO.File]::WriteAllBytes($receiptPath, (ConvertTo-P3CanonicalJson $receipt))
+            $trust.prerequisite_receipt_path = $receiptPath
+            $trust.expected_prerequisite_receipt_sha256 = Get-P3ExactFileSHA256 $receiptPath 'prerequisite receipt'
+            return $trust
         }
 
         function Initialize-OwnedBatchRuntime([string]$Root, [object]$Trust) {
@@ -166,7 +204,7 @@ Describe 'P3 protected pre-live runtime' {
         $plan.manifest.accepted_server_baseline_sha256 | Should -Match '^[0-9a-f]{64}$'
         $plan.confirmation_challenge | Should -Match '^P3-PRELIVE-RUNTIME-[0-9A-F]{16}$'
         $plan.manifest.PSObject.Properties.Name | Should -Be @(
-            'accepted_cloud_firewall_sha256', 'accepted_server_baseline_sha256',
+            'accepted_cloud_firewall_sha256', 'accepted_prerequisite_receipt_sha256', 'accepted_server_baseline_sha256',
             'git_scp_sha256', 'git_ssh_add_sha256', 'git_ssh_agent_sha256', 'git_ssh_sha256',
             'known_hosts_sha256', 'local_payload_sha256', 'management_source_cidr_sha256',
             'protocol_sha256', 'public_key_fingerprint_sha256', 'remote_payload_sha256', 'schema', 'trust_sha256'
@@ -285,6 +323,26 @@ Describe 'P3 protected pre-live runtime' {
         { New-P3EgressReceipt -ExpectedAuthoritySHA256 $authorities -ExpectedManagementSourceCIDRSHA256 ('2' * 64) `
             -NowUtc ([DateTime]::UtcNow) -HttpsRunner { param($authoritySHA256) [pscustomobject]@{ authority_sha256=$authoritySHA256;source_cidr_sha256=('f'*64);observed_at_utc=[DateTime]::UtcNow.ToString('o') } } } |
             Should -Throw '*source*'
+    }
+
+    It 'canonicalizes the exact 27-field baseline identically to Python' {
+        $fixturePath = Join-Path $PSScriptRoot '..\fixtures\p3\server-baseline-v2.json'
+        $baseline = Get-Content -LiteralPath $fixturePath -Raw | ConvertFrom-Json
+        @($baseline.PSObject.Properties).Count | Should -Be 27
+        $baseline.PSObject.Properties.Name | Should -Not -Contain 'prepared_syncconf_sha256'
+        Get-P3ServerBaselineSHA256 -Baseline $baseline | Should -BeExactly `
+            '68943c7693ed9a442b206749572dc44e2e44a595af080e254836f29ff73ebb1f'
+    }
+
+    It 'requires and binds the independently accepted prerequisite receipt' {
+        $fixtureRoot = Join-Path $TestDrive 'prerequisite-bound-runtime'
+        [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+        $trust = New-TrustFixture $fixtureRoot
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$trust) -RuntimeRoot (Join-Path $fixtureRoot 'runtime')
+        $plan.manifest.accepted_prerequisite_receipt_sha256 | Should -BeExactly $trust.expected_prerequisite_receipt_sha256
+        $trust.expected_prerequisite_receipt_sha256 = ('0' * 64)
+        { New-P3ManifestPlan -Trust ([pscustomobject]$trust) -RuntimeRoot (Join-Path $fixtureRoot 'foreign') } |
+            Should -Throw '*prerequisite receipt*'
     }
 
     It 'uses one exact shared validator for persisted egress evidence' {

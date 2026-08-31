@@ -3,6 +3,7 @@ package configfile
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdh"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -83,6 +84,22 @@ func (config Config) Metadata() tunnel.Metadata {
 	metadata.AllowedIPs = append([]string(nil), metadata.AllowedIPs...)
 	metadata.DNS = append([]string(nil), metadata.DNS...)
 	return metadata
+}
+
+// InterfacePublicFingerprintSHA256 derives the X25519 public key in memory and
+// returns only the lowercase SHA-256 of its raw 32-byte representation.
+func (config Config) InterfacePublicFingerprintSHA256() string {
+	privateBytes := make([]byte, len(config.privateKey.bytes))
+	copy(privateBytes, config.privateKey.bytes[:])
+	defer clear(privateBytes)
+	privateKey, err := ecdh.X25519().NewPrivateKey(privateBytes)
+	if err != nil {
+		return ""
+	}
+	publicBytes := privateKey.PublicKey().Bytes()
+	defer clear(publicBytes)
+	digest := sha256.Sum256(publicBytes)
+	return hex.EncodeToString(digest[:])
 }
 
 // ImportFile reads a bounded, regular local file. It never accepts config

@@ -29,13 +29,14 @@ $script:P3TrustProperties = @(
     'accepted_cloud_firewall_sha256', 'accepted_server_baseline', 'egress_authority_sha256',
     'git_scp_path', 'git_ssh_add_path', 'git_ssh_agent_path', 'git_ssh_path', 'known_hosts_path',
     'local_payload_path', 'management_source_cidr_sha256', 'private_key_path', 'protocol_sha256',
-    'public_key_fingerprint_sha256', 'public_key_path', 'remote_payload_sha256', 'rollback_paths', 'schema', 'ssh_host', 'ssh_user'
+    'public_key_fingerprint_sha256', 'public_key_path', 'remote_payload_sha256', 'rollback_paths', 'schema', 'ssh_host', 'ssh_user',
+    'prerequisite_receipt_path', 'expected_prerequisite_receipt_sha256'
 )
 $script:P3ServerBaselineProperties = @(
     'atomic_leftover_count', 'candidate_leftover_count', 'container_count', 'container_identity_sha256',
     'container_restart_count', 'container_running', 'firewall_identity_sha256', 'host_policy_loaded',
     'host_policy_sha256', 'image_identity_sha256', 'ipv6_non_mutation', 'listener_identity_sha256',
-    'ipv6_policy_sha256', 'metadata_sha256', 'persistent_config_sha256', 'prepared_syncconf_sha256',
+    'ipv6_policy_sha256', 'metadata_sha256', 'persistent_config_sha256',
     'live_peer_set_sha256', 'metadata_peer_set_sha256', 'payload_sha256', 'peer_fingerprint_sha256',
     'persistent_peer_set_sha256', 'protocol_sha256', 'public_listener_class_count',
     'runtime_identity_sha256', 'temporary_leftover_count', 'temporary_state_sha256',
@@ -43,10 +44,18 @@ $script:P3ServerBaselineProperties = @(
 )
 $script:P3RollbackPathProperties = @('metadata_path', 'persistent_config_path', 'syncconf_path', 'temporary_path')
 $script:P3ManifestProperties = @(
-    'accepted_cloud_firewall_sha256', 'accepted_server_baseline_sha256',
+    'accepted_cloud_firewall_sha256', 'accepted_prerequisite_receipt_sha256', 'accepted_server_baseline_sha256',
     'git_scp_sha256', 'git_ssh_add_sha256', 'git_ssh_agent_sha256', 'git_ssh_sha256',
     'known_hosts_sha256', 'local_payload_sha256', 'management_source_cidr_sha256',
     'protocol_sha256', 'public_key_fingerprint_sha256', 'remote_payload_sha256', 'schema', 'trust_sha256'
+)
+$script:P3PrerequisiteReceiptProperties = @(
+    'schema', 'prerequisite_manifest_sha256', 'server_baseline', 'server_baseline_sha256',
+    'cloud_firewall_identity_sha256', 'firewall_resource_sha256', 'droplet_resource_sha256',
+    'inbound_union_sha256', 'outbound_union_sha256', 'management_source_cidr_sha256',
+    'egress_authority_sha256', 'egress_observation_sha256', 'ssh_trust_sha256', 'payload_sha256',
+    'protocol_sha256', 'observed_at_utc', 'owner_observed', 'server_confirmed',
+    'live_mutation_performed', 'raw_identity_exposed'
 )
 $script:P3CloudFirewallReceiptProperties = @(
     'cloud_firewall_identity_sha256', 'droplet_association_count', 'inbound_rule_count',
@@ -244,28 +253,12 @@ function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
     if (-not [Net.IPAddress]::TryParse([string]$Trust.ssh_host, [ref]$ip) -or $ip.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
         throw 'trust SSH host must be one IPv4 address'
     }
-    foreach ($name in @('public_key_fingerprint_sha256', 'management_source_cidr_sha256', 'remote_payload_sha256', 'protocol_sha256', 'accepted_cloud_firewall_sha256')) {
+    foreach ($name in @('public_key_fingerprint_sha256', 'management_source_cidr_sha256', 'remote_payload_sha256', 'protocol_sha256',
+            'accepted_cloud_firewall_sha256', 'expected_prerequisite_receipt_sha256')) {
         Assert-P3SHA256 -Value ([string]$Trust.$name) -Label $name
     }
-    Assert-P3ExactProperties -Value $Trust.accepted_server_baseline -ExpectedProperties $script:P3ServerBaselineProperties -Label 'accepted server baseline'
     $baseline = $Trust.accepted_server_baseline
-    foreach ($name in @(
-        'container_identity_sha256', 'image_identity_sha256', 'udp_publication_sha256', 'listener_identity_sha256',
-        'host_policy_sha256', 'persistent_peer_set_sha256', 'live_peer_set_sha256', 'metadata_peer_set_sha256',
-        'firewall_identity_sha256', 'payload_sha256', 'protocol_sha256'
-    )) { Assert-P3SHA256 -Value ([string]$baseline.$name) -Label "accepted server $name" }
-    if ([int]$baseline.container_count -ne 1 -or -not [bool]$baseline.container_running -or
-        [int]$baseline.udp_publication_count -ne 1 -or [int]$baseline.public_listener_class_count -lt 1 -or
-        -not [bool]$baseline.host_policy_loaded -or -not [bool]$baseline.ipv6_non_mutation -or
-        [int]$baseline.candidate_leftover_count -ne 0 -or [int]$baseline.temporary_leftover_count -ne 0 -or
-        [int]$baseline.atomic_leftover_count -ne 0) { throw 'accepted server baseline facts differ' }
-    $peers = @($baseline.peer_fingerprint_sha256)
-    if ($peers.Count -gt 1024) { throw 'accepted server peer count differs' }
-    foreach ($peer in $peers) { Assert-P3SHA256 -Value ([string]$peer) -Label 'accepted server peer fingerprint' }
-    $peerSetHash = Get-P3SHA256Bytes -Bytes (ConvertTo-P3CanonicalJson -Value @($peers | Sort-Object -CaseSensitive))
-    if ([string]$baseline.persistent_peer_set_sha256 -cne $peerSetHash -or
-        [string]$baseline.live_peer_set_sha256 -cne $peerSetHash -or
-        [string]$baseline.metadata_peer_set_sha256 -cne $peerSetHash) { throw 'accepted server peer set differs' }
+    $baselineSHA256 = Get-P3ServerBaselineSHA256 -Baseline $baseline
     Assert-P3ExactProperties -Value $Trust.rollback_paths -ExpectedProperties $script:P3RollbackPathProperties -Label 'rollback paths'
     $rollbackRoots = @{
         persistent_config_path = '/opt/amnezia/awg/'
@@ -281,21 +274,38 @@ function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
     $egress = @($Trust.egress_authority_sha256)
     if ($egress.Count -ne 3 -or @($egress | Select-Object -Unique).Count -ne 3) { throw 'three distinct egress authorities are required' }
     foreach ($hash in $egress) { Assert-P3SHA256 -Value ([string]$hash) -Label 'egress authority' }
-    foreach ($pathName in @('known_hosts_path', 'public_key_path', 'private_key_path', 'git_ssh_agent_path', 'git_ssh_add_path', 'git_ssh_path', 'git_scp_path', 'local_payload_path')) {
+    foreach ($pathName in @('known_hosts_path', 'public_key_path', 'private_key_path', 'git_ssh_agent_path', 'git_ssh_add_path', 'git_ssh_path',
+            'git_scp_path', 'local_payload_path', 'prerequisite_receipt_path')) {
         $null = Resolve-P3FixedCleanPath -Path ([string]$Trust.$pathName) -Label $pathName
     }
     $trustBytes = ConvertTo-P3CanonicalJson -Value $Trust
     $localPayloadSHA256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.local_payload_path) -Label 'local payload'
     if ([string]$Trust.remote_payload_sha256 -cne $localPayloadSHA256 -or [string]$baseline.payload_sha256 -cne $localPayloadSHA256 -or
         [string]$baseline.protocol_sha256 -cne [string]$Trust.protocol_sha256) { throw 'accepted server payload or protocol differs' }
+    $knownHostsSHA256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.known_hosts_path) -Label 'known-hosts'
+    $gitSCPHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_scp_path) -Label 'Git scp'
+    $gitAddHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_add_path) -Label 'Git ssh-add'
+    $gitAgentHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_agent_path) -Label 'Git ssh-agent'
+    $gitSshHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_path) -Label 'Git ssh'
+    $sshTrustSHA256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson ([pscustomobject][ordered]@{
+        known_hosts_sha256=$knownHostsSHA256;public_key_fingerprint_sha256=[string]$Trust.public_key_fingerprint_sha256
+        git_ssh_agent_sha256=$gitAgentHash;git_ssh_add_sha256=$gitAddHash
+        git_ssh_sha256=$gitSshHash;git_scp_sha256=$gitSCPHash
+    }))
+    $prerequisitePath = [string]$Trust.prerequisite_receipt_path
+    $prerequisiteSHA256 = Get-P3ExactFileSHA256 -Path $prerequisitePath -Label 'prerequisite receipt'
+    if ($prerequisiteSHA256 -cne [string]$Trust.expected_prerequisite_receipt_sha256) { throw 'prerequisite receipt hash differs' }
+    $prerequisite = Open-P3BoundedStableJson -Path $prerequisitePath -MaximumBytes 131072 -ExpectedProperties $script:P3PrerequisiteReceiptProperties
+    $null = Test-P3AcceptedPrerequisiteReceipt -Receipt $prerequisite -Trust $Trust -ExpectedSshTrustSHA256 $sshTrustSHA256 -NowUtc ([DateTime]::UtcNow)
     $manifest = [pscustomobject][ordered]@{
         accepted_cloud_firewall_sha256 = [string]$Trust.accepted_cloud_firewall_sha256
-        accepted_server_baseline_sha256 = Get-P3SHA256Bytes -Bytes (ConvertTo-P3CanonicalJson -Value $baseline)
-        git_scp_sha256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_scp_path) -Label 'Git scp'
-        git_ssh_add_sha256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_add_path) -Label 'Git ssh-add'
-        git_ssh_agent_sha256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_agent_path) -Label 'Git ssh-agent'
-        git_ssh_sha256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_path) -Label 'Git ssh'
-        known_hosts_sha256 = Get-P3ExactFileSHA256 -Path ([string]$Trust.known_hosts_path) -Label 'known-hosts'
+        accepted_prerequisite_receipt_sha256 = $prerequisiteSHA256
+        accepted_server_baseline_sha256 = $baselineSHA256
+        git_scp_sha256 = $gitSCPHash
+        git_ssh_add_sha256 = $gitAddHash
+        git_ssh_agent_sha256 = $gitAgentHash
+        git_ssh_sha256 = $gitSshHash
+        known_hosts_sha256 = $knownHostsSHA256
         local_payload_sha256 = $localPayloadSHA256
         management_source_cidr_sha256 = [string]$Trust.management_source_cidr_sha256
         protocol_sha256 = [string]$Trust.protocol_sha256
@@ -508,6 +518,83 @@ function New-P3EgressReceipt(
     }
     return Test-P3ExactEgressReceipt -Receipt $receipt -ExpectedAuthoritySHA256 $expected `
         -ExpectedManagementSourceCIDRSHA256 $ExpectedManagementSourceCIDRSHA256 -NowUtc $NowUtc
+}
+
+function Test-P3ExactJsonInteger([object]$Value) {
+    return $Value -is [sbyte] -or $Value -is [byte] -or $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Get-P3ServerBaselineSHA256([object]$Baseline) {
+    Assert-P3ExactProperties -Value $Baseline -ExpectedProperties $script:P3ServerBaselineProperties -Label 'accepted server baseline'
+    foreach ($name in @(
+        'container_identity_sha256', 'firewall_identity_sha256', 'host_policy_sha256', 'image_identity_sha256',
+        'ipv6_policy_sha256', 'listener_identity_sha256', 'live_peer_set_sha256', 'metadata_peer_set_sha256',
+        'metadata_sha256', 'payload_sha256', 'persistent_config_sha256', 'persistent_peer_set_sha256',
+        'protocol_sha256', 'runtime_identity_sha256', 'temporary_state_sha256', 'udp_publication_sha256'
+    )) { Assert-P3SHA256 -Value ([string]$Baseline.$name) -Label "accepted server $name" }
+    foreach ($name in @('container_count', 'container_restart_count', 'public_listener_class_count', 'temporary_leftover_count', 'candidate_leftover_count', 'atomic_leftover_count', 'udp_publication_count')) {
+        if (-not (Test-P3ExactJsonInteger $Baseline.$name)) { throw "accepted server $name type differs" }
+    }
+    foreach ($name in @('container_running', 'host_policy_loaded', 'ipv6_non_mutation')) {
+        if ($Baseline.$name -isnot [bool]) { throw "accepted server $name type differs" }
+    }
+    if ([int64]$Baseline.container_count -ne 1 -or -not $Baseline.container_running -or
+        [int64]$Baseline.container_restart_count -lt 0 -or [int64]$Baseline.udp_publication_count -ne 1 -or
+        [int64]$Baseline.public_listener_class_count -lt 1 -or -not $Baseline.host_policy_loaded -or
+        -not $Baseline.ipv6_non_mutation -or [int64]$Baseline.candidate_leftover_count -ne 0 -or
+        [int64]$Baseline.temporary_leftover_count -ne 0 -or [int64]$Baseline.atomic_leftover_count -ne 0) {
+        throw 'accepted server baseline facts differ'
+    }
+    $peers = @($Baseline.peer_fingerprint_sha256)
+    if ($Baseline.peer_fingerprint_sha256 -isnot [Array] -or $peers.Count -gt 1024 -or @($peers | Select-Object -Unique).Count -ne $peers.Count) {
+        throw 'accepted server peer count differs'
+    }
+    foreach ($peer in $peers) { Assert-P3SHA256 -Value ([string]$peer) -Label 'accepted server peer fingerprint' }
+    $sortedPeers = @($peers | Sort-Object -CaseSensitive)
+    $peerSetHash = Get-P3SHA256Bytes -Bytes (ConvertTo-P3CanonicalJson -Value $sortedPeers)
+    if ([string]$Baseline.persistent_peer_set_sha256 -cne $peerSetHash -or
+        [string]$Baseline.live_peer_set_sha256 -cne $peerSetHash -or
+        [string]$Baseline.metadata_peer_set_sha256 -cne $peerSetHash) { throw 'accepted server peer set differs' }
+    $canonical = [ordered]@{}
+    foreach ($name in $script:P3ServerBaselineProperties) {
+        if ($name -ceq 'peer_fingerprint_sha256') { $canonical[$name] = [object[]]$sortedPeers }
+        else { $canonical[$name] = $Baseline.$name }
+    }
+    return Get-P3SHA256Bytes -Bytes (ConvertTo-P3CanonicalJson -Value $canonical)
+}
+
+function Test-P3AcceptedPrerequisiteReceipt(
+    [object]$Receipt,
+    [object]$Trust,
+    [string]$ExpectedSshTrustSHA256,
+    [DateTime]$NowUtc
+) {
+    Assert-P3ExactProperties -Value $Receipt -ExpectedProperties $script:P3PrerequisiteReceiptProperties -Label 'prerequisite receipt'
+    foreach ($name in @('prerequisite_manifest_sha256', 'server_baseline_sha256', 'cloud_firewall_identity_sha256',
+            'firewall_resource_sha256', 'droplet_resource_sha256', 'inbound_union_sha256', 'outbound_union_sha256',
+            'management_source_cidr_sha256', 'egress_observation_sha256', 'ssh_trust_sha256', 'payload_sha256', 'protocol_sha256')) {
+        Assert-P3SHA256 ([string]$Receipt.$name) $name
+    }
+    if ([string]$Receipt.schema -cne 'home-gateway/p3-prelive-prerequisite-receipt/v1' -or
+        -not [bool]$Receipt.owner_observed -or -not [bool]$Receipt.server_confirmed -or
+        [bool]$Receipt.live_mutation_performed -or [bool]$Receipt.raw_identity_exposed) { throw 'prerequisite receipt provenance differs' }
+    $observed = Get-P3EgressUtc $Receipt.observed_at_utc 'prerequisite receipt'
+    $now = $NowUtc.ToUniversalTime()
+    if ($observed -gt $now.AddSeconds(5) -or $observed -lt $now.AddMinutes(-10)) { throw 'prerequisite receipt freshness differs' }
+    $baselineSHA256 = Get-P3ServerBaselineSHA256 $Receipt.server_baseline
+    if ($baselineSHA256 -cne [string]$Receipt.server_baseline_sha256 -or
+        $baselineSHA256 -cne (Get-P3ServerBaselineSHA256 $Trust.accepted_server_baseline) -or
+        [string]$Receipt.payload_sha256 -cne [string]$Trust.remote_payload_sha256 -or
+        [string]$Receipt.protocol_sha256 -cne [string]$Trust.protocol_sha256 -or
+        [string]$Receipt.management_source_cidr_sha256 -cne [string]$Trust.management_source_cidr_sha256 -or
+        [string]$Receipt.ssh_trust_sha256 -cne $ExpectedSshTrustSHA256) { throw 'prerequisite receipt binding differs' }
+    $expectedAuthorities = @($Trust.egress_authority_sha256)
+    $actualAuthorities = @($Receipt.egress_authority_sha256)
+    if ($actualAuthorities.Count -ne 3 -or @(Compare-Object -ReferenceObject $expectedAuthorities -DifferenceObject $actualAuthorities).Count -ne 0) {
+        throw 'prerequisite receipt authority differs'
+    }
+    return $Receipt
 }
 
 function Get-P3EgressUtc([object]$Value, [string]$Label) {

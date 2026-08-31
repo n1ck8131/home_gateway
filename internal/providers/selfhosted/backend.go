@@ -25,7 +25,12 @@ func (backend Backend) Inspect(ctx context.Context, source tunnel.ConfigSource) 
 	if err != nil {
 		return tunnel.Inspection{}, err
 	}
-	return tunnel.Inspection{Metadata: config.Metadata(), Status: tunnel.Status{State: tunnel.StateUnknown}, Capabilities: backend.Capabilities()}, nil
+	return tunnel.Inspection{
+		Metadata:                         config.Metadata(),
+		Status:                           tunnel.Status{State: tunnel.StateUnknown},
+		Capabilities:                     backend.Capabilities(),
+		InterfacePublicFingerprintSHA256: config.InterfacePublicFingerprintSHA256(),
+	}, nil
 }
 func (Backend) Status(ctx context.Context) (tunnel.Status, error) {
 	if err := ctx.Err(); err != nil {

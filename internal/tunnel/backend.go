@@ -62,9 +62,10 @@ type Status struct {
 }
 
 type Inspection struct {
-	Metadata     Metadata     `json:"metadata"`
-	Status       Status       `json:"status"`
-	Capabilities Capabilities `json:"capabilities"`
+	Metadata                         Metadata     `json:"metadata"`
+	Status                           Status       `json:"status"`
+	Capabilities                     Capabilities `json:"capabilities"`
+	InterfacePublicFingerprintSHA256 string       `json:"interface_public_fingerprint_sha256,omitempty"`
 }
 
 // ConfigSource is intentionally excluded from JSON and redacted when formatted.

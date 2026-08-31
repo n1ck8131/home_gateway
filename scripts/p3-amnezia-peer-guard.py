@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
 import pathlib
-import shutil
+import re
 import stat
 import subprocess
 import sys
@@ -34,9 +36,9 @@ ALLOWED_EXECUTABLES = {
     "/usr/bin/ss",
     "/usr/sbin/iptables-save",
     "/usr/sbin/ip6tables-save",
+    "/usr/sbin/nft",
     "/usr/bin/systemctl",
     "/usr/bin/sha256sum",
-    "/usr/bin/awg",
 }
 COMMON_REQUEST_KEYS = {
     "schema",
@@ -105,7 +107,7 @@ ROLLBACK_KEYS = (
         "confirmation",
     }
 )
-SERVER_IDENTITY_KEYS = (
+SERVER_BASELINE_KEYS = (
     "container_count",
     "container_running",
     "container_identity_sha256",
@@ -120,16 +122,21 @@ SERVER_IDENTITY_KEYS = (
     "ipv6_non_mutation",
     "ipv6_policy_sha256",
     "peer_fingerprint_sha256",
+    "persistent_config_sha256",
     "persistent_peer_set_sha256",
     "live_peer_set_sha256",
     "metadata_peer_set_sha256",
+    "metadata_sha256",
     "candidate_leftover_count",
     "temporary_leftover_count",
     "atomic_leftover_count",
     "firewall_identity_sha256",
+    "runtime_identity_sha256",
+    "temporary_state_sha256",
     "payload_sha256",
     "protocol_sha256",
 )
+SERVER_IDENTITY_KEYS = SERVER_BASELINE_KEYS
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,9 @@ class CommandResult:
 
 
 CommandRunner: TypeAlias = Callable[[Sequence[str], int, int], CommandResult]
+StreamCommandRunner: TypeAlias = Callable[
+    [Sequence[str], bytes, int, int], CommandResult
+]
 FileReader: TypeAlias = Callable[[pathlib.Path, int], bytes]
 FileLister: TypeAlias = Callable[[pathlib.Path], Sequence[pathlib.Path]]
 Collector: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
@@ -370,6 +380,44 @@ def _default_command_runner(
     return CommandResult(result.returncode, stdout, stderr)
 
 
+def _default_stream_command_runner(
+    arguments: Sequence[str], data: bytes, timeout_seconds: int, maximum_bytes: int
+) -> CommandResult:
+    try:
+        result = subprocess.run(
+            list(arguments),
+            input=data,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("allowlisted stream command timeout") from exc
+    return CommandResult(
+        result.returncode,
+        result.stdout[: maximum_bytes + 1],
+        result.stderr[: maximum_bytes + 1],
+    )
+
+
+def run_checked_stream_command(
+    arguments: Sequence[str],
+    data: bytes,
+    *,
+    runner: StreamCommandRunner = _default_stream_command_runner,
+    timeout_seconds: int = 10,
+    maximum_bytes: int = MAX_COMMAND_BYTES,
+) -> bytes:
+    if not arguments or arguments[0] != "/usr/bin/docker":
+        raise ValueError("stream command executable is not allowlisted")
+    if not isinstance(data, bytes) or not data or len(data) > MAX_COMMAND_BYTES:
+        raise ValueError("stream command input differs")
+    result = runner(tuple(arguments), data, timeout_seconds, maximum_bytes)
+    if result.exit_code != 0 or result.stderr or len(result.stdout) > maximum_bytes:
+        raise ValueError("allowlisted stream command failed")
+    return result.stdout
+
+
 def run_checked_command(
     arguments: Sequence[str],
     *,
@@ -404,70 +452,215 @@ def _read_utf8_lines(data: bytes, label: str) -> list[str]:
     return [line for line in text.splitlines() if line]
 
 
+def _public_key_fingerprint(value: str) -> str:
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("peer public key differs") from exc
+    if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != value:
+        raise ValueError("peer public key differs")
+    return _sha(decoded)
+
+
+def _normalize_policy(data: bytes) -> bytes:
+    try:
+        text = data.decode("utf-8", errors="strict").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise ValueError("host policy UTF-8 differs") from exc
+    if "\r" in text:
+        raise ValueError("host policy line ending differs")
+    result = []
+    generated = re.compile(r"^# (?:Generated|Completed) by .+ on .+$")
+    for line in text.splitlines():
+        if generated.fullmatch(line):
+            continue
+        if re.match(r"^\[\d+:\d+\]", line):
+            raise ValueError("host policy counters differ")
+        result.append(line)
+    return ("\n".join(result) + "\n").encode("utf-8")
+
+
+def normalized_policy_sha256(data: bytes) -> str:
+    return _sha(_normalize_policy(data))
+
+
+def _normalize_nft(data: bytes) -> bytes:
+    try:
+        text = data.decode("utf-8", errors="strict").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise ValueError("nft policy UTF-8 differs") from exc
+    if "\r" in text:
+        raise ValueError("nft policy line ending differs")
+    normalized = re.sub(
+        r"\bcounter packets \d+ bytes \d+\b", "counter packets 0 bytes 0", text
+    )
+    if (
+        re.search(r"\bcounter\b", normalized)
+        and "counter packets 0 bytes 0" not in normalized
+    ):
+        raise ValueError("nft counter shape differs")
+    return (normalized.rstrip("\n") + "\n").encode("utf-8")
+
+
+def _listener_identity(data: bytes) -> tuple[int, str]:
+    rows = []
+    for line in _read_utf8_lines(data, "listener"):
+        fields = line.split()
+        if len(fields) != 6 or not fields[2].isdigit() or not fields[3].isdigit():
+            raise ValueError("listener observation differs")
+        rows.append([fields[0], fields[1], 0, 0, fields[4], fields[5]])
+    if len(rows) != len({tuple(row) for row in rows}):
+        raise ValueError("listener observation is ambiguous")
+    rows.sort()
+    return len(rows), _sha(rows)
+
+
+def _udp_publication_identity(data: bytes) -> str:
+    classes = []
+    for line in _read_utf8_lines(data, "UDP publication"):
+        if line == "0.0.0.0:38556":
+            classes.append("all_ipv4")
+        elif line == "[::]:38556":
+            classes.append("all_ipv6")
+        else:
+            raise ValueError("UDP publication differs")
+    if sorted(classes) != ["all_ipv4", "all_ipv6"]:
+        raise ValueError("UDP publication count differs")
+    return _sha(sorted(classes))
+
+
 def collect_server_snapshot(
     request: dict[str, Any],
     runner: CommandRunner = _default_command_runner,
-    reader: FileReader = lambda path, maximum: _read_atomic_file(path, maximum),
-    lister: FileLister = lambda path: tuple(path.iterdir()),
 ) -> dict[str, Any]:
-    docker_rows = _read_utf8_lines(
+    rows = _read_utf8_lines(
         run_checked_command(
             [
                 "/usr/bin/docker",
                 "ps",
+                "-a",
                 "--filter",
-                "status=running",
+                "name=^/amnezia-awg2$",
                 "--format",
-                "{{.ID}}|{{.Image}}|{{.Ports}}",
+                "{{json .}}",
             ],
             runner=runner,
         ),
         "container observation",
     )
-    if len(docker_rows) != 1:
+    if len(rows) != 1:
         raise ValueError("container count differs")
-    fields = docker_rows[0].split("|", 2)
-    if len(fields) != 3:
+    try:
+        row = json.loads(rows[0])
+    except json.JSONDecodeError as exc:
+        raise ValueError("container observation differs") from exc
+    if (
+        not isinstance(row, dict)
+        or set(row) != {"ID", "Image", "Names", "State"}
+        or row.get("Names") != "amnezia-awg2"
+        or row.get("State") != "running"
+        or not isinstance(row.get("ID"), str)
+    ):
         raise ValueError("container observation differs")
-    container_id, image, ports = fields
-    inspect_bytes = run_checked_command(
+    container_id = row["ID"]
+    try:
+        inspect_values = json.loads(
+            run_checked_command(
+                ["/usr/bin/docker", "inspect", container_id], runner=runner
+            ).decode("utf-8", errors="strict")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("container inspect observation differs") from exc
+    if not isinstance(inspect_values, list) or len(inspect_values) != 1:
+        raise ValueError("container inspect observation differs")
+    inspect = inspect_values[0]
+    try:
+        image_id = inspect["Image"]
+        restart_count = inspect["RestartCount"]
+        running = inspect["State"]["Running"]
+        restarting = inspect["State"]["Restarting"]
+        restart_policy = inspect["HostConfig"]["RestartPolicy"]["Name"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("container inspect observation differs") from exc
+    if (
+        inspect.get("Id") != container_id
+        or inspect.get("Name") != "/amnezia-awg2"
+        or not isinstance(restart_count, int)
+        or isinstance(restart_count, bool)
+        or running is not True
+        or restarting is not False
+        or restart_policy not in {"unless-stopped", "always"}
+        or not isinstance(image_id, str)
+    ):
+        raise ValueError("container inspect observation differs")
+    try:
+        image_values = json.loads(
+            run_checked_command(
+                ["/usr/bin/docker", "image", "inspect", image_id], runner=runner
+            ).decode("utf-8", errors="strict")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("image inspect observation differs") from exc
+    if not isinstance(image_values, list) or len(image_values) != 1:
+        raise ValueError("image inspect observation differs")
+    image = image_values[0]
+    digests = image.get("RepoDigests")
+    if (
+        image.get("Id") != image_id
+        or not isinstance(digests, list)
+        or not digests
+        or any(not isinstance(value, str) or not value for value in digests)
+        or len(set(digests)) != len(digests)
+    ):
+        raise ValueError("image inspect observation differs")
+    ports = run_checked_command(
+        ["/usr/bin/docker", "port", container_id, "38556/udp"], runner=runner
+    )
+    publication_hash = _udp_publication_identity(ports)
+    config_bytes = run_checked_command(
+        ["/usr/bin/docker", "exec", container_id, "cat", "/opt/amnezia/awg/awg0.conf"],
+        runner=runner,
+        maximum_bytes=MAX_COMMAND_BYTES,
+    )
+    clients_bytes = run_checked_command(
         [
             "/usr/bin/docker",
-            "inspect",
-            "--format",
-            "{{.RestartCount}}|{{.Image}}",
+            "exec",
             container_id,
+            "cat",
+            "/opt/amnezia/awg/clientsTable",
+        ],
+        runner=runner,
+        maximum_bytes=MAX_COMMAND_BYTES,
+    )
+    live_bytes = run_checked_command(
+        [
+            "/usr/bin/docker",
+            "exec",
+            container_id,
+            "/usr/bin/awg",
+            "show",
+            "awg0",
+            "peers",
         ],
         runner=runner,
     )
-    inspect_fields = (
-        inspect_bytes.decode("utf-8", errors="strict").strip().split("|", 1)
+    temp_bytes = run_checked_command(
+        [
+            "/usr/bin/docker",
+            "exec",
+            container_id,
+            "/bin/bash",
+            "-c",
+            'shopt -s nullglob; for f in /tmp/*.tmp; do [ -f "$f" ] && printf \'%s\\0\' "${f##*/}"; done',
+        ],
+        runner=runner,
     )
-    if len(inspect_fields) != 2 or not inspect_fields[0].isdigit():
-        raise ValueError("container inspect observation differs")
-    listener_bytes = run_checked_command(["/usr/bin/ss", "-H", "-lntu"], runner=runner)
-    ipv4_policy = run_checked_command(["/usr/sbin/iptables-save"], runner=runner)
-    ipv6_policy = run_checked_command(["/usr/sbin/ip6tables-save"], runner=runner)
-    policy_loaded = (
-        run_checked_command(
-            ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],
-            runner=runner,
-        )
-        .decode("utf-8", errors="strict")
-        .strip()
-        == "active"
-    )
-    live_peer_lines = _read_utf8_lines(
-        run_checked_command(
-            ["/usr/bin/awg", "show", "all", "public-keys"], runner=runner
-        ),
-        "peer observation",
-    )
-    live_peers = sorted(_sha(line.encode("utf-8")) for line in live_peer_lines)
-    config_path = pathlib.Path(request["persistent_config_path"])
-    metadata_path = pathlib.Path(request["metadata_path"])
-    temporary_path = pathlib.Path(request["temporary_path"])
-    config_text = reader(config_path, 1048576).decode("utf-8", errors="strict")
+    try:
+        config_text = config_bytes.decode("utf-8", errors="strict")
+        clients_value = json.loads(clients_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("container state encoding differs") from exc
     _, blocks = _config_peer_blocks(config_text)
     persistent_peers = []
     for block in blocks:
@@ -478,60 +671,160 @@ def collect_server_snapshot(
     persistent_peers.sort()
     if len(set(persistent_peers)) != len(persistent_peers):
         raise ValueError("persistent peer identity is ambiguous")
-    metadata_value = json.loads(
-        reader(metadata_path, 1048576).decode("utf-8", errors="strict")
+    rows, _ = _metadata_rows(clients_value)
+    metadata_peers = sorted(_row_fingerprint(item) for item in rows)
+    live_peers = sorted(
+        _public_key_fingerprint(line)
+        for line in _read_utf8_lines(live_bytes, "peer observation")
     )
-    rows, _ = _metadata_rows(metadata_value)
-    metadata_peers = sorted(_row_fingerprint(row) for row in rows)
-    peer_classes: dict[str, str] = {}
-    for row in rows:
-        fingerprint = _row_fingerprint(row)
-        role = row.get("role")
-        if role not in {"baseline", "admin", "guest"} or fingerprint in peer_classes:
-            raise ValueError("peer metadata classification differs")
-        peer_classes[fingerprint] = role
-    leftovers = [path.name for path in lister(temporary_path.parent)]
-    candidate_leftovers = sum("candidate" in name for name in leftovers)
-    atomic_leftovers = sum(".p3-next-" in name for name in leftovers)
-    temporary_leftovers = int(temporary_path.name in leftovers)
-    firewall_identity = _sha(ipv4_policy + b"\0" + ipv6_policy)
-    return {
+    if persistent_peers != live_peers or persistent_peers != metadata_peers:
+        raise ValueError("peer set convergence differs")
+    try:
+        temp_names = [
+            value.decode("utf-8", errors="strict")
+            for value in temp_bytes.split(b"\0")
+            if value
+        ]
+    except UnicodeDecodeError as exc:
+        raise ValueError("temporary name encoding differs") from exc
+    if len(temp_names) != len(set(temp_names)) or any(
+        not re.fullmatch(r"[A-Za-z0-9._-]+\.tmp", name) for name in temp_names
+    ):
+        raise ValueError("temporary name shape differs")
+    listener_bytes = run_checked_command(["/usr/bin/ss", "-H", "-lntu"], runner=runner)
+    listener_count, listener_hash = _listener_identity(listener_bytes)
+    ipv4_policy = _normalize_policy(
+        run_checked_command(["/usr/sbin/iptables-save"], runner=runner)
+    )
+    ipv6_policy = _normalize_policy(
+        run_checked_command(["/usr/sbin/ip6tables-save"], runner=runner)
+    )
+    nft_policy = _normalize_nft(
+        run_checked_command(["/usr/sbin/nft", "list", "ruleset"], runner=runner)
+    )
+    policy_state = (
+        run_checked_command(
+            ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],
+            runner=runner,
+        )
+        .decode("utf-8", errors="strict")
+        .strip()
+    )
+    host_policy_hash = _sha(ipv4_policy)
+    ipv6_policy_hash = _sha(ipv6_policy)
+    firewall_hash = _sha(
+        {
+            "host_policy_sha256": host_policy_hash,
+            "ipv6_policy_sha256": ipv6_policy_hash,
+            "nft_policy_sha256": _sha(nft_policy),
+        }
+    )
+    snapshot = {
         "container_count": 1,
         "container_running": True,
         "container_identity_sha256": _sha(container_id.encode("utf-8")),
-        "image_identity_sha256": _sha((image + "|" + inspect_fields[1]).encode()),
-        "container_restart_count": int(inspect_fields[0]),
-        "udp_publication_count": int("38556" in ports and "udp" in ports.lower()),
-        "udp_publication_sha256": _sha(ports.encode("utf-8")),
-        "public_listener_class_count": len(
-            _read_utf8_lines(listener_bytes, "listener")
+        "image_identity_sha256": _sha(
+            {"image_id": image_id, "repo_digests": sorted(digests)}
         ),
-        "listener_identity_sha256": _sha(listener_bytes),
-        "host_policy_loaded": policy_loaded,
-        "host_policy_sha256": _sha(ipv4_policy),
-        "ipv6_non_mutation": _sha(ipv6_policy)
-        == request["expected_ipv6_policy_sha256"],
-        "ipv6_policy_sha256": _sha(ipv6_policy),
+        "container_restart_count": restart_count,
+        "udp_publication_count": 1,
+        "udp_publication_sha256": publication_hash,
+        "public_listener_class_count": listener_count,
+        "listener_identity_sha256": listener_hash,
+        "host_policy_loaded": policy_state == "active",
+        "host_policy_sha256": host_policy_hash,
+        "ipv6_non_mutation": ipv6_policy_hash == request["expected_ipv6_policy_sha256"],
+        "ipv6_policy_sha256": ipv6_policy_hash,
         "peer_fingerprint_sha256": live_peers,
-        "peer_classes": peer_classes,
+        "persistent_config_sha256": _sha(config_bytes),
         "persistent_peer_set_sha256": _sha(persistent_peers),
         "live_peer_set_sha256": _sha(live_peers),
         "metadata_peer_set_sha256": _sha(metadata_peers),
-        "candidate_leftover_count": candidate_leftovers,
-        "temporary_leftover_count": temporary_leftovers,
-        "atomic_leftover_count": atomic_leftovers,
-        "firewall_identity_sha256": firewall_identity,
+        "metadata_sha256": _sha(clients_bytes),
+        "candidate_leftover_count": sum("candidate" in name for name in temp_names),
+        "temporary_leftover_count": len(temp_names),
+        "atomic_leftover_count": sum(".p3-next-" in name for name in temp_names),
+        "firewall_identity_sha256": firewall_hash,
+        "temporary_state_sha256": _sha(sorted(temp_names)),
         "payload_sha256": own_payload_sha256(),
         "protocol_sha256": public_protocol_sha256(),
     }
+    snapshot["runtime_identity_sha256"] = _sha(
+        {
+            name: snapshot[name]
+            for name in (
+                "container_count",
+                "container_running",
+                "container_identity_sha256",
+                "image_identity_sha256",
+                "container_restart_count",
+                "udp_publication_count",
+                "udp_publication_sha256",
+                "public_listener_class_count",
+                "listener_identity_sha256",
+                "firewall_identity_sha256",
+                "host_policy_loaded",
+                "host_policy_sha256",
+                "ipv6_non_mutation",
+                "ipv6_policy_sha256",
+            )
+        }
+    )
+    return snapshot
+
+
+def server_baseline_sha256(snapshot: dict[str, Any]) -> str:
+    if not isinstance(snapshot, dict) or set(snapshot) != set(SERVER_BASELINE_KEYS):
+        raise ValueError("server snapshot schema differs")
+    for name in (
+        "container_count",
+        "container_restart_count",
+        "udp_publication_count",
+        "public_listener_class_count",
+        "candidate_leftover_count",
+        "temporary_leftover_count",
+        "atomic_leftover_count",
+    ):
+        if isinstance(snapshot[name], bool) or not isinstance(snapshot[name], int):
+            raise TypeError(f"server {name} type differs")
+    for name in ("container_running", "host_policy_loaded", "ipv6_non_mutation"):
+        if not isinstance(snapshot[name], bool):
+            raise TypeError(f"server {name} type differs")
+    for name in (
+        "container_identity_sha256",
+        "firewall_identity_sha256",
+        "host_policy_sha256",
+        "image_identity_sha256",
+        "ipv6_policy_sha256",
+        "listener_identity_sha256",
+        "live_peer_set_sha256",
+        "metadata_peer_set_sha256",
+        "metadata_sha256",
+        "payload_sha256",
+        "persistent_config_sha256",
+        "persistent_peer_set_sha256",
+        "protocol_sha256",
+        "runtime_identity_sha256",
+        "temporary_state_sha256",
+        "udp_publication_sha256",
+    ):
+        if not _is_sha256(snapshot[name]):
+            raise ValueError(f"server {name} differs")
+    peers = snapshot["peer_fingerprint_sha256"]
+    if (
+        not isinstance(peers, list)
+        or len(peers) > 1024
+        or len(set(peers)) != len(peers)
+        or any(not _is_sha256(peer) for peer in peers)
+    ):
+        raise ValueError("server peer set schema differs")
+    canonical = dict(snapshot)
+    canonical["peer_fingerprint_sha256"] = sorted(peers)
+    return _sha(canonical)
 
 
 def _server_identity(snapshot: dict[str, Any]) -> str:
-    try:
-        selected = {name: snapshot[name] for name in SERVER_IDENTITY_KEYS}
-    except KeyError as exc:
-        raise ValueError("server snapshot schema differs") from exc
-    return _sha(selected)
+    return server_baseline_sha256(snapshot)
 
 
 def _require_snapshot_hash(snapshot: dict[str, Any], name: str) -> str:
@@ -544,6 +837,7 @@ def _require_snapshot_hash(snapshot: dict[str, Any], name: str) -> str:
 def _validate_baseline_snapshot(
     request: dict[str, Any], snapshot: dict[str, Any]
 ) -> dict[str, Any]:
+    server_baseline_sha256(snapshot)
     if snapshot.get("container_count") != 1:
         raise ValueError("container count differs")
     if snapshot.get("container_running") is not True:
@@ -733,15 +1027,11 @@ def _candidate_state(
     if not delta:
         return "wait", None
     candidate = next(iter(delta))
-    classes = snapshot.get("peer_classes")
-    if not isinstance(classes, dict) or classes.get(candidate) != operation:
-        return "invalid", None
     return "candidate", candidate
 
 
 def _guard_snapshot_identity(snapshot: dict[str, Any]) -> str:
     selected = {name: snapshot.get(name) for name in SERVER_IDENTITY_KEYS}
-    selected["peer_classes"] = snapshot.get("peer_classes")
     return _sha(selected)
 
 
@@ -897,6 +1187,60 @@ ROLLBACK_OBSERVATION_KEYS = {
     "runtime_identity_sha256",
     "prepared_syncconf_sha256",
 }
+
+CONTAINER_CONFIG_PATH = "/opt/amnezia/awg/awg0.conf"
+CONTAINER_CLIENTS_PATH = "/opt/amnezia/awg/clientsTable"
+CONTAINER_INTERFACE = "awg0"
+
+
+def container_staging_paths(nonce: str) -> tuple[str, str]:
+    if not _is_sha256(nonce):
+        raise ValueError("rollback nonce differs")
+    token = nonce[:32]
+    root = "/opt/amnezia/awg/.p3-next-" + token
+    return root + ".conf", root + ".clients"
+
+
+def container_writer_arguments(
+    container_id: str, target: str, staging: str, byte_count: int
+) -> list[str]:
+    if (
+        not isinstance(container_id, str)
+        or not container_id
+        or target not in {CONTAINER_CONFIG_PATH, CONTAINER_CLIENTS_PATH}
+        or re.fullmatch(
+            r"/opt/amnezia/awg/\.p3-next-[0-9a-f]{32}\.(?:conf|clients)", staging
+        )
+        is None
+        or (target == CONTAINER_CONFIG_PATH) != staging.endswith(".conf")
+        or isinstance(byte_count, bool)
+        or not isinstance(byte_count, int)
+        or byte_count < 1
+        or byte_count > MAX_COMMAND_BYTES
+    ):
+        raise ValueError("container writer arguments differ")
+    program = (
+        "set -euo pipefail; target=$1; stage=$2; count=$3; "
+        '[ ! -e "$stage" ]; trap \'rm -f -- "$stage"\' EXIT; '
+        'mode=$(stat -c %a -- "$target"); owner=$(stat -c %u:%g -- "$target"); '
+        '(umask 077; set -o noclobber; cat >"$stage"); '
+        '[ $(stat -c %s -- "$stage") -eq "$count" ]; '
+        'chown "$owner" -- "$stage"; chmod "$mode" -- "$stage"; sync -f "$stage" 2>/dev/null || sync; '
+        'mv -f -- "$stage" "$target"; trap - EXIT'
+    )
+    return [
+        "/usr/bin/docker",
+        "exec",
+        "-i",
+        container_id,
+        "/bin/bash",
+        "-c",
+        program,
+        "p3-writer",
+        target,
+        staging,
+        str(byte_count),
+    ]
 
 
 def rollback_expected_observation(
@@ -1140,223 +1484,322 @@ def _block_fingerprint(block: list[str]) -> str | None:
             values.append(line.split("=", 1)[1].strip())
     if len(values) != 1:
         return None
-    return _sha(values[0].encode("utf-8"))
+    return _public_key_fingerprint(values[0])
 
 
 def _metadata_rows(value: Any) -> tuple[list[dict[str, Any]], str]:
-    if isinstance(value, list):
-        rows = value
-        shape = "list"
-    elif (
-        isinstance(value, dict)
-        and set(value) == {"peers"}
-        and isinstance(value["peers"], list)
-    ):
-        rows = value["peers"]
-        shape = "object"
-    else:
-        raise ValueError("emergency rollback metadata schema differs")
-    if any(not isinstance(row, dict) or "public_key" not in row for row in rows):
-        raise ValueError("emergency rollback metadata row differs")
-    return rows, shape
+    if not isinstance(value, list):
+        raise TypeError("emergency rollback metadata schema differs")
+    rows = value
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"clientId", "userData"}
+            or not isinstance(row.get("clientId"), str)
+            or not isinstance(row.get("userData"), dict)
+        ):
+            raise ValueError("emergency rollback metadata row differs")
+    return rows, "list"
 
 
 def _row_fingerprint(row: dict[str, Any]) -> str:
-    key = row.get("public_key")
+    key = row.get("clientId")
     if not isinstance(key, str) or not key:
         raise ValueError("emergency rollback metadata key differs")
-    return _sha(key.encode("utf-8"))
+    return _public_key_fingerprint(key)
 
 
-def _atomic_replace(path: pathlib.Path, data: bytes) -> None:
-    current = path.lstat()
-    temporary = path.with_name(path.name + ".p3-next-" + os.urandom(16).hex())
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-        stat.S_IMODE(current.st_mode),
-    )
-    try:
+class ContainerRollbackFilesystem:
+    def __init__(
+        self,
+        runner: CommandRunner = _default_command_runner,
+        stream_runner: StreamCommandRunner = _default_stream_command_runner,
+        recovery_root: pathlib.Path = pathlib.Path("/run/home-gateway-p3-peer-guard"),
+    ) -> None:
+        self.runner = runner
+        self.stream_runner = stream_runner
+        self.recovery_root = recovery_root
+        self.container_id: str | None = None
+        self.states: dict[str, dict[str, pathlib.Path | str | bool]] = {}
+
+    def _run(self, arguments: Sequence[str], maximum: int = MAX_COMMAND_BYTES) -> bytes:
+        return run_checked_command(arguments, runner=self.runner, maximum_bytes=maximum)
+
+    def _resolve_container(self) -> str:
+        ids = _read_utf8_lines(
+            self._run(
+                ["/usr/bin/docker", "ps", "-q", "--filter", "name=^/amnezia-awg2$"]
+            ),
+            "rollback container",
+        )
+        names = _read_utf8_lines(
+            self._run(["/usr/bin/docker", "ps", "-a", "--format", "{{.Names}}"]),
+            "rollback container names",
+        )
+        if len(ids) != 1 or names.count("amnezia-awg2") != 1:
+            raise ValueError("rollback container count differs")
+        if self.container_id is not None and self.container_id != ids[0]:
+            raise ValueError("rollback container identity changed")
+        self.container_id = ids[0]
+        return ids[0]
+
+    def _read_container(self, container_id: str, path: str) -> bytes:
+        if path not in {CONTAINER_CONFIG_PATH, CONTAINER_CLIENTS_PATH}:
+            raise ValueError("rollback container path differs")
+        return self._run(["/usr/bin/docker", "exec", container_id, "cat", path])
+
+    def _temporary_bytes(self, container_id: str, path: str) -> bytes | None:
+        if re.fullmatch(r"/tmp/[A-Za-z0-9._-]+\.tmp", path) is None:
+            raise ValueError("rollback temporary path differs")
+        result = self._run(
+            [
+                "/usr/bin/docker",
+                "exec",
+                container_id,
+                "/bin/bash",
+                "-c",
+                'if [ -e "$1" ]; then cat -- "$1"; else printf P3_ABSENT; fi',
+                "p3-temp-read",
+                path,
+            ]
+        )
+        return None if result == b"P3_ABSENT" else result
+
+    def _preflight(self, action: dict[str, Any], container_id: str) -> None:
+        stages = container_staging_paths(action["nonce"])
+        self._run(
+            [
+                "/usr/bin/docker",
+                "exec",
+                container_id,
+                "/bin/bash",
+                "-c",
+                (
+                    'set -eu; for p in /bin/bash /usr/bin/awg /usr/bin/awg-quick /usr/bin/cat /usr/bin/mv /usr/bin/stat /usr/bin/sync; do [ -x "$p" ]; done; '
+                    '[ -f "$1" ] && [ ! -L "$1" ]; [ -f "$2" ] && [ ! -L "$2" ]; '
+                    'shopt -s nullglob; foreign=(/opt/amnezia/awg/.p3-next-*); [ ${#foreign[@]} -eq 0 ]; [ ! -e "$3" ]; [ ! -e "$4" ]'
+                ),
+                "p3-preflight",
+                CONTAINER_CONFIG_PATH,
+                CONTAINER_CLIENTS_PATH,
+                stages[0],
+                stages[1],
+            ]
+        )
+
+    def _observation(self, action: dict[str, Any]) -> dict[str, Any]:
+        container_id = self._resolve_container()
+        config = self._read_container(container_id, CONTAINER_CONFIG_PATH)
+        clients = self._read_container(container_id, CONTAINER_CLIENTS_PATH)
+        live = sorted(
+            _public_key_fingerprint(line)
+            for line in _read_utf8_lines(
+                self._run(
+                    [
+                        "/usr/bin/docker",
+                        "exec",
+                        container_id,
+                        "/usr/bin/awg",
+                        "show",
+                        CONTAINER_INTERFACE,
+                        "peers",
+                    ]
+                ),
+                "rollback live peer observation",
+            )
+        )
+        temporary = self._temporary_bytes(container_id, action["temporary_path"])
+        prepared = self._run(
+            [
+                "/usr/bin/docker",
+                "exec",
+                container_id,
+                "/usr/bin/awg-quick",
+                "strip",
+                CONTAINER_CONFIG_PATH,
+            ]
+        )
+        runtime = _sha(
+            [
+                _sha(self._run(["/usr/bin/docker", "inspect", container_id])),
+                _sha(self._run(["/usr/bin/docker", "port", container_id, "38556/udp"])),
+                _sha(self._run(["/usr/bin/ss", "-H", "-lntu"])),
+                normalized_policy_sha256(self._run(["/usr/sbin/iptables-save"])),
+                normalized_policy_sha256(self._run(["/usr/sbin/ip6tables-save"])),
+            ]
+        )
+        return {
+            "schema": "home-gateway/p3-peer-rollback-observation/v2",
+            "candidate_receipt_sha256": action["candidate_receipt_sha256"],
+            "candidate_fingerprint_sha256": action["candidate_fingerprint_sha256"],
+            "peer_fingerprint_sha256": live,
+            "peer_set_sha256": _sha(live),
+            "persistent_config_sha256": _sha(config),
+            "live_peer_set_sha256": _sha(live),
+            "metadata_sha256": _sha(clients),
+            "temporary_state_sha256": _sha(
+                b"ABSENT" if temporary is None else temporary
+            ),
+            "runtime_identity_sha256": runtime,
+            "prepared_syncconf_sha256": _sha(prepared),
+        }
+
+    def _write_backup(self, path: pathlib.Path, data: bytes) -> None:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "wb", closefd=True) as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.chown(temporary, current.st_uid, current.st_gid)
-        os.replace(temporary, path)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_descriptor)
-        finally:
-            os.close(directory_descriptor)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+
+    def _write_container(
+        self, container_id: str, target: str, stage: str, data: bytes
+    ) -> None:
+        run_checked_stream_command(
+            container_writer_arguments(container_id, target, stage, len(data)),
+            data,
+            runner=self.stream_runner,
+        )
+
+    def syncconf(self, _path: pathlib.Path) -> None:
+        container_id = self._resolve_container()
+        self._run(
+            [
+                "/usr/bin/docker",
+                "exec",
+                container_id,
+                "/bin/bash",
+                "-c",
+                "exec /usr/bin/awg syncconf awg0 <(/usr/bin/awg-quick strip /opt/amnezia/awg/awg0.conf)",
+            ]
+        )
+
+    def __call__(self, action: dict[str, Any]) -> dict[str, Any]:
+        mode = action["action"]
+        if mode in {"inspect", "verify", "verify-recovery"}:
+            return self._observation(action)
+        if mode == "cleanup":
+            state = self.states.get(action["recovery_state"])
+            if state is None:
+                raise ValueError("emergency rollback recovery state differs")
+            container_id = self._resolve_container()
+            stages = container_staging_paths(action["nonce"])
+            self._run(
+                [
+                    "/usr/bin/docker",
+                    "exec",
+                    container_id,
+                    "/bin/bash",
+                    "-c",
+                    'rm -f -- "$1" "$2"; [ ! -e "$1" ] && [ ! -e "$2" ]',
+                    "p3-stage-cleanup",
+                    stages[0],
+                    stages[1],
+                ]
+            )
+            for name in ("config", "clients", "temporary"):
+                value = state.get(name)
+                if isinstance(value, pathlib.Path):
+                    value.unlink(missing_ok=True)
+            self.states.pop(action["recovery_state"], None)
+            return {"cleaned": True}
+        if mode == "recover":
+            state = self.states.get(action["recovery_state"])
+            if state is None:
+                raise ValueError("emergency rollback recovery state differs")
+            container_id = self._resolve_container()
+            stages = container_staging_paths(action["nonce"])
+            self._write_container(
+                container_id,
+                CONTAINER_CONFIG_PATH,
+                stages[0],
+                _read_atomic_file(state["config"], MAX_COMMAND_BYTES),
+            )
+            self._write_container(
+                container_id,
+                CONTAINER_CLIENTS_PATH,
+                stages[1],
+                _read_atomic_file(state["clients"], MAX_COMMAND_BYTES),
+            )
+            return {
+                "recovered": True,
+                "recovery_syncconf_path": action["syncconf_path"],
+            }
+        if mode != "remove":
+            raise ValueError("emergency rollback filesystem action differs")
+        container_id = self._resolve_container()
+        self._preflight(action, container_id)
+        _require_rollback_observation(
+            self._observation(action),
+            rollback_expected_observation(action, phase="pre"),
+            "apply-time pre",
+        )
+        config = self._read_container(container_id, CONTAINER_CONFIG_PATH)
+        clients = self._read_container(container_id, CONTAINER_CLIENTS_PATH)
+        prefix, blocks = _config_peer_blocks(config.decode("utf-8", errors="strict"))
+        rows, _ = _metadata_rows(json.loads(clients.decode("utf-8", errors="strict")))
+        candidate = action["candidate_fingerprint_sha256"]
+        matching_blocks = [
+            block for block in blocks if _block_fingerprint(block) == candidate
+        ]
+        matching_rows = [row for row in rows if _row_fingerprint(row) == candidate]
+        if len(matching_blocks) != 1 or len(matching_rows) != 1:
+            raise ValueError("candidate identity differs before removal")
+        new_config = "".join(
+            prefix
+            + [
+                line
+                for block in blocks
+                if block not in matching_blocks
+                for line in block
+            ]
+        ).encode()
+        new_clients = _canonical([row for row in rows if row not in matching_rows])
+        token = os.urandom(32).hex()
+        config_backup = self.recovery_root / (".p3-recovery-" + token + ".conf")
+        clients_backup = self.recovery_root / (".p3-recovery-" + token + ".clients")
+        temporary_backup = self.recovery_root / (".p3-recovery-" + token + ".tmp")
+        self._write_backup(config_backup, config)
+        self._write_backup(clients_backup, clients)
+        temporary = self._temporary_bytes(container_id, action["temporary_path"])
+        if temporary is not None:
+            self._write_backup(temporary_backup, temporary)
+        state: dict[str, pathlib.Path | str | bool] = {
+            "config": config_backup,
+            "clients": clients_backup,
+            "temporary": temporary_backup if temporary is not None else False,
+        }
+        self.states[token] = state
+        stages = container_staging_paths(action["nonce"])
+        self._write_container(
+            container_id, CONTAINER_CONFIG_PATH, stages[0], new_config
+        )
+        self._write_container(
+            container_id, CONTAINER_CLIENTS_PATH, stages[1], new_clients
+        )
+        self._run(
+            [
+                "/usr/bin/docker",
+                "exec",
+                container_id,
+                "/bin/bash",
+                "-c",
+                'rm -f -- "$1"',
+                "p3-temp-remove",
+                action["temporary_path"],
+            ]
+        )
+        return {"removed": True, "recovery_state": token}
 
 
-_RECOVERY_STATES: dict[str, dict[str, pathlib.Path | None]] = {}
-
-
-def _rollback_runtime_identity() -> str:
-    observations = []
-    for arguments in (
-        [
-            "/usr/bin/docker",
-            "ps",
-            "--filter",
-            "status=running",
-            "--format",
-            "{{.ID}}|{{.Image}}|{{.Ports}}",
-        ],
-        ["/usr/bin/ss", "-H", "-lntu"],
-        ["/usr/sbin/iptables-save"],
-        ["/usr/sbin/ip6tables-save"],
-        ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],
-    ):
-        observations.append(_sha(run_checked_command(arguments)))
-    return _sha(observations)
-
-
-def _system_rollback_observation(action: dict[str, Any]) -> dict[str, Any]:
-    config_path = pathlib.Path(action["persistent_config_path"])
-    metadata_path = pathlib.Path(action["metadata_path"])
-    temporary_path = pathlib.Path(action["temporary_path"])
-    syncconf_path = pathlib.Path(action["syncconf_path"])
-    live_keys = _read_utf8_lines(
-        run_checked_command(["/usr/bin/awg", "show", "all", "public-keys"]),
-        "rollback live peer observation",
-    )
-    peers = sorted(_sha(key.encode("utf-8")) for key in live_keys)
-    temporary_state = (
-        _sha(_read_atomic_file(temporary_path, 65536))
-        if temporary_path.exists()
-        else _sha(b"ABSENT")
-    )
-    return {
-        "schema": "home-gateway/p3-peer-rollback-observation/v2",
-        "candidate_receipt_sha256": action["candidate_receipt_sha256"],
-        "candidate_fingerprint_sha256": action["candidate_fingerprint_sha256"],
-        "peer_fingerprint_sha256": peers,
-        "peer_set_sha256": _sha(peers),
-        "persistent_config_sha256": _sha(_read_atomic_file(config_path, 1048576)),
-        "live_peer_set_sha256": _sha(peers),
-        "metadata_sha256": _sha(_read_atomic_file(metadata_path, 1048576)),
-        "temporary_state_sha256": temporary_state,
-        "runtime_identity_sha256": _rollback_runtime_identity(),
-        "prepared_syncconf_sha256": _sha(_read_atomic_file(syncconf_path, 1048576)),
-    }
-
-
-def _backup_exact_file(path: pathlib.Path, backup: pathlib.Path) -> None:
-    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    os.close(descriptor)
-    try:
-        shutil.copy2(path, backup)
-    except Exception:
-        backup.unlink(missing_ok=True)
-        raise
+_SYSTEM_ROLLBACK = ContainerRollbackFilesystem()
 
 
 def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
-    candidate = action["candidate_fingerprint_sha256"]
-    config_path = pathlib.Path(action["persistent_config_path"])
-    metadata_path = pathlib.Path(action["metadata_path"])
-    temporary_path = pathlib.Path(action["temporary_path"])
-    if action["action"] in {"inspect", "verify", "verify-recovery"}:
-        return _system_rollback_observation(action)
-    if action["action"] == "cleanup":
-        state = _RECOVERY_STATES.get(action["recovery_state"])
-        if state is None:
-            raise ValueError("emergency rollback recovery state differs")
-        for backup in state.values():
-            if backup is not None:
-                backup.unlink(missing_ok=True)
-        _RECOVERY_STATES.pop(action["recovery_state"], None)
-        return {"cleaned": True}
-    if action["action"] == "recover":
-        state = _RECOVERY_STATES.get(action["recovery_state"])
-        if state is None:
-            raise ValueError("emergency rollback recovery state differs")
-        os.replace(state["config"], config_path)
-        os.replace(state["metadata"], metadata_path)
-        if state["temporary"] is None:
-            temporary_path.unlink(missing_ok=True)
-        else:
-            os.replace(state["temporary"], temporary_path)
-        return {
-            "recovered": True,
-            "recovery_syncconf_path": str(state["syncconf"]),
-        }
-    if action["action"] != "remove":
-        raise ValueError("emergency rollback filesystem action differs")
-    expected_pre = rollback_expected_observation(action, phase="pre")
-    _require_rollback_observation(
-        _system_rollback_observation(action), expected_pre, "apply-time pre"
-    )
-    config_text = _read_atomic_file(config_path, 1048576).decode(
-        "utf-8", errors="strict"
-    )
-    metadata = json.loads(
-        _read_atomic_file(metadata_path, 1048576).decode("utf-8", errors="strict")
-    )
-    prefix, blocks = _config_peer_blocks(config_text)
-    rows, shape = _metadata_rows(metadata)
-    matching_blocks = [
-        block for block in blocks if _block_fingerprint(block) == candidate
-    ]
-    matching_rows = [row for row in rows if _row_fingerprint(row) == candidate]
-    if len(matching_blocks) != 1 or len(matching_rows) != 1:
-        raise ValueError("candidate identity differs before removal")
-    kept_blocks = [block for block in blocks if _block_fingerprint(block) != candidate]
-    config_bytes = "".join(
-        prefix + [line for block in kept_blocks for line in block]
-    ).encode()
-    kept_rows = [row for row in rows if _row_fingerprint(row) != candidate]
-    metadata_value: Any = kept_rows if shape == "list" else {"peers": kept_rows}
-    token = os.urandom(32).hex()
-    recovery_root = temporary_path.parent
-    config_backup = recovery_root / (".recovery-" + token + ".conf")
-    metadata_backup = recovery_root / (".recovery-" + token + ".json")
-    temporary_backup = recovery_root / (".recovery-" + token + ".tmp")
-    syncconf_backup = recovery_root / (".recovery-" + token + ".syncconf")
-    _backup_exact_file(config_path, config_backup)
-    try:
-        _backup_exact_file(metadata_path, metadata_backup)
-        _backup_exact_file(config_path, syncconf_backup)
-        if temporary_path.exists():
-            _backup_exact_file(temporary_path, temporary_backup)
-            saved_temporary: pathlib.Path | None = temporary_backup
-        else:
-            saved_temporary = None
-        state = {
-            "config": config_backup,
-            "metadata": metadata_backup,
-            "temporary": saved_temporary,
-            "syncconf": syncconf_backup,
-        }
-        _atomic_replace(config_path, config_bytes)
-        _atomic_replace(metadata_path, _canonical(metadata_value))
-        temporary_path.unlink(missing_ok=True)
-        _RECOVERY_STATES[token] = state
-        return {"removed": True, "recovery_state": token}
-    except Exception:
-        if config_backup.exists():
-            os.replace(config_backup, config_path)
-        if metadata_backup.exists():
-            os.replace(metadata_backup, metadata_path)
-        if temporary_backup.exists():
-            os.replace(temporary_backup, temporary_path)
-        syncconf_backup.unlink(missing_ok=True)
-        raise
+    return _SYSTEM_ROLLBACK(action)
 
 
 def _system_syncconf(path: pathlib.Path) -> None:
-    if not path.is_absolute() or pathlib.PurePosixPath(
-        str(path)
-    ).parent != pathlib.PurePosixPath("/run/home-gateway-p3-peer-guard"):
-        raise ValueError("syncconf path differs")
-    run_checked_command(["/usr/bin/awg", "syncconf", "awg0", str(path)])
+    _SYSTEM_ROLLBACK.syncconf(path)
 
 
 def main() -> int:

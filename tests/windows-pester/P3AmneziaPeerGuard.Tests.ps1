@@ -166,6 +166,42 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $calls | Should -Be 0
     }
 
+    It 'binds management classification to the exact full-access operation context rather than a display name' {
+        $now = [DateTime]::Parse('2026-08-31T12:00:00Z').ToUniversalTime()
+        $receipt = New-P3ManagementOperationContextReceipt -ManifestSHA256 ('1' * 64) -CandidateReceiptSHA256 ('2' * 64) `
+            -ClientBinarySHA256 ('3' * 64) -ClientVersionSHA256 ('4' * 64) -SourceMappingSHA256 ('5' * 64) `
+            -UiActionClassSHA256 ('6' * 64) -SelectedEntrySHA256 ('7' * 64) -CandidateNonceSHA256 ('8' * 64) `
+            -PrePeerSetSHA256 ('9' * 64) -PostPeerSetSHA256 ('a' * 64) -CandidateFingerprintSHA256 ('b' * 64) `
+            -RuntimeIdentitySHA256 ('c' * 64) -NowUtc $now
+        $receipt.classification | Should -BeExactly 'source_pinned_management_operation'
+        $receipt.owner_observed | Should -BeTrue
+        $receipt.server_role_confirmed | Should -BeFalse
+        Test-P3ManagementOperationContextReceipt -Receipt $receipt -ExpectedManifestSHA256 ('1' * 64) `
+            -ExpectedCandidateReceiptSHA256 ('2' * 64) -ExpectedUiActionClassSHA256 ('6' * 64) -NowUtc $now.AddMinutes(1) |
+            Should -BeExactly $receipt
+        $receipt.ui_action_class_sha256 = ('0' * 64)
+        { Test-P3ManagementOperationContextReceipt -Receipt $receipt -ExpectedManifestSHA256 ('1' * 64) `
+                -ExpectedCandidateReceiptSHA256 ('2' * 64) -ExpectedUiActionClassSHA256 ('6' * 64) -NowUtc $now.AddMinutes(1) } |
+            Should -Throw '*operation context*'
+    }
+
+    It 'accepts Guest identity only from the protected profile derived X25519 public fingerprint' {
+        $now = [DateTime]::Parse('2026-08-31T12:00:00Z').ToUniversalTime()
+        $receipt = New-P3GuestProfileIdentityReceipt -ManifestSHA256 ('1' * 64) -CandidateReceiptSHA256 ('2' * 64) `
+            -ProfileSHA256 ('3' * 64) -ProfileFileIdentitySHA256 ('4' * 64) -ProfileAclIdentitySHA256 ('5' * 64) `
+            -CandidateNonceSHA256 ('6' * 64) -PrePeerSetSHA256 ('7' * 64) -PostPeerSetSHA256 ('8' * 64) `
+            -DerivedPublicFingerprintSHA256 ('9' * 64) -CandidateFingerprintSHA256 ('9' * 64) `
+            -RuntimeIdentitySHA256 ('a' * 64) -NowUtc $now
+        $receipt.raw_key_exposed | Should -BeFalse
+        Test-P3GuestProfileIdentityReceipt -Receipt $receipt -ExpectedManifestSHA256 ('1' * 64) `
+            -ExpectedCandidateReceiptSHA256 ('2' * 64) -ExpectedCandidateFingerprintSHA256 ('9' * 64) -NowUtc $now.AddMinutes(1) |
+            Should -BeExactly $receipt
+        $receipt.profile_acl_identity_sha256 = ('0' * 64)
+        { Test-P3GuestProfileIdentityReceipt -Receipt $receipt -ExpectedManifestSHA256 ('1' * 64) `
+                -ExpectedCandidateReceiptSHA256 ('2' * 64) -ExpectedCandidateFingerprintSHA256 ('9' * 64) `
+                -ExpectedProfileAclIdentitySHA256 ('5' * 64) -NowUtc $now.AddMinutes(1) } | Should -Throw '*profile identity*'
+    }
+
     It 'builds only fixed strict protocol v2 requests' {
         $nonce = 'A' * 64
         $request = New-P3RemoteRequest -Context $script:Context -Mode 'guard' -Operation 'guest' -Nonce $nonce

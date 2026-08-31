@@ -1,5 +1,7 @@
 # P3 Task 6A Pre-Live Guard Closure Implementation Plan
 
+> Superseded for storage, baseline, bootstrap, Cloud Firewall provenance, and Admin/Guest identity by `2026-08-31-p3-prelive-prerequisite-closure.md`. Retained as historical evidence only; it authorizes neither candidate generation nor execution.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the tracked, fail-closed pre-live package that proves the complete P3 server/Cloud Firewall/local baseline, installs one exact inert remote helper, guards one Admin or Guest graphical user interface (GUI) delta, and supplies nonce-bound client observation without performing a live action during implementation.

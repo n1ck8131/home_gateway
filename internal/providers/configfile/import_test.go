@@ -2,6 +2,7 @@ package configfile
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -14,6 +15,24 @@ import (
 
 	"github.com/vsevo/home-gateway/internal/tunnel"
 )
+
+func TestInterfacePublicFingerprintSHA256DerivesX25519PublicBytes(t *testing.T) {
+	config := importText(t, validConfig(t, "", "0.0.0.0/0"))
+	privateBytes, err := base64.StdEncoding.DecodeString(syntheticKey(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey, err := ecdh.X25519().NewPrivateKey(privateBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(privateKey.PublicKey().Bytes())
+	want := hex.EncodeToString(digest[:])
+	got := config.InterfacePublicFingerprintSHA256()
+	if got != want || got == hex.EncodeToString(privateBytes) || strings.Contains(fmt.Sprintf("%#v", config), syntheticKey(1)) {
+		t.Fatalf("public fingerprint contract differs: got=%q want=%q", got, want)
+	}
+}
 
 func TestImportFilePinnedBindsParsedBytesToLowercaseSHA256(t *testing.T) {
 	path := writeConfig(t, validConfig(t, "", "0.0.0.0/0, ::/0"))

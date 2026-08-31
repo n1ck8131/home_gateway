@@ -1402,7 +1402,9 @@ def run_emergency_rollback(
             if cleaned != {"cleaned": True}:
                 raise RuntimeError("recovery cleanup differs")
         except Exception as exc:
-            raise RuntimeError("ROLLBACK_UNPROVEN: interrupted recovery failed") from exc
+            raise RuntimeError(
+                "ROLLBACK_UNPROVEN: interrupted recovery failed"
+            ) from exc
         raise RuntimeError("RECOVERED_INTERRUPTED: retry requires a new approval")
     inspected = filesystem({"action": "inspect", **file_context})
     _require_rollback_observation(
@@ -1835,9 +1837,9 @@ class ContainerRollbackFilesystem:
             if _sha(values["temporary"]) != manifest["temporary_backup_sha256"]:
                 raise ValueError("emergency rollback recovery backup differs")
         else:
-            if paths["temporary"].exists() or manifest["temporary_backup_sha256"] != _sha(
-                b"ABSENT"
-            ):
+            if paths["temporary"].exists() or manifest[
+                "temporary_backup_sha256"
+            ] != _sha(b"ABSENT"):
                 raise ValueError("emergency rollback recovery backup differs")
             values["temporary"] = None
         return {

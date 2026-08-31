@@ -34,17 +34,11 @@ class PreliveServerObserverTests(unittest.TestCase):
                 self.subTest(message=message),
                 self.assertRaisesRegex(ValueError, message),
             ):
-                observer.read_attested_frame(
-                    io.BytesIO(changed), nonce, protocol, ipv6
-                )
+                observer.read_attested_frame(io.BytesIO(changed), nonce, protocol, ipv6)
         with self.assertRaisesRegex(ValueError, "nonce"):
-            observer.read_attested_frame(
-                io.BytesIO(frame), "2" * 64, protocol, ipv6
-            )
+            observer.read_attested_frame(io.BytesIO(frame), "2" * 64, protocol, ipv6)
         with self.assertRaisesRegex(ValueError, "protocol"):
-            observer.read_attested_frame(
-                io.BytesIO(frame), nonce, "5" * 64, ipv6
-            )
+            observer.read_attested_frame(io.BytesIO(frame), nonce, "5" * 64, ipv6)
 
     def test_observation_accepts_only_exact_sanitized_27_field_baseline(self):
         baseline = json.loads(

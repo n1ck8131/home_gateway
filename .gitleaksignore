@@ -2,3 +2,6 @@
 7c66842434de7273addbc09ac52a20c86ab4cf42:scripts/p35-canary.ps1:generic-api-key:27
 7c66842434de7273addbc09ac52a20c86ab4cf42:scripts/p35-bootstrap-elevated.ps1:generic-api-key:34
 f4b9f0398880dce65ffb54c7e3e83e169c8ccd07:tests/windows-pester/P35Canary.Tests.ps1:generic-api-key:145
+253f5402989af14ffd687c2f7345d231ce614e53:tests/windows-pester/P3PrelivePrerequisite.Tests.ps1:generic-api-key:99
+253f5402989af14ffd687c2f7345d231ce614e53:tests/windows-pester/P3PrelivePrerequisite.Tests.ps1:generic-api-key:108
+253f5402989af14ffd687c2f7345d231ce614e53:tests/windows-pester/P3PrelivePrerequisite.Tests.ps1:generic-api-key:308

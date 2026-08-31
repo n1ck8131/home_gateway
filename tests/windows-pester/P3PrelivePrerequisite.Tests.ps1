@@ -96,7 +96,7 @@ Describe 'P3 pre-live prerequisite boundary' {
             $knownHosts = Join-Path $Root 'known_hosts'
             $observerPayload = Join-Path $Root 'observer.py'
             [IO.Directory]::CreateDirectory($Root) | Out-Null
-            $hostKey = 'AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f'
+            $hostKey = 'AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f' # gitleaks:allow synthetic public test key, not a credential
             [IO.File]::WriteAllText($knownHosts, "192.0.2.10 ssh-ed25519 $hostKey`n", [Text.UTF8Encoding]::new($false))
             [IO.File]::WriteAllText($observerPayload, 'synthetic observer payload', [Text.UTF8Encoding]::new($false))
             $f.Baseline.payload_sha256 = (Get-FileHash $observerPayload).Hash.ToLowerInvariant()
@@ -105,7 +105,7 @@ Describe 'P3 pre-live prerequisite boundary' {
             $trust = [pscustomobject][ordered]@{
                 schema='home-gateway/p3-prelive-prerequisite-ssh-trust/v1'
                 ssh_host='192.0.2.10';ssh_user='homegateway';known_hosts_path=$knownHosts
-                known_hosts_sha256=(Get-FileHash $knownHosts).Hash.ToLowerInvariant();host_key_fingerprint_sha256='cfb2081423dfac1fcc8f8593d1ef587c68090f88aee7dd69a3e662fb04043559'
+                known_hosts_sha256=(Get-FileHash $knownHosts).Hash.ToLowerInvariant();host_key_fingerprint_sha256='cfb2081423dfac1fcc8f8593d1ef587c68090f88aee7dd69a3e662fb04043559' # gitleaks:allow synthetic public fingerprint, not a credential
                 git_ssh_agent_path=$agent.Manifest.git_ssh_agent_path;git_ssh_agent_sha256=$agent.Manifest.git_ssh_agent_sha256
                 git_ssh_add_path=$agent.Manifest.git_ssh_add_path;git_ssh_add_sha256=$agent.Manifest.git_ssh_add_sha256
                 git_ssh_path=$agent.Manifest.git_ssh_path;git_ssh_sha256=$agent.Manifest.git_ssh_sha256
@@ -305,7 +305,7 @@ Describe 'P3 pre-live prerequisite boundary' {
     It 'rejects a self-consistent foreign known-host pin before the SSH runner' {
         $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'foreign-known-host')
         $knownHosts = [string]$p.Trust.known_hosts_path
-        $hostKey = 'AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f'
+        $hostKey = 'AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f' # gitleaks:allow synthetic public test key, not a credential
         [IO.File]::WriteAllText($knownHosts,"192.0.2.11 ssh-ed25519 $hostKey`n",[Text.UTF8Encoding]::new($false))
         $p.Trust.known_hosts_sha256 = (Get-FileHash $knownHosts).Hash.ToLowerInvariant()
         $p.Fixture.Manifest.ssh_trust = $p.Trust

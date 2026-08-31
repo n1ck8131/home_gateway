@@ -5,8 +5,8 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $script:Launcher = Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1'
         . $script:Launcher
 
-        function New-TestContext {
-            $now = [DateTime]::UtcNow
+        function New-TestContext([DateTime]$NowUtc = [DateTime]::UtcNow) {
+            $now = $NowUtc.ToUniversalTime()
             return [pscustomobject]@{
                 ManifestSHA256 = ('1' * 64)
                 PayloadSHA256 = ('2' * 64)
@@ -39,6 +39,17 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
                         [pscustomobject]@{ authority_sha256 = ('f' * 64); source_cidr_sha256 = ('d' * 64) },
                         [pscustomobject]@{ authority_sha256 = ('0' * 64); source_cidr_sha256 = ('d' * 64) }
                     )
+                }
+                EgressReceipt = [pscustomobject]@{
+                    schema = 'home-gateway/p3-prelive-egress-receipt/v1'
+                    management_source_cidr_sha256 = ('d' * 64)
+                    observations = @(
+                        [pscustomobject]@{ authority_sha256 = ('e' * 64); source_cidr_sha256 = ('d' * 64); observed_at_utc = $now.AddSeconds(-12).ToString('o') },
+                        [pscustomobject]@{ authority_sha256 = ('f' * 64); source_cidr_sha256 = ('d' * 64); observed_at_utc = $now.AddSeconds(-11).ToString('o') },
+                        [pscustomobject]@{ authority_sha256 = ('0' * 64); source_cidr_sha256 = ('d' * 64); observed_at_utc = $now.AddSeconds(-10).ToString('o') }
+                    )
+                    observed_at_utc = $now.AddSeconds(-10).ToString('o')
+                    live_mutation_performed = $false
                 }
                 Agent = [pscustomobject]@{
                     schema = 'home-gateway/p3-ssh-agent-combined-receipt/v2'
@@ -124,6 +135,35 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
             & $case.Change
             { Test-P3PreliveInputs -Context $script:Context -NowUtc ([DateTime]::UtcNow) } | Should -Throw "*$($case.Name)*"
         }
+    }
+
+    It 'rejects stale future malformed or source-mutated egress evidence against one clock' {
+        $clock = [DateTime]::Parse('2026-08-31T12:00:00Z').ToUniversalTime()
+        $cases = @(
+            { param($context, $now) $context.EgressReceipt.observed_at_utc = $now.AddSeconds(-121).ToString('o') },
+            { param($context, $now) $context.EgressReceipt.observed_at_utc = $now.AddSeconds(2).ToString('o') },
+            { param($context, $now) $context.EgressReceipt.observations[1].observed_at_utc = $now.AddSeconds(-121).ToString('o') },
+            { param($context, $now) $context.EgressReceipt.observations[1].observed_at_utc = $now.AddSeconds(2).ToString('o') },
+            { param($context, $now) $context.EgressReceipt.management_source_cidr_sha256 = ('a' * 64) },
+            { param($context, $now) $context.EgressReceipt.observations[1].source_cidr_sha256 = ('a' * 64) },
+            { param($context, $now) $context.EgressReceipt.observations[1].authority_sha256 = ('a' * 64) },
+            { param($context, $now) $context.EgressReceipt | Add-Member -NotePropertyName extra -NotePropertyValue $true }
+        )
+
+        foreach ($change in $cases) {
+            $context = New-TestContext -NowUtc $clock
+            & $change $context $clock
+            { Test-P3PreliveInputs -Context $context -NowUtc $clock } | Should -Throw '*egress*'
+        }
+    }
+
+    It 'requires exact egress evidence before invoking a top-level remote runner' {
+        $script:Context.EgressReceipt.observations[0].source_cidr_sha256 = ('a' * 64)
+        $calls = 0
+        $request = New-P3RemoteRequest -Context $script:Context -Mode 'reconcile' -Operation '' -Nonce ('a' * 64)
+        { Invoke-P3BoundedJsonSsh -Context $script:Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner { $calls++ } } |
+            Should -Throw '*egress*'
+        $calls | Should -Be 0
     }
 
     It 'builds only fixed strict protocol v2 requests' {

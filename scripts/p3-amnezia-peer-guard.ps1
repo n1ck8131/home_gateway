@@ -53,6 +53,10 @@ $script:P3EmergencyReceiptProperties = @(
     'manifest_sha256', 'one_syncconf', 'payload_sha256', 'protocol_sha256', 'restored',
     'rollback_plan_sha256', 'schema', 'temporary_leftover_count'
 )
+$script:P3GuardEgressReceiptProperties = @(
+    'live_mutation_performed', 'management_source_cidr_sha256', 'observations', 'observed_at_utc', 'schema'
+)
+$script:P3GuardEgressObservationProperties = @('authority_sha256', 'observed_at_utc', 'source_cidr_sha256')
 
 function Get-P3GuardTextSHA256([string]$Value) {
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -105,6 +109,7 @@ function Get-P3GuardUtc([string]$Value, [string]$Label) {
 }
 
 function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
+    $clock = $NowUtc.ToUniversalTime()
     foreach ($name in @(
         'ManifestSHA256', 'PayloadSHA256', 'ProtocolSHA256', 'InstallReceiptSHA256',
         'ExpectedServerBaselineSHA256', 'ExpectedCloudFirewallSHA256', 'ExpectedContainerIdentitySHA256',
@@ -136,13 +141,38 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
         [int]$Context.CloudFirewall.droplet_association_count -ne 1 -or [int]$Context.CloudFirewall.inbound_rule_count -ne 2 -or
         -not [bool]$Context.CloudFirewall.owner_observed -or [bool]$Context.CloudFirewall.server_confirmed -or
         [bool]$Context.CloudFirewall.live_mutation_performed) { throw 'Cloud Firewall receipt differs' }
-    $cloudAge = ($NowUtc.ToUniversalTime() - (Get-P3GuardUtc ([string]$Context.CloudFirewall.observed_at_utc) 'Cloud Firewall')).TotalSeconds
+    $cloudAge = ($clock - (Get-P3GuardUtc ([string]$Context.CloudFirewall.observed_at_utc) 'Cloud Firewall')).TotalSeconds
     if ($cloudAge -lt 0 -or $cloudAge -gt 900) { throw 'Cloud Firewall receipt is stale' }
     if ([string]$Context.LocalBaseline.schema -cne 'home-gateway/p3-prelive-local-baseline-receipt/v1' -or
         -not [bool]$Context.LocalBaseline.protected_profile_absent -or [int]$Context.LocalBaseline.selfhosted_adapter_count -ne 0 -or
         [bool]$Context.LocalBaseline.live_mutation_performed) { throw 'local baseline receipt differs' }
-    $localAge = ($NowUtc.ToUniversalTime() - (Get-P3GuardUtc ([string]$Context.LocalBaseline.observed_at_utc) 'local baseline')).TotalSeconds
+    $localAge = ($clock - (Get-P3GuardUtc ([string]$Context.LocalBaseline.observed_at_utc) 'local baseline')).TotalSeconds
     if ($localAge -lt 0 -or $localAge -gt 300) { throw 'local baseline receipt is stale' }
+    if ($Context.PSObject.Properties.Name -notcontains 'EgressReceipt') { throw 'egress receipt schema differs' }
+    Assert-P3GuardExactProperties -Value $Context.EgressReceipt -Expected $script:P3GuardEgressReceiptProperties -Label 'egress receipt'
+    if ([string]$Context.EgressReceipt.schema -cne 'home-gateway/p3-prelive-egress-receipt/v1' -or
+        [string]$Context.EgressReceipt.management_source_cidr_sha256 -cne [string]$Context.Trust.management_source_cidr_sha256 -or
+        [bool]$Context.EgressReceipt.live_mutation_performed) { throw 'egress receipt differs' }
+    $egressAge = ($clock - (Get-P3GuardUtc ([string]$Context.EgressReceipt.observed_at_utc) 'egress receipt')).TotalSeconds
+    if ($egressAge -lt -1 -or $egressAge -gt 120) { throw 'egress receipt is stale' }
+    $observations = @($Context.EgressReceipt.observations)
+    if ($observations.Count -ne 3) { throw 'egress observation count differs' }
+    $expectedByAuthority = @{}
+    foreach ($item in $egress) { $expectedByAuthority[[string]$item.authority_sha256] = [string]$item.source_cidr_sha256 }
+    $observedAuthorities = @()
+    foreach ($observation in $observations) {
+        Assert-P3GuardExactProperties -Value $observation -Expected $script:P3GuardEgressObservationProperties -Label 'egress observation'
+        $authority = [string]$observation.authority_sha256
+        $source = [string]$observation.source_cidr_sha256
+        Assert-P3GuardSHA256 -Value $authority -Label 'egress observation authority'
+        Assert-P3GuardSHA256 -Value $source -Label 'egress observation source'
+        if (-not $expectedByAuthority.ContainsKey($authority) -or $expectedByAuthority[$authority] -cne $source -or
+            $source -cne [string]$Context.Trust.management_source_cidr_sha256) { throw 'egress observation identity differs' }
+        $observationAge = ($clock - (Get-P3GuardUtc ([string]$observation.observed_at_utc) 'egress observation')).TotalSeconds
+        if ($observationAge -lt -1 -or $observationAge -gt 120) { throw 'egress observation is stale' }
+        $observedAuthorities += $authority
+    }
+    if (@($observedAuthorities | Select-Object -Unique).Count -ne 3) { throw 'egress observation authority set differs' }
     return [pscustomobject][ordered]@{
         schema = 'home-gateway/p3-prelive-input-validation/v1'
         manifest_sha256 = [string]$Context.ManifestSHA256
@@ -152,13 +182,6 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
         selfhosted_adapter_count = 0
         loaded_key_count = 1
         live_mutation_performed = $false
-    }
-    if ($Context.PSObject.Properties.Name -contains 'EgressReceipt') {
-        if ([string]$Context.EgressReceipt.schema -cne 'home-gateway/p3-prelive-egress-receipt/v1' -or
-            [string]$Context.EgressReceipt.management_source_cidr_sha256 -cne [string]$Context.Trust.management_source_cidr_sha256 -or
-            [bool]$Context.EgressReceipt.live_mutation_performed -or @($Context.EgressReceipt.observations).Count -ne 3) { throw 'egress receipt differs' }
-        $egressAge = ($NowUtc.ToUniversalTime() - (Get-P3GuardUtc ([string]$Context.EgressReceipt.observed_at_utc) 'egress')).TotalSeconds
-        if ($egressAge -lt -1 -or $egressAge -gt 120) { throw 'egress receipt is stale' }
     }
 }
 

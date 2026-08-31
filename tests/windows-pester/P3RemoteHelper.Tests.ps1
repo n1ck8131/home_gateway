@@ -115,6 +115,16 @@ Describe 'P3 exact remote helper lifecycle' {
         $LASTEXITCODE | Should -Not -Be 0
         Test-Path -LiteralPath $upload | Should -BeFalse
         @(Get-ChildItem -LiteralPath (Split-Path -Parent $target) -Filter '*.next-*').Count | Should -Be 0
+
+        [IO.File]::WriteAllText($upload, 'partial-upload')
+        $next = $target + '.next-' + $token
+        [IO.File]::WriteAllText($next, 'partial-next')
+        $cleaned = (& python -c $bootstrap cleanup $payloadHash $token $target $uploadRoot) | ConvertFrom-Json
+        $LASTEXITCODE | Should -Be 0
+        $cleaned.state | Should -BeExactly 'absent'
+        $cleaned.temporary_leftover_count | Should -Be 0
+        Test-Path -LiteralPath $upload | Should -BeFalse
+        Test-Path -LiteralPath $next | Should -BeFalse
     }
 
     It 'revalidates absent state at apply and stops on a target race before upload' {
@@ -172,6 +182,7 @@ Describe 'P3 exact remote helper lifecycle' {
                 param($Executable, $Arguments, $Mode, $Request)
                 $script:InstallCalls++
                 if ($Mode -ceq 'classify') { return ($script:AbsentState | ConvertTo-Json -Compress) }
+                if ($Mode -ceq 'cleanup') { return ($script:ExactState | ConvertTo-Json -Compress) }
                 [ordered]@{
                     schema = 'home-gateway/p3-remote-helper-install-receipt/v1'; target_state = 'exact'
                     payload_sha256 = $script:Context.Trust.local_payload_sha256; owner_match = $true
@@ -182,7 +193,48 @@ Describe 'P3 exact remote helper lifecycle' {
         $receipt.installed_by_gate | Should -BeTrue
         $receipt.temporary_leftover_count | Should -Be 0
         $script:ScpCalls | Should -Be 1
-        $script:InstallCalls | Should -Be 2
+        $script:InstallCalls | Should -Be 3
+    }
+
+    It 'cleans and reclassifies a partial upload after every failed SCP attempt' {
+        $plan = Invoke-P3RemoteInstallPlan -Context $script:Context -SshRunner { $script:AbsentState | ConvertTo-Json -Compress }
+        $partial = Join-Path $TestDrive 'partial-upload'
+
+        {
+            Invoke-P3RemoteInstall -Context $script:Context -Plan $plan `
+                -ScpRunner {
+                    [IO.File]::WriteAllText($partial, 'partial')
+                    [pscustomobject]@{ exit_code = 17 }
+                } `
+                -SshRunner {
+                    param($Executable, $Arguments, $Mode)
+                    if ($Mode -ceq 'classify') { return ($script:AbsentState | ConvertTo-Json -Compress) }
+                    if ($Mode -ceq 'cleanup') {
+                        [IO.File]::Delete($partial)
+                        return ($script:AbsentState | ConvertTo-Json -Compress)
+                    }
+                    throw 'unexpected remote mode'
+                }
+        } | Should -Throw '*upload*'
+
+        Test-Path -LiteralPath $partial | Should -BeFalse
+    }
+
+    It 'makes partial-upload cleanup failure terminal' {
+        $plan = Invoke-P3RemoteInstallPlan -Context $script:Context -SshRunner { $script:AbsentState | ConvertTo-Json -Compress }
+        $dirty = [ordered]@{} + $script:AbsentState
+        $dirty.temporary_leftover_count = 1
+
+        {
+            Invoke-P3RemoteInstall -Context $script:Context -Plan $plan `
+                -ScpRunner { [pscustomobject]@{ exit_code = 17 } } `
+                -SshRunner {
+                    param($Executable, $Arguments, $Mode)
+                    if ($Mode -ceq 'classify') { return ($script:AbsentState | ConvertTo-Json -Compress) }
+                    if ($Mode -ceq 'cleanup') { return ($dirty | ConvertTo-Json -Compress) }
+                    throw 'unexpected remote mode'
+                }
+        } | Should -Throw '*cleanup*'
     }
 
     It 'rejects changed context failed upload identity and cleanup leftovers' {
@@ -211,6 +263,7 @@ Describe 'P3 exact remote helper lifecycle' {
             -ScpRunner { [pscustomobject]@{ exit_code = 0 } } -SshRunner {
                 param($Executable, $Arguments, $Mode)
                 if ($Mode -ceq 'classify') { return ($script:AbsentState | ConvertTo-Json -Compress) }
+                if ($Mode -ceq 'cleanup') { return ($script:ExactState | ConvertTo-Json -Compress) }
                 [ordered]@{
                     schema = 'home-gateway/p3-remote-helper-install-receipt/v1'; target_state = 'exact'
                     payload_sha256 = $script:Context.Trust.local_payload_sha256; owner_match = $true

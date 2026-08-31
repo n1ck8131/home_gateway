@@ -172,14 +172,22 @@ def classify(expected):
     mode_match = os.name == "nt" or stat.S_IMODE(info.st_mode) == 0o755
     exact = regular and owner_match and group_match and mode_match and value == expected
     return {"state":"exact" if exact else "conflict","regular":regular,"owner_match":owner_match,"group_match":group_match,"mode_match":mode_match,"payload_sha256":value,"temporary_leftover_count":leftovers()}
-def cleanup(paths):
+def cleanup(paths, strict=False):
+    failed = False
     for path in paths:
         try:
             if os.path.lexists(path): os.unlink(path)
         except OSError:
-            pass
+            failed = True
+    if strict and failed: raise RuntimeError("cleanup")
 if mode == "classify":
     result = classify(expected)
+elif mode == "cleanup":
+    upload = os.path.join(UPLOAD_ROOT, ".home-gateway-p3-" + token + ".upload")
+    nxt = TARGET + ".next-" + token
+    cleanup([nxt, upload], strict=True)
+    result = classify(expected)
+    if result["temporary_leftover_count"] != 0: raise RuntimeError("cleanup")
 elif mode == "install":
     upload = os.path.join(UPLOAD_ROOT, ".home-gateway-p3-" + token + ".upload")
     nxt = TARGET + ".next-" + token
@@ -214,10 +222,10 @@ sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",",":")))
 }
 
 function New-P3RemoteAdapterCommand([string]$Mode, [string]$ExpectedPayloadSHA256, [string]$Token) {
-    if ($Mode -notin @('classify', 'install', 'remove')) { throw 'remote adapter mode differs' }
+    if ($Mode -notin @('classify', 'cleanup', 'install', 'remove')) { throw 'remote adapter mode differs' }
     Assert-P3RemoteSHA256 -Value $ExpectedPayloadSHA256 -Label 'remote adapter payload'
-    if ($Mode -ceq 'install' -and $Token -cnotmatch '^[0-9a-f]{32}$') { throw 'remote adapter token differs' }
-    if ($Mode -cne 'install' -and -not [string]::IsNullOrEmpty($Token)) { throw 'remote adapter token differs' }
+    if ($Mode -in @('cleanup', 'install') -and $Token -cnotmatch '^[0-9a-f]{32}$') { throw 'remote adapter token differs' }
+    if ($Mode -notin @('cleanup', 'install') -and -not [string]::IsNullOrEmpty($Token)) { throw 'remote adapter token differs' }
     $program = Get-P3RemoteAdapterProgram
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($program))
     $bootstrap = "import base64;exec(compile(base64.b64decode('$encoded'),'<p3-lifecycle>','exec'))"
@@ -309,17 +317,28 @@ function Invoke-P3RemoteInstall([object]$Context, [object]$Plan, [scriptblock]$S
     $upload = "/tmp/.home-gateway-p3-$token.upload"
     $next = "$script:P3RemoteTarget.next-$token"
     $scpArguments = New-P3GitScpArguments -Trust $Context.Trust -Agent $Context.Agent
-    $uploadResult = & $ScpRunner ([string]$Context.Trust.git_scp_path) $scpArguments ([string]$Context.Trust.local_payload_path) $upload
-    if ($null -eq $uploadResult -or [int]$uploadResult.exit_code -ne 0) { throw 'remote helper upload failed' }
-    $request = [pscustomobject][ordered]@{
-        upload_path = $upload; next_path = $next; target_path = $script:P3RemoteTarget
-        payload_sha256 = $validated.payload_sha256; owner = 'root'; group = 'root'; mode = '0755'
-        cleanup_required = $true; atomic_create_new = $true
+    try {
+        $uploadResult = & $ScpRunner ([string]$Context.Trust.git_scp_path) $scpArguments ([string]$Context.Trust.local_payload_path) $upload
+        if ($null -eq $uploadResult -or [int]$uploadResult.exit_code -ne 0) { throw 'remote helper upload failed' }
+        $request = [pscustomobject][ordered]@{
+            upload_path = $upload; next_path = $next; target_path = $script:P3RemoteTarget
+            payload_sha256 = $validated.payload_sha256; owner = 'root'; group = 'root'; mode = '0755'
+            cleanup_required = $true; atomic_create_new = $true
+        }
+        $command = New-P3RemoteAdapterCommand -Mode install -ExpectedPayloadSHA256 $validated.payload_sha256 -Token $token
+        $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand $command
+        $json = [string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $arguments 'install' $request)
+        return ConvertFrom-P3InstallReceipt -Json $json -ExpectedPayloadSHA256 $validated.payload_sha256
     }
-    $command = New-P3RemoteAdapterCommand -Mode install -ExpectedPayloadSHA256 $validated.payload_sha256 -Token $token
-    $arguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand $command
-    $json = [string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $arguments 'install' $request)
-    return ConvertFrom-P3InstallReceipt -Json $json -ExpectedPayloadSHA256 $validated.payload_sha256
+    finally {
+        try {
+            $cleanupCommand = New-P3RemoteAdapterCommand -Mode cleanup -ExpectedPayloadSHA256 $validated.payload_sha256 -Token $token
+            $cleanupArguments = New-P3GitSshArguments -Trust $Context.Trust -Agent $Context.Agent -RemoteCommand $cleanupCommand
+            $cleanupJson = [string](& $SshRunner ([string]$Context.Trust.git_ssh_path) $cleanupArguments 'cleanup' $null)
+            $null = ConvertFrom-P3RemoteState -Json $cleanupJson -ExpectedPayloadSHA256 $validated.payload_sha256
+        }
+        catch { throw 'remote helper cleanup failed' }
+    }
 }
 
 function Assert-P3InstallReceiptForRemoval([object]$Context, [object]$InstallReceipt) {

@@ -68,6 +68,54 @@ Describe 'P3 protected pre-live runtime' {
                 egress_authority_sha256 = @(('7' * 64), ('8' * 64), ('9' * 64))
             }
         }
+
+        function Initialize-OwnedBatchRuntime([string]$Root, [object]$Trust) {
+            $now = [DateTime]::UtcNow
+            $fingerprint = 'SHA256:synthetic-key'
+            $Trust.public_key_fingerprint_sha256 = Get-TestTextSHA256 $fingerprint
+            $plan = New-P3ManifestPlan -Trust ([pscustomobject]$Trust) -RuntimeRoot $Root
+            $null = Invoke-P3RuntimePrepare -Trust ([pscustomobject]$Trust) -RuntimeRoot $Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge
+            $cloudObservation = [pscustomobject][ordered]@{
+                schema = 'home-gateway/p3-prelive-cloud-firewall-observation/v1'; droplet_association_count = 1
+                tcp_22_management_source_count = 1; management_source_cidr_sha256 = ('2' * 64)
+                udp_38556_all_ipv4_count = 1; udp_ipv6_count = 0; extra_inbound_rule_count = 0
+                observed_at_utc = $now.ToString('o')
+            }
+            Write-P3RuntimeJson -RuntimeRoot $Root -Name 'cloud-firewall-receipt.json' -Value `
+                (New-P3CloudFirewallReceipt -Observation $cloudObservation -ExpectedIdentitySHA256 $Trust.accepted_cloud_firewall_sha256 `
+                    -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc $now)
+            $egress = New-P3EgressReceipt -ExpectedAuthoritySHA256 @($Trust.egress_authority_sha256) `
+                -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc $now -HttpsRunner {
+                    param($authority) [pscustomobject]@{ authority_sha256=$authority;source_cidr_sha256=('2'*64);observed_at_utc=$now.ToString('o') }
+                }
+            Write-P3RuntimeJson -RuntimeRoot $Root -Name 'egress-receipt.json' -Value $egress
+            $local = New-P3LocalBaselineReceipt -ProtectedProfilePath (Join-Path (Split-Path -Parent $Root) 'missing-profile.conf') `
+                -NowUtc $now -AdapterRunner { @([pscustomobject]@{ InterfaceDescription='RedShield Virtual Adapter' }) }
+            Write-P3RuntimeJson -RuntimeRoot $Root -Name 'local-baseline-receipt.json' -Value $local
+            $manifest = Open-P3BoundedStableJson -Path (Join-Path $Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+            Write-P3RuntimeJson -RuntimeRoot $Root -Name 'remote-install-receipt.json' -Value ([pscustomobject][ordered]@{
+                schema='home-gateway/p3-remote-helper-install-receipt/v1';target_state='exact';payload_sha256=$manifest.local_payload_sha256
+                owner_match=$true;group_match=$true;mode_match=$true;installed_by_gate=$true;preinstall_state='absent';temporary_leftover_count=0
+            })
+            return [pscustomobject]@{ Root=$Root;ManifestSHA256=$plan.manifest_sha256;Fingerprint=$fingerprint;AgentPath=$Trust.git_ssh_agent_path;NowUtc=$now }
+        }
+
+        function New-OwnedBatchBoundaries([object]$Fixture, [scriptblock]$JsonRunner, [scriptblock]$StopRunner) {
+            $list = { "256 $($Fixture.Fingerprint) p3 (ED25519)" }.GetNewClosure()
+            $process = { param($ProcessId) [pscustomobject]@{ Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow } }.GetNewClosure()
+            return [pscustomobject]@{
+                AgentRunner = { "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" }
+                AddRunner = { param($KeyPath) }; ListRunner = $list; ProcessRunner = $process
+                DeleteRunner = { }; StopRunner = $StopRunner
+                WaitRunner = { param($ProcessId) $script:OwnedWaits++ }
+                ReobserveRunner = { param($ProcessId) $script:OwnedReobservedPid = $ProcessId; @() }
+                SocketExistsRunner = { param($Path) $false }
+                ReceiptRemoveRunner = { param($Path) [IO.File]::Delete($Path) }
+                JsonRunner = $JsonRunner; StreamRunner = { throw 'stream runner is not expected' }
+                ClockRunner = { $Fixture.NowUtc.AddSeconds(30) }.GetNewClosure()
+            }
+        }
     }
 
     BeforeEach {
@@ -325,6 +373,7 @@ Describe 'P3 protected pre-live runtime' {
             $install = Invoke-P3RemoteInstall -Context $remoteContext -Plan $installPlan -ScpRunner { [pscustomobject]@{exit_code=0} } -SshRunner {
                 param($Executable,$Arguments,$Mode)
                 if ($Mode -ceq 'classify') { return ($absent | ConvertTo-Json -Compress) }
+                if ($Mode -ceq 'cleanup') { return ([ordered]@{state='exact';regular=$true;owner_match=$true;group_match=$true;mode_match=$true;payload_sha256=$manifest.local_payload_sha256;temporary_leftover_count=0} | ConvertTo-Json -Compress) }
                 [ordered]@{schema='home-gateway/p3-remote-helper-install-receipt/v1';target_state='exact';payload_sha256=$manifest.local_payload_sha256;owner_match=$true;group_match=$true;mode_match=$true;installed_by_gate=$true;preinstall_state='absent';temporary_leftover_count=0} | ConvertTo-Json -Compress
             }
             Write-P3ProtectedInstallReceipt -Root $Root -ManifestSHA256 $ManifestHash -Receipt $install
@@ -336,5 +385,62 @@ Describe 'P3 protected pre-live runtime' {
         $context.Install.schema | Should -BeExactly 'home-gateway/p3-remote-helper-install-receipt/v1'
         $context.ExpectedPeerCount | Should -Be 1
         $env:SSH_AUTH_SOCK = $null; $env:SSH_AGENT_PID = $null
+    }
+
+    It 'runs the actual owned action switch and reobserves exact terminal cleanup' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+        $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
+        $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0
+        $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'JSON runner is not expected' } -StopRunner { param($ProcessId) }
+
+        $result = Invoke-P3OwnedGuardAction -SelectedAction 'ValidateOnly' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+            -BodyConfirmation '' -Boundaries $boundaries
+
+        $result.prelive_inputs_valid | Should -BeTrue
+        $script:OwnedWaits | Should -Be 1
+        $script:OwnedReobservedPid | Should -Be 4242
+        Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
+        $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+        $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'stops and cleans the owned action after body failure and cancellation' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+        foreach ($failure in @(
+            { throw 'synthetic body failure' },
+            { throw [OperationCanceledException]::new('synthetic cancellation') }
+        )) {
+            $root = Join-Path $TestDrive ('owned-' + [guid]::NewGuid().ToString('N'))
+            $fixtureRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $fixtureRoot
+            $trust = New-TrustFixture -Root $fixtureRoot
+            $fixture = Initialize-OwnedBatchRuntime -Root $root -Trust $trust
+            $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0
+            $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner $failure -StopRunner { param($ProcessId) }
+            $caught = $null
+            try {
+                $null = Invoke-P3OwnedGuardAction -SelectedAction 'Reconcile' -RuntimeRoot $fixture.Root `
+                    -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+                    -BodyConfirmation '' -Boundaries $boundaries
+            } catch { $caught = $_ }
+            $caught | Should -Not -BeNullOrEmpty
+            $caught.Exception.Message | Should -Match 'synthetic body failure|synthetic cancellation'
+            $script:OwnedWaits | Should -Be 1
+            $script:OwnedReobservedPid | Should -Be 4242
+            Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
+            $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+            $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'makes an owned action stop failure terminal' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+        $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
+        $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'JSON runner is not expected' } `
+            -StopRunner { throw 'synthetic stop failure' }
+        { Invoke-P3OwnedGuardAction -SelectedAction 'ValidateOnly' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+            -BodyConfirmation '' -Boundaries $boundaries } | Should -Throw '*stop failure*'
     }
 }

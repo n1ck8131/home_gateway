@@ -156,7 +156,8 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $stop = Stop-P3Agent -Manifest $script:Manifest -AgentReceipt $receipt `
             -DeleteRunner { $script:Deleted++ } -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } `
             -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } `
-            -ProcessRunner { [pscustomobject]@{ Id = 4242; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow } }
+            -ProcessRunner { [pscustomobject]@{ Id = 4242; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow } } `
+            -WaitRunner { param($ProcessId) } -ReobserveRunner { param($ProcessId) @() } -SocketExistsRunner { param($Path) $false }
         $validated.expected_key_match | Should -BeTrue
         $stop.stopped | Should -BeTrue
         $script:Deleted | Should -Be 1

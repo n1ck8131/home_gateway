@@ -238,7 +238,10 @@ function Stop-P3Agent(
     [scriptblock]$DeleteRunner,
     [scriptblock]$StopRunner,
     [scriptblock]$ListRunner,
-    [scriptblock]$ProcessRunner
+    [scriptblock]$ProcessRunner,
+    [scriptblock]$WaitRunner,
+    [scriptblock]$ReobserveRunner,
+    [scriptblock]$SocketExistsRunner
 ) {
     if ([string]$env:SSH_AUTH_SOCK -cne [string]$AgentReceipt.socket -or [string]$env:SSH_AGENT_PID -cne [string]$AgentReceipt.agent_pid) {
         throw 'agent environment differs from receipt'
@@ -246,6 +249,9 @@ function Stop-P3Agent(
     $null = Test-P3AgentState -Manifest $Manifest -AgentReceipt $AgentReceipt -ListRunner $ListRunner -ProcessRunner $ProcessRunner
     $null = & $DeleteRunner
     $null = & $StopRunner ([int]$AgentReceipt.agent_pid)
+    $null = & $WaitRunner ([int]$AgentReceipt.agent_pid)
+    if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { throw 'agent process cleanup failed' }
+    if ([bool](& $SocketExistsRunner ([string]$AgentReceipt.socket))) { throw 'agent socket cleanup failed' }
     if ([string]$env:SSH_AUTH_SOCK -ceq [string]$AgentReceipt.socket) { $env:SSH_AUTH_SOCK = $null }
     if ([string]$env:SSH_AGENT_PID -ceq [string]$AgentReceipt.agent_pid) { $env:SSH_AGENT_PID = $null }
     return [pscustomobject]@{ schema = 'home-gateway/p3-ssh-agent-stop-receipt/v1'; stopped = $true; removed_key_count = 1 }
@@ -264,12 +270,30 @@ function Write-P3ProtectedAgentReceipt([string]$Root, [string]$ManifestSHA256, [
     } finally { $Action = $savedAction }
 }
 
+function Get-P3ProtectedAgentManifest([string]$Root, [string]$ManifestSHA256) {
+    $savedAction = $Action
+    try {
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
+        $trust = Open-P3BoundedStableJson -Path (Join-Path $Root 'trust.json') -MaximumBytes 65536 -ExpectedProperties $script:P3TrustProperties
+        $manifest = Open-P3BoundedStableJson -Path (Join-Path $Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+        return [pscustomobject]@{
+            manifest_sha256 = $ManifestSHA256
+            git_ssh_agent_path = [string]$trust.git_ssh_agent_path; git_ssh_agent_sha256 = [string]$manifest.git_ssh_agent_sha256
+            git_ssh_add_path = [string]$trust.git_ssh_add_path; git_ssh_add_sha256 = [string]$manifest.git_ssh_add_sha256
+            git_ssh_path = [string]$trust.git_ssh_path; git_ssh_sha256 = [string]$manifest.git_ssh_sha256
+            git_scp_path = [string]$trust.git_scp_path; git_scp_sha256 = [string]$manifest.git_scp_sha256
+            public_key_path = [string]$trust.public_key_path; private_key_path = [string]$trust.private_key_path
+            public_key_fingerprint_sha256 = [string]$manifest.public_key_fingerprint_sha256
+        }
+    } finally { $Action = $savedAction }
+}
+
 function Remove-P3ProtectedAgentState(
     [string]$Root,
     [string]$ManifestSHA256,
     [object]$Receipt,
-    [scriptblock]$ReceiptRemoveRunner,
-    [scriptblock]$SocketRemoveRunner
+    [scriptblock]$ReceiptRemoveRunner
 ) {
     $savedAction = $Action
     try {
@@ -278,9 +302,8 @@ function Remove-P3ProtectedAgentState(
         $receiptPath = [IO.Path]::GetFullPath((Join-Path $Root 'agent-receipt.json'))
         $stored = Open-P3BoundedStableJson -Path $receiptPath -MaximumBytes 65536 -ExpectedProperties $script:P3CombinedAgentReceiptProperties
         if ((Get-P3AgentCanonicalSHA256 $stored) -cne (Get-P3AgentCanonicalSHA256 $Receipt)) { throw 'protected agent receipt differs' }
-        & $SocketRemoveRunner ([string]$Receipt.socket)
         & $ReceiptRemoveRunner $receiptPath
-        if ([IO.File]::Exists($receiptPath) -or [IO.File]::Exists([string]$Receipt.socket)) { throw 'agent protected cleanup failed' }
+        if ([IO.File]::Exists($receiptPath)) { throw 'agent protected cleanup failed' }
     } finally { $Action = $savedAction }
 }
 
@@ -309,9 +332,12 @@ if (-not [string]::IsNullOrEmpty($Action)) {
                 -DeleteRunner { & $request.manifest.git_ssh_add_path -D } `
                 -StopRunner { param($ProcessId) Stop-Process -Id $ProcessId -ErrorAction Stop } `
                 -ListRunner { param($Executable) & $Executable -l -E sha256 } `
-                -ProcessRunner { param($ProcessId) Get-Process -Id $ProcessId -ErrorAction Stop | Select-Object Id, Path, StartTime }
+                -ProcessRunner { param($ProcessId) Get-Process -Id $ProcessId -ErrorAction Stop | Select-Object Id, Path, StartTime } `
+                -WaitRunner { param($ProcessId) Wait-Process -Id $ProcessId -ErrorAction Stop } `
+                -ReobserveRunner { param($ProcessId) @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) } `
+                -SocketExistsRunner { param($Path) [IO.File]::Exists($Path) }
             Remove-P3ProtectedAgentState -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $request.combined_receipt `
-                -SocketRemoveRunner { param($Path) [IO.File]::Delete($Path) } -ReceiptRemoveRunner { param($Path) [IO.File]::Delete($Path) }
+                -ReceiptRemoveRunner { param($Path) [IO.File]::Delete($Path) }
             $stop | ConvertTo-Json -Compress
         }
     }

@@ -103,8 +103,13 @@ function Get-P3GuardCanonicalSHA256([object]$Value) {
     return Get-P3GuardTextSHA256 $json
 }
 
-function Get-P3GuardUtc([string]$Value, [string]$Label) {
-    try { return [DateTime]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+function Get-P3GuardUtc([object]$Value, [string]$Label) {
+    if ($Value -is [DateTime]) {
+        $date = [DateTime]$Value
+        if ($date.Kind -eq [DateTimeKind]::Unspecified) { $date = [DateTime]::SpecifyKind($date, [DateTimeKind]::Utc) }
+        return $date.ToUniversalTime()
+    }
+    try { return [DateTime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
     catch { throw "$Label timestamp differs" }
 }
 
@@ -141,19 +146,20 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
         [int]$Context.CloudFirewall.droplet_association_count -ne 1 -or [int]$Context.CloudFirewall.inbound_rule_count -ne 2 -or
         -not [bool]$Context.CloudFirewall.owner_observed -or [bool]$Context.CloudFirewall.server_confirmed -or
         [bool]$Context.CloudFirewall.live_mutation_performed) { throw 'Cloud Firewall receipt differs' }
-    $cloudAge = ($clock - (Get-P3GuardUtc ([string]$Context.CloudFirewall.observed_at_utc) 'Cloud Firewall')).TotalSeconds
+    $cloudObserved = Get-P3GuardUtc $Context.CloudFirewall.observed_at_utc 'Cloud Firewall'
+    $cloudAge = ($clock - $cloudObserved).TotalSeconds
     if ($cloudAge -lt 0 -or $cloudAge -gt 900) { throw 'Cloud Firewall receipt is stale' }
     if ([string]$Context.LocalBaseline.schema -cne 'home-gateway/p3-prelive-local-baseline-receipt/v1' -or
         -not [bool]$Context.LocalBaseline.protected_profile_absent -or [int]$Context.LocalBaseline.selfhosted_adapter_count -ne 0 -or
         [bool]$Context.LocalBaseline.live_mutation_performed) { throw 'local baseline receipt differs' }
-    $localAge = ($clock - (Get-P3GuardUtc ([string]$Context.LocalBaseline.observed_at_utc) 'local baseline')).TotalSeconds
+    $localAge = ($clock - (Get-P3GuardUtc $Context.LocalBaseline.observed_at_utc 'local baseline')).TotalSeconds
     if ($localAge -lt 0 -or $localAge -gt 300) { throw 'local baseline receipt is stale' }
     if ($Context.PSObject.Properties.Name -notcontains 'EgressReceipt') { throw 'egress receipt schema differs' }
     Assert-P3GuardExactProperties -Value $Context.EgressReceipt -Expected $script:P3GuardEgressReceiptProperties -Label 'egress receipt'
     if ([string]$Context.EgressReceipt.schema -cne 'home-gateway/p3-prelive-egress-receipt/v1' -or
         [string]$Context.EgressReceipt.management_source_cidr_sha256 -cne [string]$Context.Trust.management_source_cidr_sha256 -or
         [bool]$Context.EgressReceipt.live_mutation_performed) { throw 'egress receipt differs' }
-    $egressAge = ($clock - (Get-P3GuardUtc ([string]$Context.EgressReceipt.observed_at_utc) 'egress receipt')).TotalSeconds
+    $egressAge = ($clock - (Get-P3GuardUtc $Context.EgressReceipt.observed_at_utc 'egress receipt')).TotalSeconds
     if ($egressAge -lt -1 -or $egressAge -gt 120) { throw 'egress receipt is stale' }
     $observations = @($Context.EgressReceipt.observations)
     if ($observations.Count -ne 3) { throw 'egress observation count differs' }
@@ -168,7 +174,7 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
         Assert-P3GuardSHA256 -Value $source -Label 'egress observation source'
         if (-not $expectedByAuthority.ContainsKey($authority) -or $expectedByAuthority[$authority] -cne $source -or
             $source -cne [string]$Context.Trust.management_source_cidr_sha256) { throw 'egress observation identity differs' }
-        $observationAge = ($clock - (Get-P3GuardUtc ([string]$observation.observed_at_utc) 'egress observation')).TotalSeconds
+        $observationAge = ($clock - (Get-P3GuardUtc $observation.observed_at_utc 'egress observation')).TotalSeconds
         if ($observationAge -lt -1 -or $observationAge -gt 120) { throw 'egress observation is stale' }
         $observedAuthorities += $authority
     }
@@ -619,31 +625,120 @@ function Get-P3PreliveContext([string]$RuntimeRoot, [string]$ExpectedManifestSHA
     }
 }
 
-if (-not [string]::IsNullOrEmpty($Action)) {
-    $context = Get-P3PreliveContext -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256
-    switch ($Action) {
-        'ValidateOnly' { Test-P3PreliveInputs -Context $context -NowUtc ([DateTime]::UtcNow) | ConvertTo-Json -Compress }
+function Invoke-P3ApprovedGuardBody(
+    [string]$SelectedAction,
+    [object]$Context,
+    [object]$InputObject,
+    [string]$ExpectedBodyPlanSHA256,
+    [string]$BodyConfirmation,
+    [object]$Boundaries
+) {
+    switch ($SelectedAction) {
+        'ValidateOnly' { return Test-P3PreliveInputs -Context $Context -NowUtc (& $Boundaries.ClockRunner) }
         'Reconcile' {
             $nonce = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))
-            $request = New-P3RemoteRequest -Context $context -Mode 'reconcile' -Operation '' -Nonce $nonce
-            $null = Invoke-P3BoundedJsonSsh -Context $context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $null
-            [Console]::Out.WriteLine('PRELIVE_READY=YES')
+            $request = New-P3RemoteRequest -Context $Context -Mode 'reconcile' -Operation '' -Nonce $nonce
+            return Invoke-P3BoundedJsonSsh -Context $Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $Boundaries.JsonRunner
         }
-        'GuardAdmin' { Invoke-P3GuardStream -Context $context -Operation 'admin' -Nonce (([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))) -Runner $null | ConvertTo-Json -Compress }
-        'GuardGuest' { Invoke-P3GuardStream -Context $context -Operation 'guest' -Nonce (([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))) -Runner $null | ConvertTo-Json -Compress }
+        'GuardAdmin' {
+            return Invoke-P3GuardStream -Context $Context -Operation 'admin' `
+                -Nonce (([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))) -Runner $Boundaries.StreamRunner
+        }
+        'GuardGuest' {
+            return Invoke-P3GuardStream -Context $Context -Operation 'guest' `
+                -Nonce (([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'))) -Runner $Boundaries.StreamRunner
+        }
         'ClientObserve' {
-            $input = ConvertFrom-Json ([Console]::In.ReadToEnd())
-            $request = New-P3RemoteRequest -Context $context -Mode 'client-observe' -Operation '' -Nonce ([string]$input.nonce) `
-                -SelectedGuestFingerprintSHA256 ([string]$input.selected_guest_fingerprint_sha256) -PreviousNonceSHA256 ([string]$input.previous_nonce_sha256)
-            Invoke-P3BoundedJsonSsh -Context $context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $null | ConvertTo-Json -Compress
+            $request = New-P3RemoteRequest -Context $Context -Mode 'client-observe' -Operation '' -Nonce ([string]$InputObject.nonce) `
+                -SelectedGuestFingerprintSHA256 ([string]$InputObject.selected_guest_fingerprint_sha256) `
+                -PreviousNonceSHA256 ([string]$InputObject.previous_nonce_sha256)
+            return Invoke-P3BoundedJsonSsh -Context $Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $Boundaries.JsonRunner
         }
         'EmergencyRollbackPlan' {
-            $input = ConvertFrom-Json ([Console]::In.ReadToEnd())
-            New-P3EmergencyRollbackPlan -Context $context -CandidateReceipt $input.candidate -CurrentReceipt $input.current | ConvertTo-Json -Compress
+            return New-P3EmergencyRollbackPlan -Context $Context -CandidateReceipt $InputObject.candidate -CurrentReceipt $InputObject.current
         }
         'EmergencyRollback' {
-            $plan = ConvertFrom-Json ([Console]::In.ReadToEnd())
-            Invoke-P3EmergencyRollback -Context $context -Plan $plan -ExpectedPlanSHA256 $ExpectedPlanSHA256 -Confirmation $Confirmation -Runner $null | ConvertTo-Json -Compress
+            return Invoke-P3EmergencyRollback -Context $Context -Plan $InputObject -ExpectedPlanSHA256 $ExpectedBodyPlanSHA256 `
+                -Confirmation $BodyConfirmation -Runner $Boundaries.JsonRunner
+        }
+        default { throw 'owned guard action differs' }
+    }
+}
+
+function Invoke-P3OwnedGuardAction(
+    [string]$SelectedAction,
+    [string]$RuntimeRoot,
+    [string]$ExpectedManifestSHA256,
+    [object]$InputObject,
+    [string]$ExpectedBodyPlanSHA256,
+    [string]$BodyConfirmation,
+    [object]$Boundaries
+) {
+    if ($SelectedAction -notin @('ValidateOnly', 'Reconcile', 'GuardAdmin', 'GuardGuest', 'ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback')) {
+        throw 'owned guard action differs'
+    }
+    $requiredBoundaries = @(
+        'AddRunner', 'AgentRunner', 'ClockRunner', 'DeleteRunner', 'JsonRunner', 'ListRunner', 'ProcessRunner',
+        'ReceiptRemoveRunner', 'ReobserveRunner', 'SocketExistsRunner', 'StopRunner', 'StreamRunner', 'WaitRunner'
+    )
+    Assert-P3GuardExactProperties -Value $Boundaries -Expected $requiredBoundaries -Label 'owned guard boundaries'
+    $ownedRoot = $RuntimeRoot
+    $ownedManifestSHA256 = $ExpectedManifestSHA256
+    $savedAction = $Action
+    . (Join-Path $PSScriptRoot 'p3-ssh-agent.ps1')
+    $Action = $savedAction
+    $agentManifest = Get-P3ProtectedAgentManifest -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256
+    $agentReceipt = Start-P3Agent -Manifest $agentManifest -AgentRunner $Boundaries.AgentRunner `
+        -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
+    $combined = $null
+    try {
+        $combined = Test-P3AgentState -Manifest $agentManifest -AgentReceipt $agentReceipt `
+            -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner
+        Write-P3ProtectedAgentReceipt -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256 -Receipt $combined
+        $context = Get-P3PreliveContext -RuntimeRoot $ownedRoot -ExpectedManifestSHA256 $ownedManifestSHA256
+        return Invoke-P3ApprovedGuardBody -SelectedAction $SelectedAction -Context $context -InputObject $InputObject `
+            -ExpectedBodyPlanSHA256 $ExpectedBodyPlanSHA256 -BodyConfirmation $BodyConfirmation -Boundaries $Boundaries
+    }
+    finally {
+        Stop-P3Agent -Manifest $agentManifest -AgentReceipt $agentReceipt -DeleteRunner $Boundaries.DeleteRunner `
+            -StopRunner $Boundaries.StopRunner -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
+            -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
+            -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+        if ($null -ne $combined) {
+            Remove-P3ProtectedAgentState -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256 -Receipt $combined `
+                -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
         }
     }
+}
+
+if (-not [string]::IsNullOrEmpty($Action)) {
+    $selectedAction = $Action
+    $input = if ($selectedAction -in @('ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback')) {
+        ConvertFrom-Json ([Console]::In.ReadToEnd()) -ErrorAction Stop
+    } else { $null }
+    $boundaries = [pscustomobject]@{
+        AgentRunner = { param($Executable) & $Executable -s }
+        AddRunner = { param($KeyPath) & $agentManifest.git_ssh_add_path $KeyPath }
+        ListRunner = { param($Executable) & $Executable -l -E sha256 }
+        ProcessRunner = { param($ProcessId) Get-Process -Id $ProcessId -ErrorAction Stop | Select-Object Id, Path, StartTime }
+        DeleteRunner = { & $agentManifest.git_ssh_add_path -D }
+        StopRunner = { param($ProcessId) Stop-Process -Id $ProcessId -ErrorAction Stop }
+        WaitRunner = {
+            param($ProcessId)
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            while ($watch.Elapsed.TotalSeconds -lt 10 -and $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 50 }
+            if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { throw 'agent process wait timed out' }
+        }
+        ReobserveRunner = { param($ProcessId) @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) }
+        SocketExistsRunner = { param($Path) [IO.File]::Exists($Path) }
+        ReceiptRemoveRunner = { param($Path) [IO.File]::Delete($Path) }
+        JsonRunner = $script:P3NativeJsonRunner
+        StreamRunner = $script:P3NativeStreamRunner
+        ClockRunner = { [DateTime]::UtcNow }
+    }
+    $result = Invoke-P3OwnedGuardAction -SelectedAction $selectedAction -RuntimeRoot $RuntimeRoot `
+        -ExpectedManifestSHA256 $ExpectedManifestSHA256 -InputObject $input -ExpectedBodyPlanSHA256 $ExpectedPlanSHA256 `
+        -BodyConfirmation $Confirmation -Boundaries $boundaries
+    if ($selectedAction -ceq 'Reconcile') { [Console]::Out.WriteLine('PRELIVE_READY=YES') }
+    else { $result | ConvertTo-Json -Depth 32 -Compress }
 }

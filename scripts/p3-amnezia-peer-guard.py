@@ -14,6 +14,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -144,6 +145,8 @@ class CommandResult:
     exit_code: int
     stdout: bytes
     stderr: bytes
+    overflowed: bool = False
+    timed_out: bool = False
 
 
 CommandRunner: TypeAlias = Callable[[Sequence[str], int, int], CommandResult]
@@ -321,21 +324,14 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
             )
         ):
             raise ValueError("emergency rollback confirmation differs")
-        path_roots = {
-            "persistent_config_path": pathlib.PurePosixPath("/opt/amnezia/awg"),
-            "metadata_path": pathlib.PurePosixPath("/opt/amnezia/awg"),
-            "temporary_path": pathlib.PurePosixPath("/run/home-gateway-p3-peer-guard"),
-            "syncconf_path": pathlib.PurePosixPath("/run/home-gateway-p3-peer-guard"),
+        exact_paths = {
+            "persistent_config_path": CONTAINER_CONFIG_PATH,
+            "metadata_path": CONTAINER_CLIENTS_PATH,
+            "temporary_path": f"/tmp/p3-candidate-{nonce[:32]}.tmp",
+            "syncconf_path": CONTAINER_CONFIG_PATH,
         }
-        for name, root in path_roots.items():
-            value = request[name]
-            if not isinstance(value, str) or not value.startswith("/"):
-                raise ValueError(f"emergency rollback {name} differs")
-            path = pathlib.PurePosixPath(value)
-            if (
-                ".." in path.parts
-                or pathlib.PurePosixPath(*path.parts[: len(root.parts)]) != root
-            ):
+        for name, expected_path in exact_paths.items():
+            if request[name] != expected_path:
                 raise ValueError(f"emergency rollback {name} differs")
         pre_peers = request["pre_peer_fingerprint_sha256"]
         post_peers = request["post_peer_fingerprint_sha256"]
@@ -362,42 +358,94 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
     return request
 
 
+def _run_bounded_process(
+    arguments: Sequence[str],
+    data: bytes | None,
+    timeout_seconds: int,
+    maximum_bytes: int,
+) -> CommandResult:
+    """Run one child without ever retaining unbounded stdout or stderr."""
+    process = subprocess.Popen(
+        list(arguments),
+        stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    overflow = threading.Event()
+    stdout = bytearray()
+    stderr = bytearray()
+
+    def bounded_reader(stream: BinaryIO, retained: bytearray) -> None:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                return
+            remaining = maximum_bytes + 1 - len(retained)
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+            if len(chunk) > remaining or len(retained) > maximum_bytes:
+                overflow.set()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                return
+
+    readers = [
+        threading.Thread(target=bounded_reader, args=(process.stdout, stdout)),
+        threading.Thread(target=bounded_reader, args=(process.stderr, stderr)),
+    ]
+    for reader in readers:
+        reader.start()
+
+    writer: threading.Thread | None = None
+    if data is not None:
+
+        def bounded_writer() -> None:
+            try:
+                assert process.stdin is not None
+                process.stdin.write(data)
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+
+        writer = threading.Thread(target=bounded_writer)
+        writer.start()
+
+    timed_out = False
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        process.wait()
+    finally:
+        if writer is not None:
+            writer.join()
+        for reader in readers:
+            reader.join()
+        assert process.stdout is not None and process.stderr is not None
+        process.stdout.close()
+        process.stderr.close()
+    return CommandResult(
+        process.returncode,
+        bytes(stdout),
+        bytes(stderr),
+        overflow.is_set(),
+        timed_out,
+    )
+
+
 def _default_command_runner(
     arguments: Sequence[str], timeout_seconds: int, maximum_bytes: int
 ) -> CommandResult:
-    try:
-        result = subprocess.run(
-            list(arguments),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError("allowlisted command timeout") from exc
-    stdout = result.stdout[: maximum_bytes + 1]
-    stderr = result.stderr[: maximum_bytes + 1]
-    return CommandResult(result.returncode, stdout, stderr)
+    return _run_bounded_process(arguments, None, timeout_seconds, maximum_bytes)
 
 
 def _default_stream_command_runner(
     arguments: Sequence[str], data: bytes, timeout_seconds: int, maximum_bytes: int
 ) -> CommandResult:
-    try:
-        result = subprocess.run(
-            list(arguments),
-            input=data,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError("allowlisted stream command timeout") from exc
-    return CommandResult(
-        result.returncode,
-        result.stdout[: maximum_bytes + 1],
-        result.stderr[: maximum_bytes + 1],
-    )
+    return _run_bounded_process(arguments, data, timeout_seconds, maximum_bytes)
 
 
 def run_checked_stream_command(
@@ -413,7 +461,13 @@ def run_checked_stream_command(
     if not isinstance(data, bytes) or not data or len(data) > MAX_COMMAND_BYTES:
         raise ValueError("stream command input differs")
     result = runner(tuple(arguments), data, timeout_seconds, maximum_bytes)
-    if result.exit_code != 0 or result.stderr or len(result.stdout) > maximum_bytes:
+    if (
+        result.timed_out
+        or result.overflowed
+        or result.exit_code != 0
+        or result.stderr
+        or len(result.stdout) > maximum_bytes
+    ):
         raise ValueError("allowlisted stream command failed")
     return result.stdout
 
@@ -435,6 +489,10 @@ def run_checked_command(
         result = runner(tuple(arguments), timeout_seconds, maximum_bytes)
     except TimeoutError as exc:
         raise ValueError("allowlisted command timeout") from exc
+    if result.timed_out:
+        raise ValueError("allowlisted command timeout")
+    if result.overflowed:
+        raise ValueError("allowlisted command output exceeds bound")
     if result.exit_code != 0:
         raise ValueError("allowlisted command exit differs")
     if result.stderr:
@@ -1303,16 +1361,21 @@ def run_emergency_rollback(
     _require_rollback_observation(
         inspected, rollback_expected_observation(request, phase="pre"), "pre"
     )
-    removed = filesystem({"action": "remove", **file_context})
+    begun = filesystem({"action": "begin", **file_context})
     if (
-        not isinstance(removed, dict)
-        or set(removed) != {"removed", "recovery_state"}
-        or removed.get("removed") is not True
-        or not isinstance(removed.get("recovery_state"), str)
-        or not removed["recovery_state"]
+        not isinstance(begun, dict)
+        or set(begun) != {"recovery_state"}
+        or not isinstance(begun.get("recovery_state"), str)
+        or not begun["recovery_state"]
     ):
-        raise RuntimeError("candidate removal failed")
+        raise RuntimeError("emergency rollback recovery preparation failed")
+    recovery_state = begun["recovery_state"]
     try:
+        removed = filesystem(
+            {"action": "remove", **file_context, "recovery_state": recovery_state}
+        )
+        if removed != {"removed": True}:
+            raise RuntimeError("candidate removal failed")
         syncconf(pathlib.Path(request["syncconf_path"]))
         verified = filesystem({"action": "verify", **file_context})
         _require_rollback_observation(
@@ -1324,41 +1387,46 @@ def run_emergency_rollback(
             {
                 "action": "cleanup",
                 **file_context,
-                "recovery_state": removed["recovery_state"],
+                "recovery_state": recovery_state,
             }
         )
         if cleaned != {"cleaned": True}:
             raise RuntimeError("emergency rollback recovery cleanup differs")
     except Exception as exc:
-        recovered = filesystem(
-            {
-                "action": "recover",
-                **file_context,
-                "recovery_state": removed["recovery_state"],
-            }
-        )
-        if (
-            not isinstance(recovered, dict)
-            or set(recovered) != {"recovered", "recovery_syncconf_path"}
-            or recovered.get("recovered") is not True
-        ):
-            raise RuntimeError("emergency rollback recovery failed") from exc
-        syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
-        recovery_verified = filesystem({"action": "verify-recovery", **file_context})
-        _require_rollback_observation(
-            recovery_verified,
-            rollback_expected_observation(request, phase="pre"),
-            "recovery",
-        )
-        recovery_cleaned = filesystem(
-            {
-                "action": "cleanup",
-                **file_context,
-                "recovery_state": removed["recovery_state"],
-            }
-        )
-        if recovery_cleaned != {"cleaned": True}:
-            raise RuntimeError("emergency rollback recovery cleanup differs") from exc
+        try:
+            recovered = filesystem(
+                {
+                    "action": "recover",
+                    **file_context,
+                    "recovery_state": recovery_state,
+                }
+            )
+            if (
+                not isinstance(recovered, dict)
+                or set(recovered) != {"recovered", "recovery_syncconf_path"}
+                or recovered.get("recovered") is not True
+            ):
+                raise RuntimeError("emergency rollback recovery failed")
+            syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
+            recovery_verified = filesystem(
+                {"action": "verify-recovery", **file_context}
+            )
+            _require_rollback_observation(
+                recovery_verified,
+                rollback_expected_observation(request, phase="pre"),
+                "recovery",
+            )
+            recovery_cleaned = filesystem(
+                {
+                    "action": "cleanup",
+                    **file_context,
+                    "recovery_state": recovery_state,
+                }
+            )
+            if recovery_cleaned != {"cleaned": True}:
+                raise RuntimeError("emergency rollback recovery cleanup differs")
+        except Exception as recovery_exc:
+            raise RuntimeError("ROLLBACK_UNPROVEN") from recovery_exc
         raise RuntimeError("emergency rollback failed atomically") from exc
     return {
         "schema": "home-gateway/p3-peer-emergency-rollback/v2",
@@ -1520,7 +1588,7 @@ class ContainerRollbackFilesystem:
         self.stream_runner = stream_runner
         self.recovery_root = recovery_root
         self.container_id: str | None = None
-        self.states: dict[str, dict[str, pathlib.Path | str | bool]] = {}
+        self.states: dict[str, dict[str, Any]] = {}
 
     def _run(self, arguments: Sequence[str], maximum: int = MAX_COMMAND_BYTES) -> bytes:
         return run_checked_command(arguments, runner=self.runner, maximum_bytes=maximum)
@@ -1660,6 +1728,35 @@ class ContainerRollbackFilesystem:
             runner=self.stream_runner,
         )
 
+    def _write_temporary(self, container_id: str, target: str, data: bytes) -> None:
+        if (
+            re.fullmatch(r"/tmp/p3-candidate-[0-9a-f]{32}\.tmp", target) is None
+            or not data
+            or len(data) > MAX_COMMAND_BYTES
+        ):
+            raise ValueError("rollback temporary recovery differs")
+        program = (
+            "set -euo pipefail; target=$1; count=$2; umask 077; "
+            'cat >"$target"; [ $(stat -c %s -- "$target") -eq "$count" ]; '
+            'sync -f "$target" 2>/dev/null || sync'
+        )
+        run_checked_stream_command(
+            [
+                "/usr/bin/docker",
+                "exec",
+                "-i",
+                container_id,
+                "/bin/bash",
+                "-c",
+                program,
+                "p3-temp-recovery",
+                target,
+                str(len(data)),
+            ],
+            data,
+            runner=self.stream_runner,
+        )
+
     def syncconf(self, _path: pathlib.Path) -> None:
         container_id = self._resolve_container()
         self._run(
@@ -1696,7 +1793,7 @@ class ContainerRollbackFilesystem:
                     stages[1],
                 ]
             )
-            for name in ("config", "clients", "temporary"):
+            for name in ("config", "clients", "temporary", "manifest"):
                 value = state.get(name)
                 if isinstance(value, pathlib.Path):
                     value.unlink(missing_ok=True)
@@ -1720,11 +1817,61 @@ class ContainerRollbackFilesystem:
                 stages[1],
                 _read_atomic_file(state["clients"], MAX_COMMAND_BYTES),
             )
+            temporary = state["temporary"]
+            if isinstance(temporary, pathlib.Path):
+                self._write_temporary(
+                    container_id,
+                    action["temporary_path"],
+                    _read_atomic_file(temporary, MAX_COMMAND_BYTES),
+                )
+            else:
+                self._run(
+                    [
+                        "/usr/bin/docker",
+                        "exec",
+                        container_id,
+                        "/bin/bash",
+                        "-c",
+                        'rm -f -- "$1"; [ ! -e "$1" ]',
+                        "p3-temp-recovery",
+                        action["temporary_path"],
+                    ]
+                )
             return {
                 "recovered": True,
                 "recovery_syncconf_path": action["syncconf_path"],
             }
-        if mode != "remove":
+        if mode == "remove":
+            state = self.states.get(action.get("recovery_state"))
+            if state is None:
+                raise ValueError("emergency rollback recovery state differs")
+            container_id = self._resolve_container()
+            if state["container_id"] != container_id:
+                raise ValueError("rollback container identity changed")
+            stages = container_staging_paths(action["nonce"])
+            self._write_container(
+                container_id, CONTAINER_CONFIG_PATH, stages[0], state["new_config"]
+            )
+            self._write_container(
+                container_id,
+                CONTAINER_CLIENTS_PATH,
+                stages[1],
+                state["new_clients"],
+            )
+            self._run(
+                [
+                    "/usr/bin/docker",
+                    "exec",
+                    container_id,
+                    "/bin/bash",
+                    "-c",
+                    'rm -f -- "$1"; [ ! -e "$1" ]',
+                    "p3-temp-remove",
+                    action["temporary_path"],
+                ]
+            )
+            return {"removed": True}
+        if mode != "begin":
             raise ValueError("emergency rollback filesystem action differs")
         container_id = self._resolve_container()
         self._preflight(action, container_id)
@@ -1763,32 +1910,29 @@ class ContainerRollbackFilesystem:
         temporary = self._temporary_bytes(container_id, action["temporary_path"])
         if temporary is not None:
             self._write_backup(temporary_backup, temporary)
-        state: dict[str, pathlib.Path | str | bool] = {
+        manifest_path = self.recovery_root / (".p3-recovery-" + token + ".json")
+        state: dict[str, Any] = {
             "config": config_backup,
             "clients": clients_backup,
             "temporary": temporary_backup if temporary is not None else False,
+            "manifest": manifest_path,
+            "container_id": container_id,
+            "new_config": new_config,
+            "new_clients": new_clients,
         }
+        recovery_manifest = {
+            "schema": "home-gateway/p3-peer-rollback-recovery/v1",
+            "container_identity_sha256": _sha(container_id.encode()),
+            "config_backup_sha256": _sha(config),
+            "metadata_backup_sha256": _sha(clients),
+            "temporary_backup_sha256": _sha(
+                b"ABSENT" if temporary is None else temporary
+            ),
+            "temporary_present": temporary is not None,
+        }
+        self._write_backup(manifest_path, _canonical(recovery_manifest))
         self.states[token] = state
-        stages = container_staging_paths(action["nonce"])
-        self._write_container(
-            container_id, CONTAINER_CONFIG_PATH, stages[0], new_config
-        )
-        self._write_container(
-            container_id, CONTAINER_CLIENTS_PATH, stages[1], new_clients
-        )
-        self._run(
-            [
-                "/usr/bin/docker",
-                "exec",
-                container_id,
-                "/bin/bash",
-                "-c",
-                'rm -f -- "$1"',
-                "p3-temp-remove",
-                action["temporary_path"],
-            ]
-        )
-        return {"removed": True, "recovery_state": token}
+        return {"recovery_state": token}
 
 
 _SYSTEM_ROLLBACK = ContainerRollbackFilesystem()

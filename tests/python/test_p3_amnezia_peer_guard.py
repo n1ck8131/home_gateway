@@ -620,10 +620,10 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             "pre_peer_fingerprint_sha256": ["1" * 64],
             "post_peer_fingerprint_sha256": ["1" * 64, "f" * 64],
             "baseline_peer_set_sha256": sha(["1" * 64]),
-            "persistent_config_path": "/opt/amnezia/awg/wg0.conf",
-            "metadata_path": "/opt/amnezia/awg/peers.json",
-            "temporary_path": "/run/home-gateway-p3-peer-guard/candidate.tmp",
-            "syncconf_path": "/run/home-gateway-p3-peer-guard/awg.conf",
+            "persistent_config_path": "/opt/amnezia/awg/awg0.conf",
+            "metadata_path": "/opt/amnezia/awg/clientsTable",
+            "temporary_path": "/tmp/p3-candidate-dddddddddddddddddddddddddddddddd.tmp",
+            "syncconf_path": "/opt/amnezia/awg/awg0.conf",
             "prepared_syncconf_sha256": "9" * 64,
             "pre_persistent_config_sha256": "2" * 64,
             "pre_live_peer_set_sha256": sha(["1" * 64, "f" * 64]),
@@ -669,6 +669,26 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonce"):
             guard.container_staging_paths("not-a-nonce")
 
+    def test_emergency_rollback_rejects_every_legacy_or_noncanonical_target(self):
+        for name, value in (
+            ("persistent_config_path", "/opt/amnezia/awg/wg0.conf"),
+            ("metadata_path", "/opt/amnezia/awg/peers.json"),
+            ("temporary_path", "/run/home-gateway-p3-peer-guard/candidate.tmp"),
+            ("syncconf_path", "/run/home-gateway-p3-peer-guard/awg.conf"),
+        ):
+            request = self.rollback_request()
+            request[name] = value
+            identity = {key: request[key] for key in guard.ROLLBACK_PLAN_KEYS}
+            request["rollback_plan_sha256"] = sha(identity)
+            request["confirmation"] = (
+                "P3-EMERGENCY-ROLLBACK-"
+                + request["rollback_plan_sha256"][:16].upper()
+            )
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError, "emergency rollback"
+            ):
+                guard.validate_request("emergency-rollback", request)
+
     def test_emergency_rollback_is_exact_candidate_bound_and_one_syncconf(self):
         calls = []
 
@@ -676,8 +696,11 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             calls.append((action["action"], action.get("candidate_fingerprint_sha256")))
             if action["action"] == "inspect":
                 return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "begin":
+                return {"recovery_state": "opaque-test-token"}
             if action["action"] == "remove":
-                return {"removed": True, "recovery_state": "opaque-test-token"}
+                self.assertEqual(action["recovery_state"], "opaque-test-token")
+                return {"removed": True}
             if action["action"] == "verify":
                 return guard.rollback_expected_observation(action, phase="baseline")
             if action["action"] == "cleanup":
@@ -692,7 +715,7 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         self.assertTrue(receipt["restored"])
         self.assertEqual(
             [name for name, _ in calls],
-            ["inspect", "remove", "syncconf", "verify", "cleanup"],
+            ["inspect", "begin", "remove", "syncconf", "verify", "cleanup"],
         )
 
     def test_emergency_rollback_revalidates_before_any_mutation(self):
@@ -732,8 +755,10 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             calls.append(action["action"])
             if action["action"] == "inspect":
                 return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "begin":
+                return {"recovery_state": "opaque-test-token"}
             if action["action"] == "remove":
-                return {"removed": True, "recovery_state": "opaque-test-token"}
+                return {"removed": True}
             if action["action"] == "recover":
                 self.assertEqual(action["recovery_state"], "opaque-test-token")
                 return {
@@ -756,9 +781,66 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rollback failed atomically"):
             guard.run_emergency_rollback(self.rollback_request(), filesystem, syncconf)
         self.assertEqual(
-            calls, ["inspect", "remove", "recover", "verify-recovery", "cleanup"]
+            calls,
+            ["inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
         )
         self.assertEqual(len(sync_calls), 2)
+
+    def test_emergency_rollback_recovers_when_the_first_mutation_fails(self):
+        calls = []
+
+        def filesystem(action):
+            calls.append(action["action"])
+            if action["action"] == "inspect":
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "begin":
+                return {"recovery_state": "durable-token"}
+            if action["action"] == "remove":
+                raise RuntimeError("first mutation failed")
+            if action["action"] == "recover":
+                return {"recovered": True, "recovery_syncconf_path": action["syncconf_path"]}
+            if action["action"] == "verify-recovery":
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "cleanup":
+                return {"cleaned": True}
+            raise AssertionError(action)
+
+        with self.assertRaisesRegex(RuntimeError, "failed atomically"):
+            guard.run_emergency_rollback(self.rollback_request(), filesystem, lambda path: None)
+        self.assertEqual(
+            calls,
+            ["inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
+        )
+
+    def test_emergency_rollback_preserves_recovery_material_when_recovery_is_unproved(self):
+        calls = []
+
+        def filesystem(action):
+            calls.append(action["action"])
+            if action["action"] == "inspect":
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "begin":
+                return {"recovery_state": "durable-token"}
+            if action["action"] == "remove":
+                raise RuntimeError("mutation")
+            if action["action"] == "recover":
+                raise RuntimeError("recovery")
+            raise AssertionError(action)
+
+        with self.assertRaisesRegex(RuntimeError, "ROLLBACK_UNPROVEN"):
+            guard.run_emergency_rollback(self.rollback_request(), filesystem, lambda path: None)
+        self.assertNotIn("cleanup", calls)
+
+    def test_default_command_runner_caps_a_real_noisy_child_and_reaps_it(self):
+        command = [
+            sys.executable,
+            "-c",
+            "import sys;sys.stdout.buffer.write(b'x'*1048576);sys.stdout.flush()",
+        ]
+        result = guard._run_bounded_process(command, None, 5, 4096)
+        self.assertTrue(result.overflowed)
+        self.assertLessEqual(len(result.stdout), 4097)
+        self.assertEqual(result.stderr, b"")
 
     def test_main_dispatches_client_and_emergency_modes_to_fixed_adapters(self):
         before, after = self.client_states()

@@ -220,4 +220,121 @@ Describe 'P3 protected pre-live runtime' {
         { Assert-P3ProtectedRuntimeRoot -Path $script:Root -CurrentSID ([Security.Principal.WindowsIdentity]::GetCurrent().User) } |
             Should -Throw '*owner*'
     }
+
+    It 'rejects alternate streams' {
+        $file = Join-Path $script:Fixture 'stable.json'
+        [IO.File]::WriteAllText($file, '{"schema":"synthetic"}', [Text.UTF8Encoding]::new($false))
+        Mock Get-Item { [pscustomobject]@{ Attributes = [IO.FileAttributes]::Normal; PSIsContainer = $false } }
+        Mock Get-Item -ParameterFilter { $null -ne $Stream } {
+            @(
+                [pscustomobject]@{ Stream = ':$DATA' },
+                [pscustomobject]@{ Stream = 'synthetic' }
+            )
+        }
+        { Assert-P3RegularFile -Path $file -Label 'synthetic file' } | Should -Throw '*alternate data stream*'
+    }
+
+    It 'rejects handle identity drift during a bounded read' {
+        $file = Join-Path $script:Fixture 'stable.json'
+        [IO.File]::WriteAllText($file, '{"schema":"synthetic"}', [Text.UTF8Encoding]::new($false))
+        Mock Get-Item { [pscustomobject]@{ Attributes = [IO.FileAttributes]::Normal; PSIsContainer = $false } }
+        Mock Get-Item -ParameterFilter { $null -ne $Stream } { @([pscustomobject]@{ Stream = ':$DATA' }) }
+        $script:IdentityCall = 0
+        Mock Get-P3StreamIdentity { $script:IdentityCall++; if ($script:IdentityCall -eq 1) { 'one' } else { 'two' } }
+        { Read-P3BoundedStableBytes -Path $file -MaximumBytes 65536 -Label 'stable file' } | Should -Throw '*identity changed*'
+    }
+
+    It 'rejects a reparse ancestor before opening the leaf' {
+        $file = Join-Path $script:Fixture 'stable.json'
+        [IO.File]::WriteAllText($file, '{"schema":"synthetic"}', [Text.UTF8Encoding]::new($false))
+        $parent = Split-Path -Parent $file
+        Mock Get-Item {
+            param($LiteralPath)
+            if ([IO.Path]::GetFullPath($LiteralPath) -ceq [IO.Path]::GetFullPath($parent)) {
+                return [pscustomobject]@{ Attributes = [IO.FileAttributes]::ReparsePoint; PSIsContainer = $true }
+            }
+            [pscustomobject]@{ Attributes = [IO.FileAttributes]::Normal; PSIsContainer = $false }
+        }
+        { Resolve-P3FixedCleanPath -Path $file -Label 'reparse test' } | Should -Throw '*reparse*'
+    }
+
+    It 'rejects inherited ACLs even when the expected explicit rules exist' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        $null = Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+            -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge
+        Mock Get-Acl { $acl = New-P3RuntimeAcl; $acl.SetAccessRuleProtection($false, $true); $acl }
+        { Assert-P3ProtectedRuntimeRoot -Path $script:Root -CurrentSID ([Security.Principal.WindowsIdentity]::GetCurrent().User) } |
+            Should -Throw '*inherits*'
+    }
+
+    It 'assembles one validated context from actual Task 1 through 3 outputs in TestDrive' {
+        $fingerprint = 'SHA256:synthetic-key'
+        $script:Trust.public_key_fingerprint_sha256 = Get-TestTextSHA256 $fingerprint
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        $null = Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+            -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge
+        $cloudObservation = [pscustomobject][ordered]@{
+            schema = 'home-gateway/p3-prelive-cloud-firewall-observation/v1'; droplet_association_count = 1
+            tcp_22_management_source_count = 1; management_source_cidr_sha256 = ('2' * 64)
+            udp_38556_all_ipv4_count = 1; udp_ipv6_count = 0; extra_inbound_rule_count = 0
+            observed_at_utc = [DateTime]::UtcNow.ToString('o')
+        }
+        Write-P3RuntimeJson -RuntimeRoot $script:Root -Name 'cloud-firewall-receipt.json' -Value `
+            (New-P3CloudFirewallReceipt -Observation $cloudObservation -ExpectedIdentitySHA256 $script:Trust.accepted_cloud_firewall_sha256 `
+                -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc ([DateTime]::UtcNow))
+        $egress = New-P3EgressReceipt -ExpectedAuthoritySHA256 @($script:Trust.egress_authority_sha256) `
+            -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc ([DateTime]::UtcNow) -HttpsRunner {
+                param($authority) [pscustomobject]@{ authority_sha256=$authority;source_cidr_sha256=('2'*64);observed_at_utc=[DateTime]::UtcNow.ToString('o') }
+            }
+        Write-P3RuntimeJson -RuntimeRoot $script:Root -Name 'egress-receipt.json' -Value $egress
+        Write-P3RuntimeJson -RuntimeRoot $script:Root -Name 'local-baseline-receipt.json' -Value `
+            (New-P3LocalBaselineReceipt -ProtectedProfilePath (Join-Path $script:Fixture 'missing-profile.conf') `
+                -NowUtc ([DateTime]::UtcNow) -AdapterRunner { @([pscustomobject]@{ InterfaceDescription='RedShield Virtual Adapter' }) })
+
+        $context = & {
+            param($Root, $ManifestHash, $Trust, $Fingerprint)
+            . (Join-Path $PSScriptRoot '..\..\scripts\p3-ssh-agent.ps1')
+            . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+            . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+            $manifest = Open-P3BoundedStableJson -Path (Join-Path $Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+            $agentManifest = [pscustomobject]@{
+                manifest_sha256=$ManifestHash; git_ssh_agent_path=$Trust.git_ssh_agent_path; git_ssh_add_path=$Trust.git_ssh_add_path
+                git_ssh_path=$Trust.git_ssh_path; git_scp_path=$Trust.git_scp_path; git_ssh_agent_sha256=$manifest.git_ssh_agent_sha256
+                git_ssh_add_sha256=$manifest.git_ssh_add_sha256; git_ssh_sha256=$manifest.git_ssh_sha256; git_scp_sha256=$manifest.git_scp_sha256
+                public_key_path=$Trust.public_key_path; private_key_path=$Trust.private_key_path; public_key_fingerprint_sha256=$Trust.public_key_fingerprint_sha256
+            }
+            $start = Start-P3Agent -Manifest $agentManifest `
+                -AgentRunner { "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" } `
+                -AddRunner { param($KeyPath) } -StopRunner { param($ProcessId) }
+            $combined = Test-P3AgentState -Manifest $agentManifest -AgentReceipt $start `
+                -ListRunner { "256 $Fingerprint p3 (ED25519)" } `
+                -ProcessRunner { [pscustomobject]@{ Id=4242;Path=$agentManifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow } }
+            Write-P3ProtectedAgentReceipt -Root $Root -ManifestSHA256 $ManifestHash -Receipt $combined
+            $remoteContext = [pscustomobject]@{
+                manifest_sha256=$ManifestHash; Agent=$combined
+                Trust=[pscustomobject]@{
+                    ssh_user=$Trust.ssh_user;ssh_host=$Trust.ssh_host;known_hosts_path=$Trust.known_hosts_path;known_hosts_sha256=$manifest.known_hosts_sha256
+                    git_ssh_path=$Trust.git_ssh_path;git_ssh_sha256=$manifest.git_ssh_sha256;git_scp_path=$Trust.git_scp_path;git_scp_sha256=$manifest.git_scp_sha256
+                    local_payload_path=$Trust.local_payload_path;local_payload_sha256=$manifest.local_payload_sha256;remote_payload_sha256=$manifest.remote_payload_sha256
+                    management_source_cidr_sha256=$Trust.management_source_cidr_sha256
+                    egress=@($Trust.egress_authority_sha256 | ForEach-Object { [pscustomobject]@{authority_sha256=$_;source_cidr_sha256=$Trust.management_source_cidr_sha256} })
+                }
+            }
+            $absent = [ordered]@{state='absent';regular=$false;owner_match=$false;group_match=$false;mode_match=$false;payload_sha256=('0'*64);temporary_leftover_count=0}
+            $installPlan = Invoke-P3RemoteInstallPlan -Context $remoteContext -SshRunner { $absent | ConvertTo-Json -Compress }
+            $install = Invoke-P3RemoteInstall -Context $remoteContext -Plan $installPlan -ScpRunner { [pscustomobject]@{exit_code=0} } -SshRunner {
+                param($Executable,$Arguments,$Mode)
+                if ($Mode -ceq 'classify') { return ($absent | ConvertTo-Json -Compress) }
+                [ordered]@{schema='home-gateway/p3-remote-helper-install-receipt/v1';target_state='exact';payload_sha256=$manifest.local_payload_sha256;owner_match=$true;group_match=$true;mode_match=$true;installed_by_gate=$true;preinstall_state='absent';temporary_leftover_count=0} | ConvertTo-Json -Compress
+            }
+            Write-P3ProtectedInstallReceipt -Root $Root -ManifestSHA256 $ManifestHash -Receipt $install
+            if ($ManifestHash -cnotmatch '^[0-9a-f]{64}$') { throw 'integration manifest binding drifted' }
+            return Get-P3PreliveContext -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestHash
+        } $script:Root $plan.manifest_sha256 ([pscustomobject]$script:Trust) $fingerprint
+        $context.ManifestSHA256 | Should -BeExactly $plan.manifest_sha256
+        $context.Agent.schema | Should -BeExactly 'home-gateway/p3-ssh-agent-combined-receipt/v2'
+        $context.Install.schema | Should -BeExactly 'home-gateway/p3-remote-helper-install-receipt/v1'
+        $context.ExpectedPeerCount | Should -Be 1
+        $env:SSH_AUTH_SOCK = $null; $env:SSH_AGENT_PID = $null
+    }
 }

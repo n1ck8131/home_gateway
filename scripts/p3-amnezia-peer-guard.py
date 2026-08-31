@@ -469,11 +469,15 @@ def collect_server_snapshot(
     temporary_path = pathlib.Path(request["temporary_path"])
     config_text = reader(config_path, 1048576).decode("utf-8", errors="strict")
     _, blocks = _config_peer_blocks(config_text)
-    persistent_peers = sorted(
-        fingerprint
-        for fingerprint in (_block_fingerprint(block) for block in blocks)
-        if fingerprint is not None
-    )
+    persistent_peers = []
+    for block in blocks:
+        fingerprint = _block_fingerprint(block)
+        if fingerprint is None:
+            raise ValueError("persistent peer schema differs")
+        persistent_peers.append(fingerprint)
+    persistent_peers.sort()
+    if len(set(persistent_peers)) != len(persistent_peers):
+        raise ValueError("persistent peer identity is ambiguous")
     metadata_value = json.loads(
         reader(metadata_path, 1048576).decode("utf-8", errors="strict")
     )
@@ -1002,6 +1006,15 @@ def run_emergency_rollback(
             rollback_expected_observation(request, phase="pre"),
             "recovery",
         )
+        recovery_cleaned = filesystem(
+            {
+                "action": "cleanup",
+                **file_context,
+                "recovery_state": removed["recovery_state"],
+            }
+        )
+        if recovery_cleaned != {"cleaned": True}:
+            raise RuntimeError("emergency rollback recovery cleanup differs") from exc
         raise RuntimeError("emergency rollback failed atomically") from exc
     return {
         "schema": "home-gateway/p3-peer-emergency-rollback/v2",
@@ -1253,29 +1266,28 @@ def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
     if action["action"] in {"inspect", "verify", "verify-recovery"}:
         return _system_rollback_observation(action)
     if action["action"] == "cleanup":
-        state = _RECOVERY_STATES.pop(action["recovery_state"], None)
+        state = _RECOVERY_STATES.get(action["recovery_state"])
         if state is None:
             raise ValueError("emergency rollback recovery state differs")
         for backup in state.values():
             if backup is not None:
                 backup.unlink(missing_ok=True)
+        _RECOVERY_STATES.pop(action["recovery_state"], None)
         return {"cleaned": True}
     if action["action"] == "recover":
-        state = _RECOVERY_STATES.pop(action["recovery_state"], None)
+        state = _RECOVERY_STATES.get(action["recovery_state"])
         if state is None:
             raise ValueError("emergency rollback recovery state differs")
-        try:
-            os.replace(state["config"], config_path)
-            os.replace(state["metadata"], metadata_path)
-            if state["temporary"] is None:
-                temporary_path.unlink(missing_ok=True)
-            else:
-                os.replace(state["temporary"], temporary_path)
-        finally:
-            for backup in state.values():
-                if backup is not None:
-                    backup.unlink(missing_ok=True)
-        return {"recovered": True, "recovery_syncconf_path": str(config_path)}
+        os.replace(state["config"], config_path)
+        os.replace(state["metadata"], metadata_path)
+        if state["temporary"] is None:
+            temporary_path.unlink(missing_ok=True)
+        else:
+            os.replace(state["temporary"], temporary_path)
+        return {
+            "recovered": True,
+            "recovery_syncconf_path": str(state["syncconf"]),
+        }
     if action["action"] != "remove":
         raise ValueError("emergency rollback filesystem action differs")
     expected_pre = rollback_expected_observation(action, phase="pre")
@@ -1307,9 +1319,11 @@ def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
     config_backup = recovery_root / (".recovery-" + token + ".conf")
     metadata_backup = recovery_root / (".recovery-" + token + ".json")
     temporary_backup = recovery_root / (".recovery-" + token + ".tmp")
+    syncconf_backup = recovery_root / (".recovery-" + token + ".syncconf")
     _backup_exact_file(config_path, config_backup)
     try:
         _backup_exact_file(metadata_path, metadata_backup)
+        _backup_exact_file(config_path, syncconf_backup)
         if temporary_path.exists():
             _backup_exact_file(temporary_path, temporary_backup)
             saved_temporary: pathlib.Path | None = temporary_backup
@@ -1319,6 +1333,7 @@ def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
             "config": config_backup,
             "metadata": metadata_backup,
             "temporary": saved_temporary,
+            "syncconf": syncconf_backup,
         }
         _atomic_replace(config_path, config_bytes)
         _atomic_replace(metadata_path, _canonical(metadata_value))
@@ -1332,6 +1347,7 @@ def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
             os.replace(metadata_backup, metadata_path)
         if temporary_backup.exists():
             os.replace(temporary_backup, temporary_path)
+        syncconf_backup.unlink(missing_ok=True)
         raise
 
 
@@ -1396,9 +1412,13 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> int:
     try:
-        raise SystemExit(main())
-    except (ValueError, RuntimeError):
+        return main()
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError):
         print('{"error":"P3_GUARD_FAILED"}', file=sys.stderr)
-        raise SystemExit(1) from None
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli())

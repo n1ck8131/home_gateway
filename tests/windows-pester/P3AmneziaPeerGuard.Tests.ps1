@@ -250,4 +250,31 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $text | Should -Not -Match 'home-gateway-p3-peer-observe|--automatic|System32.{1,4}OpenSSH'
         $text | Should -Match "ClientObserve"
     }
+
+    It 'owns AgentStop in finally and treats cleanup failure as terminal' {
+        $script:Stops = 0
+        { Invoke-P3OwnedAgentLifecycle -StartRunner { [pscustomobject]@{ agent_pid = 4242 } } -BodyRunner { throw 'synthetic body failure' } -StopRunner {
+            param($state) $script:Stops++; $state.agent_pid | Should -Be 4242
+        } } | Should -Throw '*body failure*'
+        $script:Stops | Should -Be 1
+        { Invoke-P3OwnedAgentLifecycle -StartRunner { [pscustomobject]@{ agent_pid = 4242 } } -BodyRunner { 'done' } -StopRunner {
+            throw 'synthetic cleanup failure'
+        } } | Should -Throw '*cleanup failure*'
+    }
+
+    It 'kills and waits the exact stream child when OnEvent throws before temp cleanup' {
+        $script:Kills = 0; $script:Waits = 0
+        $script:FakeProcess = [pscustomobject]@{ HasExited = $false; ExitCode = 1 }
+        $script:FakeProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value { }
+        { Invoke-P3NativeGuardStreamProcess -Executable 'synthetic.exe' -Arguments @() -InputJson '{}' `
+            -OnEvent { throw 'synthetic OnEvent failure' } -TimeoutSeconds 2 -MaximumBytes 65536 `
+            -ProcessRunner {
+                param($Executable, $Arguments, $InputPath, $OutputPath, $ErrorPath)
+                [IO.File]::WriteAllText($OutputPath, "synthetic-event`n", [Text.UTF8Encoding]::new($false))
+                $script:FakeProcess
+            } -KillRunner { param($Process) $script:Kills++; $Process.HasExited = $true } `
+            -WaitRunner { param($Process) $script:Waits++ } } | Should -Throw '*OnEvent failure*'
+        $script:Kills | Should -Be 1
+        $script:Waits | Should -Be 1
+    }
 }

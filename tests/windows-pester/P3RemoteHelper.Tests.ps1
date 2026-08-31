@@ -81,6 +81,42 @@ Describe 'P3 exact remote helper lifecycle' {
         ($scp -join ' ') | Should -Not -Match 'sudo|classify|install|remove'
     }
 
+    It 'executes the exact adapter protocol for absent install remove and failed-upload cleanup in TestDrive' {
+        $program = Get-P3RemoteAdapterProgram
+        $encodedProgram = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($program))
+        $bootstrap = "import base64;exec(compile(base64.b64decode('$encodedProgram'),'<p3-test>','exec'))"
+        $target = Join-Path $TestDrive 'adapter\home-gateway-p3-peer-guard'
+        $uploadRoot = Join-Path $TestDrive 'adapter\uploads'
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $target), $uploadRoot
+        $token = '1' * 32
+        $payload = [Text.Encoding]::UTF8.GetBytes('adapter-payload')
+        $payloadHash = Get-P3RemoteSHA256Bytes $payload
+        $absent = (& python -c $bootstrap classify $payloadHash $token $target $uploadRoot) | ConvertFrom-Json
+        $LASTEXITCODE | Should -Be 0
+        $absent.state | Should -BeExactly 'absent'
+
+        $upload = Join-Path $uploadRoot ('.home-gateway-p3-' + $token + '.upload')
+        [IO.File]::WriteAllBytes($upload, $payload)
+        $installed = (& python -c $bootstrap install $payloadHash $token $target $uploadRoot) | ConvertFrom-Json
+        $LASTEXITCODE | Should -Be 0
+        $installed.schema | Should -BeExactly 'home-gateway/p3-remote-helper-install-receipt/v1'
+        (Get-P3RemoteFileSHA256 $target) | Should -BeExactly $payloadHash
+        Test-Path -LiteralPath $upload | Should -BeFalse
+
+        $removed = (& python -c $bootstrap remove $payloadHash $token $target $uploadRoot) | ConvertFrom-Json
+        $LASTEXITCODE | Should -Be 0
+        $removed.schema | Should -BeExactly 'home-gateway/p3-remote-helper-remove-receipt/v1'
+        Test-Path -LiteralPath $target | Should -BeFalse
+
+        [IO.File]::WriteAllText($upload, 'wrong')
+        $savedPreference = $ErrorActionPreference
+        try { $ErrorActionPreference = 'Continue'; $null = & python -c $bootstrap install $payloadHash $token $target $uploadRoot 2>&1 }
+        finally { $ErrorActionPreference = $savedPreference }
+        $LASTEXITCODE | Should -Not -Be 0
+        Test-Path -LiteralPath $upload | Should -BeFalse
+        @(Get-ChildItem -LiteralPath (Split-Path -Parent $target) -Filter '*.next-*').Count | Should -Be 0
+    }
+
     It 'revalidates absent state at apply and stops on a target race before upload' {
         $plan = Invoke-P3RemoteInstallPlan -Context $script:Context -SshRunner { $script:AbsentState | ConvertTo-Json -Compress }
         $script:ScpCalls = 0

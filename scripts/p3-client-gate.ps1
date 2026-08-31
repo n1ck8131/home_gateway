@@ -14,8 +14,6 @@ param(
     [string]$ExpectedProfileSHA256,
     [string]$ExpectedClientSHA256,
     [string]$ExpectedKnownHostsSHA256,
-    [string]$ExpectedBeforeCounterSHA256,
-    [string]$ExpectedAfterCounterSHA256,
     [string[]]$EgressEndpoints,
     [string]$PreviousNonceSHA256 = ('0' * 64),
     [string]$ExpectedClientVersion = '5.0.1.5'
@@ -53,11 +51,7 @@ function Assert-P3ClientSHA256([string]$Value, [string]$Label) {
 }
 
 function Assert-P3ClientExactProperties([object]$Value, [string[]]$Expected, [string]$Label) {
-    if ($Value -is [Array]) {
-        if ($Value.Count -ne 1) { throw "$Label schema differs" }
-        $Value = $Value[0]
-    }
-    if ($null -eq $Value) { throw "$Label schema differs" }
+    if ($null -eq $Value -or $Value -is [Array]) { throw "$Label schema differs" }
     $actual = @($Value.PSObject.Properties.Name | Sort-Object)
     if (@(Compare-Object -ReferenceObject ($Expected | Sort-Object) -DifferenceObject $actual).Count -ne 0) {
         throw "$Label schema differs"
@@ -167,9 +161,7 @@ function Invoke-P3ClientPeerObservation([object]$Context, [string]$Nonce, [scrip
         @{ Value = $Context.PayloadSHA256; Label = 'payload' },
         @{ Value = $Context.ProtocolSHA256; Label = 'protocol' },
         @{ Value = $Context.SelectedGuestFingerprintSHA256; Label = 'selected Guest' },
-        @{ Value = $Context.PreviousNonceSHA256; Label = 'previous nonce' },
-        @{ Value = $Context.ExpectedBeforeCounterSHA256; Label = 'before counter' },
-        @{ Value = $Context.ExpectedAfterCounterSHA256; Label = 'after counter' }
+        @{ Value = $Context.PreviousNonceSHA256; Label = 'previous nonce' }
     )) { Assert-P3ClientSHA256 -Value ([string]$entry.Value) -Label ([string]$entry.Label) }
     if ($Nonce -cnotmatch '^[0-9a-f]{64}$') { throw 'nonce differs' }
     $nonceSHA256 = Get-P3ClientTextSHA256 $Nonce
@@ -180,8 +172,6 @@ function Invoke-P3ClientPeerObservation([object]$Context, [string]$Nonce, [scrip
         nonce = $Nonce
         selected_guest_fingerprint_sha256 = [string]$Context.SelectedGuestFingerprintSHA256
         previous_nonce_sha256 = [string]$Context.PreviousNonceSHA256
-        expected_before_counter_sha256 = [string]$Context.ExpectedBeforeCounterSHA256
-        expected_after_counter_sha256 = [string]$Context.ExpectedAfterCounterSHA256
     }
     $arguments = @(
         '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $launcher, '-Action', 'ClientObserve',
@@ -204,8 +194,9 @@ function Invoke-P3ClientPeerObservation([object]$Context, [string]$Nonce, [scrip
     if ([string]$receipt.nonce_sha256 -cne $nonceSHA256) { throw 'client receipt nonce differs' }
     if (-not [bool]$receipt.selected_guest_match) { throw 'client receipt selected Guest differs' }
     if (-not [bool]$receipt.handshake_fresh) { throw 'client receipt handshake differs' }
-    if ([string]$receipt.before_counter_sha256 -cne [string]$Context.ExpectedBeforeCounterSHA256) { throw 'client receipt before counter differs' }
-    if ([string]$receipt.after_counter_sha256 -cne [string]$Context.ExpectedAfterCounterSHA256) { throw 'client receipt after counter differs' }
+    Assert-P3ClientSHA256 -Value ([string]$receipt.before_counter_sha256) -Label 'client receipt before counter'
+    Assert-P3ClientSHA256 -Value ([string]$receipt.after_counter_sha256) -Label 'client receipt after counter'
+    if ([string]$receipt.before_counter_sha256 -ceq [string]$receipt.after_counter_sha256) { throw 'client receipt after counter differs' }
     if (-not [bool]$receipt.traffic_delta) { throw 'client receipt traffic differs' }
     if ([int]$receipt.observation_duration_seconds -lt 1 -or [int]$receipt.observation_duration_seconds -gt 180) { throw 'client receipt duration differs' }
     return $receipt
@@ -264,6 +255,25 @@ function Get-P3ClientClass([object[]]$Items) {
     return [pscustomobject]@{ Count = $values.Count; SHA256 = Get-P3ClientTextSHA256 ($values -join "`n") }
 }
 
+function Get-P3ClientAdapterSummary([object[]]$Items) {
+    $classified = & {
+        param([object[]]$AdapterItems)
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        foreach ($item in $AdapterItems) {
+            [pscustomobject]@{
+                Item = $item
+                Class = Get-P3AdapterClass -InterfaceDescription ([string]$item.InterfaceDescription)
+            }
+        }
+    } $Items
+    $result = [ordered]@{}
+    foreach ($name in @('redshield', 'cisco', 'selfhosted', 'other')) {
+        $members = @($classified | Where-Object { $_.Class -ceq $name } | ForEach-Object { $_.Item })
+        $result[$name] = [pscustomobject]@{ Items = $members; Count = $members.Count; SHA256 = (Get-P3ClientClass $members).SHA256 }
+    }
+    return [pscustomobject]$result
+}
+
 function Test-P3ClientEgressAuthorities([string[]]$Endpoints, [string[]]$ExpectedAuthoritySHA256) {
     if (@($Endpoints).Count -ne 3 -or @($ExpectedAuthoritySHA256).Count -ne 3) { throw 'three HTTPS egress authorities are required' }
     $actual = @()
@@ -291,10 +301,11 @@ function Get-P3LiveClientObservation([string]$Action, [string]$ClientPath, [stri
     $signature = Get-AuthenticodeSignature -LiteralPath $clientItem.FullName
     $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($clientItem.FullName).FileVersion
     $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop)
-    $redshield = Get-P3ClientClass @($adapters | Where-Object { $_.InterfaceDescription -match 'RedShield' })
-    $cisco = Get-P3ClientClass @($adapters | Where-Object { $_.InterfaceDescription -match 'Cisco' })
-    $selfhosted = @($adapters | Where-Object { $_.InterfaceDescription -match 'Amnezia|Wintun|WireGuard' -and $_.InterfaceDescription -notmatch 'RedShield' })
-    $selfhostedClass = Get-P3ClientClass $selfhosted
+    $adapterSummary = Get-P3ClientAdapterSummary -Items $adapters
+    $redshield = $adapterSummary.redshield
+    $cisco = $adapterSummary.cisco
+    $selfhosted = @($adapterSummary.selfhosted.Items)
+    $selfhostedClass = $adapterSummary.selfhosted
     $routeMatches = $false
     $egressSHA256 = Get-P3ClientTextSHA256 ''
     $egressCount = 0
@@ -386,8 +397,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
             LauncherPath = Join-Path $PSScriptRoot 'p3-amnezia-peer-guard.ps1'; RuntimeRoot = $RuntimeRoot
             ExpectedManifestSHA256 = $ExpectedManifestSHA256; PayloadSHA256 = $runtime.Manifest.local_payload_sha256
             ProtocolSHA256 = $runtime.Manifest.protocol_sha256; SelectedGuestFingerprintSHA256 = $ExpectedGuestPeerFingerprintSHA256
-            PreviousNonceSHA256 = $PreviousNonceSHA256; ExpectedBeforeCounterSHA256 = $ExpectedBeforeCounterSHA256
-            ExpectedAfterCounterSHA256 = $ExpectedAfterCounterSHA256
+            PreviousNonceSHA256 = $PreviousNonceSHA256
         }
         $peerReceipt = Invoke-P3ClientPeerObservation -Context $context -Nonce $nonce -Runner $null
         if ([int]$observation.selfhosted_adapter_count -ne 1 -or -not [bool]$observation.route_matches_selfhosted -or

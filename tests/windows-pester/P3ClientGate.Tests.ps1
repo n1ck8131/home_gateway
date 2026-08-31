@@ -14,8 +14,6 @@ Describe 'read-only P3 client gate v2' {
                 ProtocolSHA256 = ('3' * 64)
                 SelectedGuestFingerprintSHA256 = ('4' * 64)
                 PreviousNonceSHA256 = ('5' * 64)
-                ExpectedBeforeCounterSHA256 = ('6' * 64)
-                ExpectedAfterCounterSHA256 = ('7' * 64)
             }
         }
 
@@ -24,8 +22,8 @@ Describe 'read-only P3 client gate v2' {
                 schema = 'home-gateway/p3-peer-client-observe/v2'; payload_sha256 = $Context.PayloadSHA256
                 protocol_sha256 = $Context.ProtocolSHA256; nonce_sha256 = Get-P3ClientTextSHA256 $Nonce
                 selected_guest_match = $true; handshake_fresh = $true
-                before_counter_sha256 = $Context.ExpectedBeforeCounterSHA256
-                after_counter_sha256 = $Context.ExpectedAfterCounterSHA256
+                before_counter_sha256 = ('6' * 64)
+                after_counter_sha256 = ('7' * 64)
                 traffic_delta = $true; observation_duration_seconds = 10
             }
         }
@@ -81,6 +79,8 @@ Describe 'read-only P3 client gate v2' {
             $Arguments | Should -Not -Contain '/usr/local/libexec/home-gateway-p3-peer-observe'
             $request = $InputJson | ConvertFrom-Json
             $request.selected_guest_fingerprint_sha256 | Should -BeExactly $script:Context.SelectedGuestFingerprintSHA256
+            $request.PSObject.Properties.Name | Should -Not -Contain 'expected_before_counter_sha256'
+            $request.PSObject.Properties.Name | Should -Not -Contain 'expected_after_counter_sha256'
             [pscustomobject]@{
                 ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''
                 StdOut = (New-ClientReceipt $script:Context $nonce | ConvertTo-Json -Compress)
@@ -100,8 +100,8 @@ Describe 'read-only P3 client gate v2' {
             @{ Name = 'protocol'; Change = { param($r) $r.protocol_sha256 = ('0' * 64) } },
             @{ Name = 'selected Guest'; Change = { param($r) $r.selected_guest_match = $false } },
             @{ Name = 'handshake'; Change = { param($r) $r.handshake_fresh = $false } },
-            @{ Name = 'before counter'; Change = { param($r) $r.before_counter_sha256 = ('0' * 64) } },
-            @{ Name = 'after counter'; Change = { param($r) $r.after_counter_sha256 = ('0' * 64) } },
+            @{ Name = 'before counter'; Change = { param($r) $r.before_counter_sha256 = 'invalid' } },
+            @{ Name = 'after counter'; Change = { param($r) $r.after_counter_sha256 = $r.before_counter_sha256 } },
             @{ Name = 'traffic'; Change = { param($r) $r.traffic_delta = $false } },
             @{ Name = 'duration'; Change = { param($r) $r.observation_duration_seconds = 181 } },
             @{ Name = 'schema'; Change = { param($r) $r.extra = $true } }
@@ -118,6 +118,27 @@ Describe 'read-only P3 client gate v2' {
         $calls = 0
         { Invoke-P3ClientPeerObservation -Context $script:Context -Nonce $nonce -Runner { $calls++ } } | Should -Throw '*replayed*'
         $calls | Should -Be 0
+    }
+
+    It 'rejects every JSON array including one exact receipt object' {
+        $nonce = 'a' * 64
+        $json = '[' + (New-ClientReceipt $script:Context $nonce | ConvertTo-Json -Compress) + ']'
+        { Invoke-P3ClientPeerObservation -Context $script:Context -Nonce $nonce -Runner {
+            [pscustomobject]@{ ExitCode = 0; TimedOut = $false; Oversized = $false; StdErr = ''; StdOut = $json }
+        }.GetNewClosure() } | Should -Throw '*schema*'
+    }
+
+    It 'uses the centralized adapter classifier for production-shaped descriptions' {
+        $summary = Get-P3ClientAdapterSummary -Items @(
+            [pscustomobject]@{ InterfaceDescription = 'RedShield WireGuard Tunnel' },
+            [pscustomobject]@{ InterfaceDescription = 'Cisco Secure Client' },
+            [pscustomobject]@{ InterfaceDescription = 'AmneziaWG Tunnel' }
+        )
+        $summary.redshield.Count | Should -Be 1
+        $summary.cisco.Count | Should -Be 1
+        $summary.selfhosted.Count | Should -Be 1
+        { Get-P3ClientAdapterSummary -Items @([pscustomobject]@{ InterfaceDescription = 'Cisco RedShield WireGuard Adapter' }) } |
+            Should -Throw '*ambiguous*'
     }
 
     It 'writes PRE preservation classes and computes later equality itself' {

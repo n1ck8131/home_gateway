@@ -148,14 +148,10 @@ function New-P3GitScpArguments([object]$Trust, [object]$Agent) {
     )
 }
 
-function New-P3RemoteAdapterCommand([string]$Mode, [string]$ExpectedPayloadSHA256, [string]$Token) {
-    if ($Mode -notin @('classify', 'install', 'remove')) { throw 'remote adapter mode differs' }
-    Assert-P3RemoteSHA256 -Value $ExpectedPayloadSHA256 -Label 'remote adapter payload'
-    if ($Mode -ceq 'install' -and $Token -cnotmatch '^[0-9a-f]{32}$') { throw 'remote adapter token differs' }
-    if ($Mode -cne 'install' -and -not [string]::IsNullOrEmpty($Token)) { throw 'remote adapter token differs' }
-    $program = @'
+function Get-P3RemoteAdapterProgram {
+    return @'
 import glob, hashlib, json, os, shutil, stat, sys
-TARGET = "/usr/local/libexec/home-gateway-p3-peer-guard"
+mode, expected, token, TARGET, UPLOAD_ROOT = sys.argv[1:6]
 ZERO = "0" * 64
 def digest(path):
     h = hashlib.sha256()
@@ -164,26 +160,28 @@ def digest(path):
             h.update(chunk)
     return h.hexdigest()
 def leftovers():
-    return len(glob.glob(TARGET + ".next-*")) + len(glob.glob("/tmp/.home-gateway-p3-*.upload"))
+    return len(glob.glob(TARGET + ".next-*")) + len(glob.glob(os.path.join(UPLOAD_ROOT, ".home-gateway-p3-*.upload")))
 def classify(expected):
     if not os.path.lexists(TARGET):
         return {"state":"absent","regular":False,"owner_match":False,"group_match":False,"mode_match":False,"payload_sha256":ZERO,"temporary_leftover_count":leftovers()}
     info = os.lstat(TARGET)
     regular = stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode)
     value = digest(TARGET) if regular else ZERO
-    exact = regular and info.st_uid == 0 and info.st_gid == 0 and stat.S_IMODE(info.st_mode) == 0o755 and value == expected
-    return {"state":"exact" if exact else "conflict","regular":regular,"owner_match":info.st_uid==0,"group_match":info.st_gid==0,"mode_match":stat.S_IMODE(info.st_mode)==0o755,"payload_sha256":value,"temporary_leftover_count":leftovers()}
+    owner_match = os.name == "nt" or info.st_uid == 0
+    group_match = os.name == "nt" or info.st_gid == 0
+    mode_match = os.name == "nt" or stat.S_IMODE(info.st_mode) == 0o755
+    exact = regular and owner_match and group_match and mode_match and value == expected
+    return {"state":"exact" if exact else "conflict","regular":regular,"owner_match":owner_match,"group_match":group_match,"mode_match":mode_match,"payload_sha256":value,"temporary_leftover_count":leftovers()}
 def cleanup(paths):
     for path in paths:
         try:
             if os.path.lexists(path): os.unlink(path)
         except OSError:
             pass
-mode, expected, token = sys.argv[1:4]
 if mode == "classify":
     result = classify(expected)
 elif mode == "install":
-    upload = "/tmp/.home-gateway-p3-" + token + ".upload"
+    upload = os.path.join(UPLOAD_ROOT, ".home-gateway-p3-" + token + ".upload")
     nxt = TARGET + ".next-" + token
     try:
         if classify(expected)["state"] != "absent": raise RuntimeError("target race")
@@ -192,7 +190,8 @@ elif mode == "install":
         fd = os.open(nxt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
         with os.fdopen(fd, "wb", buffering=0) as target, open(upload, "rb", buffering=0) as source:
             shutil.copyfileobj(source, target, 131072); target.flush(); os.fsync(target.fileno())
-        os.chown(nxt, 0, 0); os.chmod(nxt, 0o755)
+        if hasattr(os, "chown"): os.chown(nxt, 0, 0)
+        os.chmod(nxt, 0o755)
         if digest(nxt) != expected: raise RuntimeError("staged identity")
         os.link(nxt, TARGET)
         cleanup([nxt, upload])
@@ -212,9 +211,18 @@ else:
     raise RuntimeError("mode")
 sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",",":")))
 '@
+}
+
+function New-P3RemoteAdapterCommand([string]$Mode, [string]$ExpectedPayloadSHA256, [string]$Token) {
+    if ($Mode -notin @('classify', 'install', 'remove')) { throw 'remote adapter mode differs' }
+    Assert-P3RemoteSHA256 -Value $ExpectedPayloadSHA256 -Label 'remote adapter payload'
+    if ($Mode -ceq 'install' -and $Token -cnotmatch '^[0-9a-f]{32}$') { throw 'remote adapter token differs' }
+    if ($Mode -cne 'install' -and -not [string]::IsNullOrEmpty($Token)) { throw 'remote adapter token differs' }
+    $program = Get-P3RemoteAdapterProgram
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($program))
     $bootstrap = "import base64;exec(compile(base64.b64decode('$encoded'),'<p3-lifecycle>','exec'))"
-    return @('sudo', '-n', '/usr/bin/python3', '-c', $bootstrap, $Mode, $ExpectedPayloadSHA256, $Token)
+    $wireToken = if ([string]::IsNullOrEmpty($Token)) { '0' * 32 } else { $Token }
+    return @('sudo', '-n', '/usr/bin/python3', '-c', $bootstrap, $Mode, $ExpectedPayloadSHA256, $wireToken, $script:P3RemoteTarget, '/tmp')
 }
 
 function ConvertFrom-P3RemoteState([string]$Json, [string]$ExpectedPayloadSHA256) {

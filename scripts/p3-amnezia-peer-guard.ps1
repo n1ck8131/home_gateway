@@ -462,6 +462,17 @@ function Invoke-P3EmergencyRollback([object]$Context, [object]$Plan, [string]$Ex
     return Invoke-P3BoundedJsonSsh -Context $Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $Runner
 }
 
+function Invoke-P3OwnedAgentLifecycle([scriptblock]$StartRunner, [scriptblock]$BodyRunner, [scriptblock]$StopRunner) {
+    if ($null -eq $StartRunner -or $null -eq $BodyRunner -or $null -eq $StopRunner) { throw 'owned agent lifecycle runner differs' }
+    $state = & $StartRunner
+    if ($null -eq $state) { throw 'owned agent lifecycle start differs' }
+    try {
+        return & $BodyRunner $state
+    } finally {
+        & $StopRunner $state
+    }
+}
+
 function Invoke-P3NativeJsonProcess([string]$Executable, [string[]]$Arguments, [string]$InputJson, [int]$TimeoutSeconds, [int]$MaximumBytes) {
     $inputPath = [IO.Path]::GetTempFileName(); $outputPath = [IO.Path]::GetTempFileName(); $errorPath = [IO.Path]::GetTempFileName()
     try {
@@ -484,26 +495,34 @@ function Invoke-P3NativeJsonProcess([string]$Executable, [string[]]$Arguments, [
 
 function Invoke-P3NativeGuardStreamProcess(
     [string]$Executable, [string[]]$Arguments, [string]$InputJson, [scriptblock]$OnEvent,
-    [int]$TimeoutSeconds, [int]$MaximumBytes
+    [int]$TimeoutSeconds, [int]$MaximumBytes,
+    [scriptblock]$ProcessRunner = $null, [scriptblock]$KillRunner = $null, [scriptblock]$WaitRunner = $null
 ) {
     $inputPath = [IO.Path]::GetTempFileName(); $outputPath = [IO.Path]::GetTempFileName(); $errorPath = [IO.Path]::GetTempFileName()
+    $process = $null; $waited = $false
+    if ($null -eq $ProcessRunner) {
+        $ProcessRunner = { param($Executable, $Arguments, $InputPath, $OutputPath, $ErrorPath) Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardInput $InputPath -RedirectStandardOutput $OutputPath -RedirectStandardError $ErrorPath -PassThru }
+    }
+    if ($null -eq $KillRunner) { $KillRunner = { param($Process) $Process.Kill() } }
+    if ($null -eq $WaitRunner) { $WaitRunner = { param($Process) $Process.WaitForExit() } }
     try {
         [IO.File]::WriteAllText($inputPath, $InputJson, [Text.UTF8Encoding]::new($false))
-        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardInput $inputPath -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -PassThru
+        $process = & $ProcessRunner $Executable $Arguments $inputPath $outputPath $errorPath
+        if ($null -eq $process) { throw 'guard stream child start differs' }
         $watch = [Diagnostics.Stopwatch]::StartNew(); $processed = 0; $timedOut = $false; $oversized = $false
         while (-not $process.HasExited) {
             $length = ([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length
-            if ($length -gt $MaximumBytes) { $oversized = $true; $process.Kill(); break }
-            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) { $timedOut = $true; $process.Kill(); break }
+            if ($length -gt $MaximumBytes) { $oversized = $true; & $KillRunner $process; break }
+            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) { $timedOut = $true; & $KillRunner $process; break }
             $text = [IO.File]::ReadAllText($outputPath, [Text.UTF8Encoding]::new($false, $true))
-            $lines = @($text -split "`r?`n", -1)
+            $lines = @($text -split "`r?`n")
             $completeCount = if ($text.EndsWith("`n")) { $lines.Count - 1 } else { [Math]::Max(0, $lines.Count - 1) }
             while ($processed -lt $completeCount) { if (-not [string]::IsNullOrEmpty($lines[$processed])) { & $OnEvent $lines[$processed] (-not $process.HasExited) }; $processed++ }
             Start-Sleep -Milliseconds 50; $process.Refresh()
         }
-        $process.WaitForExit()
+        & $WaitRunner $process; $waited = $true
         $text = if ($oversized) { '' } else { [IO.File]::ReadAllText($outputPath, [Text.UTF8Encoding]::new($false, $true)) }
-        $lines = @($text -split "`r?`n", -1); $endsNewline = $text.EndsWith("`n")
+        $lines = @($text -split "`r?`n"); $endsNewline = $text.EndsWith("`n")
         $completeCount = if ($endsNewline) { $lines.Count - 1 } else { [Math]::Max(0, $lines.Count - 1) }
         while ($processed -lt $completeCount) { if (-not [string]::IsNullOrEmpty($lines[$processed])) { & $OnEvent $lines[$processed] $false }; $processed++ }
         return [pscustomobject]@{
@@ -511,22 +530,32 @@ function Invoke-P3NativeGuardStreamProcess(
             StdErr = if ($oversized) { '' } else { [IO.File]::ReadAllText($errorPath, [Text.UTF8Encoding]::new($false, $true)) }
             PartialLine = (-not $endsNewline -and $text.Length -gt 0)
         }
-    } finally { foreach ($path in @($inputPath, $outputPath, $errorPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } } }
+    } catch {
+        if ($null -ne $process -and -not [bool]$process.HasExited) { & $KillRunner $process }
+        if ($null -ne $process -and -not $waited) { & $WaitRunner $process; $waited = $true }
+        throw
+    } finally {
+        if ($null -ne $process -and -not [bool]$process.HasExited) { & $KillRunner $process }
+        if ($null -ne $process -and -not $waited) { & $WaitRunner $process }
+        foreach ($path in @($inputPath, $outputPath, $errorPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+    }
 }
 
 $script:P3NativeJsonRunner = { param($Executable, $Arguments, $InputJson, $TimeoutSeconds, $MaximumBytes) Invoke-P3NativeJsonProcess @PSBoundParameters }
 $script:P3NativeStreamRunner = { param($Executable, $Arguments, $InputJson, $OnEvent, $TimeoutSeconds, $MaximumBytes) Invoke-P3NativeGuardStreamProcess @PSBoundParameters }
 
 function Get-P3PreliveContext([string]$RuntimeRoot, [string]$ExpectedManifestSHA256) {
+    $requestedRoot = $RuntimeRoot
+    $requestedManifestSHA256 = $ExpectedManifestSHA256
     . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
-    $null = Invoke-P3RuntimeValidate -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256
-    $trust = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'trust.json') -MaximumBytes 65536 -ExpectedProperties $script:P3TrustProperties
-    $manifest = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
-    $cloud = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'cloud-firewall-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CloudFirewallReceiptProperties
-    $local = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'local-baseline-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3LocalBaselineReceiptProperties
-    $egressReceipt = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'egress-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3EgressReceiptProperties
-    $agent = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'agent-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CombinedAgentReceiptProperties
-    $install = Open-P3BoundedStableJson -Path (Join-Path $RuntimeRoot 'remote-install-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3InstallReceiptProperties
+    $null = Invoke-P3RuntimeValidate -RuntimeRoot $requestedRoot -ExpectedManifestSHA256 $requestedManifestSHA256
+    $trust = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'trust.json') -MaximumBytes 65536 -ExpectedProperties $script:P3TrustProperties
+    $manifest = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+    $cloud = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'cloud-firewall-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CloudFirewallReceiptProperties
+    $local = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'local-baseline-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3LocalBaselineReceiptProperties
+    $egressReceipt = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'egress-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3EgressReceiptProperties
+    $agent = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'agent-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CombinedAgentReceiptProperties
+    $install = Open-P3BoundedStableJson -Path (Join-Path $requestedRoot 'remote-install-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3InstallReceiptProperties
     if ($trust.PSObject.Properties.Name -notcontains 'accepted_server_baseline') { throw 'protected trust lacks accepted server baseline details' }
     $baseline = $trust.accepted_server_baseline
     $egress = @()
@@ -545,7 +574,7 @@ function Get-P3PreliveContext([string]$RuntimeRoot, [string]$ExpectedManifestSHA
     )
     foreach ($entry in $external) { if ((Get-P3ExactFileSHA256 -Path $entry[0] -Label $entry[2]) -cne $entry[1]) { throw "$($entry[2]) context hash differs" } }
     return [pscustomobject]@{
-        ManifestSHA256 = $ExpectedManifestSHA256; PayloadSHA256 = $manifest.local_payload_sha256; ProtocolSHA256 = $manifest.protocol_sha256
+        ManifestSHA256 = $requestedManifestSHA256; PayloadSHA256 = $manifest.local_payload_sha256; ProtocolSHA256 = $manifest.protocol_sha256
         InstallReceiptSHA256 = Get-P3GuardCanonicalSHA256 $install; ExpectedServerBaselineSHA256 = $manifest.accepted_server_baseline_sha256
         ExpectedCloudFirewallSHA256 = $manifest.accepted_cloud_firewall_sha256; ExpectedContainerIdentitySHA256 = $baseline.container_identity_sha256
         ExpectedImageIdentitySHA256 = $baseline.image_identity_sha256; ExpectedUdpPublicationSHA256 = $baseline.udp_publication_sha256

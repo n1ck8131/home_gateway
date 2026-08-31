@@ -336,6 +336,30 @@ class PeerGuardProtocolTests(unittest.TestCase):
         self.assertTrue(snapshot["ipv6_non_mutation"])
         self.assertEqual(snapshot["temporary_leftover_count"], 0)
 
+        malformed = dict(files)
+        malformed["/opt/amnezia/awg/wg0.conf"] = (
+            b"[Interface]\n[Peer]\nAllowedIPs = 10.0.0.2/32\n"
+        )
+        with self.assertRaisesRegex(ValueError, "persistent peer"):
+            guard.collect_server_snapshot(
+                request,
+                runner=runner,
+                reader=lambda path, _maximum: malformed[str(path).replace("\\", "/")],
+                lister=lambda _path: [],
+            )
+
+    def test_cli_sanitizes_system_adapter_schema_exceptions_without_traceback(self):
+        request = reconcile_request()
+        stderr = io.StringIO()
+        with (
+            contextlib.redirect_stderr(stderr),
+            mock.patch.object(sys, "argv", [str(SCRIPT), "reconcile"]),
+            mock.patch.object(guard, "read_exact_request", return_value=request),
+            mock.patch.object(guard, "_system_collector", side_effect=KeyError("raw")),
+        ):
+            self.assertEqual(guard.cli(), 1)
+        self.assertEqual(stderr.getvalue().strip(), '{"error":"P3_GUARD_FAILED"}')
+
 
 class PeerGuardStreamingTests(unittest.TestCase):
     def candidate(self, operation="admin", fingerprint="8" * 64):
@@ -438,6 +462,23 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         self.assertTrue(receipt["traffic_delta"])
         self.assertEqual(receipt["observation_duration_seconds"], 10)
         self.assertEqual(clock.sleeps, [10])
+
+    def test_client_observation_samples_coordinated_traffic_inside_window(self):
+        before, after = self.client_states()
+        state = copy.deepcopy(before)
+
+        class CoordinatedClock(FakeClock):
+            def sleep(self, seconds):
+                state.update(copy.deepcopy(after))
+                super().sleep(seconds)
+
+        receipt = guard.run_client_observe(
+            client_request(before, after),
+            lambda _request: copy.deepcopy(state),
+            CoordinatedClock(),
+        )
+        self.assertEqual(receipt["before_counter_sha256"], sha(before["counter_state"]))
+        self.assertEqual(receipt["after_counter_sha256"], sha(after["counter_state"]))
 
     def test_client_observation_rejects_identity_freshness_counter_and_delta_mismatch(
         self,
@@ -573,6 +614,8 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
                 }
             if action["action"] == "verify-recovery":
                 return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "cleanup":
+                return {"cleaned": True}
             raise AssertionError(action)
 
         sync_calls = []
@@ -584,7 +627,9 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "rollback failed atomically"):
             guard.run_emergency_rollback(self.rollback_request(), filesystem, syncconf)
-        self.assertEqual(calls, ["inspect", "remove", "recover", "verify-recovery"])
+        self.assertEqual(
+            calls, ["inspect", "remove", "recover", "verify-recovery", "cleanup"]
+        )
         self.assertEqual(len(sync_calls), 2)
 
     def test_main_dispatches_client_and_emergency_modes_to_fixed_adapters(self):

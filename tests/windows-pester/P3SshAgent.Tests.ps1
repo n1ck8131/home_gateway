@@ -190,4 +190,30 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
             Should -Throw '*environment*'
         $calls | Should -Be 0
     }
+
+    It 'bounds agent exit polling for absent delayed and timed out processes' {
+        $base = [DateTime]::Parse('2026-08-31T12:00:00Z')
+
+        $script:WaitObserveCalls = 0; $script:WaitSleepCalls = 0
+        Wait-P3BoundedAgentExit -ProcessId 4242 -ObserveRunner { param($ProcessId) $script:WaitObserveCalls++; @() } `
+            -SleepRunner { param($Milliseconds) $script:WaitSleepCalls++ } -ClockRunner { $base } | Out-Null
+        $script:WaitObserveCalls | Should -Be 1
+        $script:WaitSleepCalls | Should -Be 0
+
+        $script:WaitObserveCalls = 0; $script:WaitSleepCalls = 0; $script:WaitNow = $base
+        Wait-P3BoundedAgentExit -ProcessId 4242 -ObserveRunner {
+            param($ProcessId)
+            $script:WaitObserveCalls++
+            if ($script:WaitObserveCalls -lt 3) { @([pscustomobject]@{ Id = $ProcessId }) } else { @() }
+        } -SleepRunner { param($Milliseconds) $script:WaitSleepCalls++; $script:WaitNow = $script:WaitNow.AddMilliseconds($Milliseconds) } `
+            -ClockRunner { $script:WaitNow } | Out-Null
+        $script:WaitObserveCalls | Should -Be 3
+        $script:WaitSleepCalls | Should -Be 2
+
+        $script:WaitNow = $base; $script:WaitSleepCalls = 0
+        { Wait-P3BoundedAgentExit -ProcessId 4242 -ObserveRunner { param($ProcessId) @([pscustomobject]@{ Id = $ProcessId }) } `
+            -SleepRunner { param($Milliseconds) $script:WaitSleepCalls++; $script:WaitNow = $script:WaitNow.AddSeconds(11) } `
+            -ClockRunner { $script:WaitNow } } | Should -Throw '*timed out*'
+        $script:WaitSleepCalls | Should -Be 1
+    }
 }

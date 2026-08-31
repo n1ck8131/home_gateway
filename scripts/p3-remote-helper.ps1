@@ -583,12 +583,22 @@ function Invoke-P3OwnedRemoteAction(
             -Confirmation $ownedConfirmation -InputObject $ownedInput -Boundaries $bodyBoundaries
     }
     finally {
-        Stop-P3OwnedAgentEmergency -Manifest $manifest -AgentReceipt $receipt -DeleteRunner $Boundaries.DeleteRunner `
-            -StopRunner $Boundaries.StopRunner -WaitRunner $Boundaries.WaitRunner `
-            -ReobserveRunner $Boundaries.ReobserveRunner -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
-        if ($null -ne $combined) {
+        if ($null -eq $combined) {
+            Stop-P3OwnedAgentEmergency -Manifest $manifest -AgentReceipt $receipt -DeleteRunner $Boundaries.DeleteRunner `
+                -StopRunner $Boundaries.StopRunner -ProcessRunner $Boundaries.ProcessRunner -WaitRunner $Boundaries.WaitRunner `
+                -ReobserveRunner $Boundaries.ReobserveRunner -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+        } else {
+            $storedCombined = Get-P3ProtectedAgentReceipt -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256
+            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $combined)) {
+                throw 'protected agent receipt differs'
+            }
+            $storedReceipt = ConvertTo-P3AgentReceiptFromCombined -CombinedReceipt $storedCombined
+            Stop-P3Agent -Manifest $manifest -AgentReceipt $storedReceipt -DeleteRunner $Boundaries.DeleteRunner `
+                -StopRunner $Boundaries.StopRunner -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
+                -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
+                -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
             Remove-P3ProtectedAgentState -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256 `
-                -Receipt $combined -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
+                -Receipt $storedCombined -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
         }
     }
 }
@@ -622,7 +632,13 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         AgentRunner={param($Executable)& $Executable -s};AddRunner={param($KeyPath)& $manifest.git_ssh_add_path $KeyPath}
         ListRunner={param($Executable)& $Executable -l -E sha256};ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}
         DeleteRunner={& $manifest.git_ssh_add_path -D};StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
-        WaitRunner={param($ProcessId)Wait-Process -Id $ProcessId -ErrorAction Stop};ReobserveRunner={param($ProcessId)@(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)}
+        WaitRunner={
+            param($ProcessId)
+            Wait-P3BoundedAgentExit -ProcessId $ProcessId `
+                -ObserveRunner {param($OwnedProcessId)@(Get-Process -Id $OwnedProcessId -ErrorAction SilentlyContinue)} `
+                -SleepRunner {param($Milliseconds)Start-Sleep -Milliseconds $Milliseconds} `
+                -ClockRunner {[DateTime]::UtcNow}|Out-Null
+        };ReobserveRunner={param($ProcessId)@(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)}
         SocketExistsRunner={param($Path)[IO.File]::Exists($Path)};ReceiptRemoveRunner={param($Path)[IO.File]::Delete($Path)}
         ClockRunner={[DateTime]::UtcNow};SshRunner=$nativeSshRunner
         ScpRunner={param($Executable,$Arguments,$Source,$Target)& $Executable @Arguments $Source "homegateway@$($protected.Trust.ssh_host):$Target";[pscustomobject]@{exit_code=$LASTEXITCODE}}

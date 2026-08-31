@@ -515,6 +515,86 @@ Describe 'P3 protected pre-live runtime' {
         }
     }
 
+    It 'never stops a reused PID after validated guard or remote process identity drifts' {
+        foreach ($owner in @('guard', 'remote')) {
+            foreach ($drift in @('path', 'start')) {
+                $root = Join-Path $TestDrive ("validated-$owner-$drift-" + [guid]::NewGuid().ToString('N'))
+                $fixtureRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+                $null = New-Item -ItemType Directory -Path $fixtureRoot
+                $trust = New-TrustFixture -Root $fixtureRoot
+                $fixture = Initialize-OwnedBatchRuntime -Root $root -Trust $trust
+                $processState = [pscustomobject]@{ Calls=0;Fixture=$fixture;Trust=$trust;Drift=$drift }
+                $script:OwnedAgentStarts = 0; $script:OwnedClockCalls = 0; $script:OwnedStops = 0; $script:OwnedDeletes = 0
+                $processRunner = {
+                    param($ProcessId)
+                    $processState.Calls++
+                    $path = if ($processState.Calls -eq 1 -or $processState.Drift -ceq 'start') { $processState.Fixture.AgentPath } else { $processState.Trust.git_ssh_path }
+                    $start = if ($processState.Calls -eq 1 -or $processState.Drift -ceq 'path') { [DateTime]::UtcNow } else { [DateTime]::UtcNow.AddMinutes(-5) }
+                    [pscustomobject]@{ Id=$ProcessId;Path=$path;StartTime=$start }
+                }.GetNewClosure()
+                $caught = $null
+                if ($owner -ceq 'guard') {
+                    . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+                    $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'body runner must not run' } `
+                        -StopRunner { param($ProcessId) $script:OwnedStops++ }
+                    $boundaries.ProcessRunner = $processRunner
+                    $boundaries.DeleteRunner = { $script:OwnedDeletes++ }
+                    try {
+                        $null = Invoke-P3OwnedGuardAction -SelectedAction 'ValidateOnly' -RuntimeRoot $fixture.Root `
+                            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+                            -BodyConfirmation '' -Boundaries $boundaries
+                    } catch { $caught = $_ }
+                } else {
+                    . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+                    $ssh = { param($Executable,$Arguments,$Mode,$Request) `
+                        ([ordered]@{state='absent';regular=$false;owner_match=$false;group_match=$false;mode_match=$false;payload_sha256=('0'*64);temporary_leftover_count=0}|ConvertTo-Json -Compress) }
+                    $boundaries = New-OwnedRemoteBoundaries -Fixture $fixture -SshRunner $ssh `
+                        -ScpRunner { throw 'SCP must not run' } -StopRunner { param($ProcessId) $script:OwnedStops++ }
+                    $boundaries.ProcessRunner = $processRunner
+                    $boundaries.DeleteRunner = { $script:OwnedDeletes++ }
+                    try {
+                        $null = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstallPlan' -RuntimeRoot $fixture.Root `
+                            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' `
+                            -InputObject $null -Boundaries $boundaries
+                    } catch { $caught = $_ }
+                }
+                $env:SSH_AUTH_SOCK = $null; $env:SSH_AGENT_PID = $null
+                $caught | Should -Not -BeNullOrEmpty
+                $caught.Exception.Message | Should -Match 'agent process'
+                $processState.Calls | Should -Be 2
+                $script:OwnedDeletes | Should -Be 0
+                $script:OwnedStops | Should -Be 0
+                Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeTrue
+            }
+        }
+    }
+
+    It 'does not stop a mismatched PID during initial-validation emergency teardown' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+        $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
+        $processState = [pscustomobject]@{ Calls=0;Fixture=$fixture;Trust=$script:Trust }
+        $script:OwnedStops = 0; $script:OwnedDeletes = 0; $script:OwnedWaits = 0
+        $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'body must not run' } `
+            -StopRunner { param($ProcessId) $script:OwnedStops++ }
+        $boundaries.ListRunner = { throw 'synthetic initial list failure' }
+        $boundaries.DeleteRunner = { $script:OwnedDeletes++ }
+        $boundaries.ProcessRunner = {
+            param($ProcessId)
+            $processState.Calls++
+            $path = if ($processState.Calls -eq 1) { $processState.Fixture.AgentPath } else { $processState.Trust.git_ssh_path }
+            [pscustomobject]@{ Id=$ProcessId;Path=$path;StartTime=[DateTime]::UtcNow }
+        }.GetNewClosure()
+
+        { Invoke-P3OwnedGuardAction -SelectedAction 'ValidateOnly' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+            -BodyConfirmation '' -Boundaries $boundaries } | Should -Throw '*emergency cleanup failed*'
+
+        $processState.Calls | Should -Be 2
+        $script:OwnedDeletes | Should -Be 0
+        $script:OwnedStops | Should -Be 0
+        $script:OwnedWaits | Should -Be 0
+    }
+
     It 'rejects a self-consistent foreign AgentStart action before any runner' {
         . (Join-Path $PSScriptRoot '..\..\scripts\p3-ssh-agent.ps1')
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust

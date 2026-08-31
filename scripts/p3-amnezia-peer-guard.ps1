@@ -687,12 +687,22 @@ function Invoke-P3OwnedGuardAction(
             -ExpectedBodyPlanSHA256 $ExpectedBodyPlanSHA256 -BodyConfirmation $BodyConfirmation -Boundaries $Boundaries
     }
     finally {
-        Stop-P3OwnedAgentEmergency -Manifest $agentManifest -AgentReceipt $agentReceipt -DeleteRunner $Boundaries.DeleteRunner `
-            -StopRunner $Boundaries.StopRunner `
-            -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
-            -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
-        if ($null -ne $combined) {
-            Remove-P3ProtectedAgentState -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256 -Receipt $combined `
+        if ($null -eq $combined) {
+            Stop-P3OwnedAgentEmergency -Manifest $agentManifest -AgentReceipt $agentReceipt -DeleteRunner $Boundaries.DeleteRunner `
+                -StopRunner $Boundaries.StopRunner -ProcessRunner $Boundaries.ProcessRunner `
+                -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
+                -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+        } else {
+            $storedCombined = Get-P3ProtectedAgentReceipt -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256
+            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $combined)) {
+                throw 'protected agent receipt differs'
+            }
+            $storedReceipt = ConvertTo-P3AgentReceiptFromCombined -CombinedReceipt $storedCombined
+            Stop-P3Agent -Manifest $agentManifest -AgentReceipt $storedReceipt -DeleteRunner $Boundaries.DeleteRunner `
+                -StopRunner $Boundaries.StopRunner -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
+                -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
+                -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+            Remove-P3ProtectedAgentState -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256 -Receipt $storedCombined `
                 -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
         }
     }
@@ -712,9 +722,10 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         StopRunner = { param($ProcessId) Stop-Process -Id $ProcessId -ErrorAction Stop }
         WaitRunner = {
             param($ProcessId)
-            $watch = [Diagnostics.Stopwatch]::StartNew()
-            while ($watch.Elapsed.TotalSeconds -lt 10 -and $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { Start-Sleep -Milliseconds 50 }
-            if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { throw 'agent process wait timed out' }
+            Wait-P3BoundedAgentExit -ProcessId $ProcessId `
+                -ObserveRunner { param($OwnedProcessId) @(Get-Process -Id $OwnedProcessId -ErrorAction SilentlyContinue) } `
+                -SleepRunner { param($Milliseconds) Start-Sleep -Milliseconds $Milliseconds } `
+                -ClockRunner { [DateTime]::UtcNow } | Out-Null
         }
         ReobserveRunner = { param($ProcessId) @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) }
         SocketExistsRunner = { param($Path) [IO.File]::Exists($Path) }

@@ -204,18 +204,22 @@ function Assert-P3AgentReceipt([object]$Manifest, [object]$AgentReceipt) {
     return $toolchain
 }
 
-function Test-P3AgentState([object]$Manifest, [object]$AgentReceipt, [scriptblock]$ListRunner, [scriptblock]$ProcessRunner) {
-    $toolchain = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
-    $processes = @(& $ProcessRunner ([int]$AgentReceipt.agent_pid))
+function Assert-P3AgentObservedProcess([object]$Toolchain, [object]$AgentReceipt, [object[]]$Processes) {
     if ($processes.Count -ne 1 -or [int]$processes[0].Id -ne [int]$AgentReceipt.agent_pid -or
-        -not [string]::Equals([string]$processes[0].Path, $toolchain.git_ssh_agent_path, [StringComparison]::OrdinalIgnoreCase)) {
+        -not [string]::Equals([string]$processes[0].Path, $Toolchain.git_ssh_agent_path, [StringComparison]::OrdinalIgnoreCase) -or
+        $processes[0].PSObject.Properties.Name -notcontains 'StartTime') {
         throw 'agent process identity differs'
     }
     $started = [DateTime]::Parse([string]$AgentReceipt.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-    if ($processes[0].PSObject.Properties.Name -contains 'StartTime') {
-        $delta = ([DateTime]$processes[0].StartTime - $started).Duration().TotalSeconds
-        if ($delta -gt 10) { throw 'agent process creation window differs' }
-    }
+    $delta = ([DateTime]$processes[0].StartTime - $started).Duration().TotalSeconds
+    if ($delta -gt 10) { throw 'agent process creation window differs' }
+    return $processes[0]
+}
+
+function Test-P3AgentState([object]$Manifest, [object]$AgentReceipt, [scriptblock]$ListRunner, [scriptblock]$ProcessRunner) {
+    $toolchain = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
+    $processes = @(& $ProcessRunner ([int]$AgentReceipt.agent_pid))
+    $null = Assert-P3AgentObservedProcess -Toolchain $toolchain -AgentReceipt $AgentReceipt -Processes $processes
     $lines = @(([string](& $ListRunner $toolchain.git_ssh_add_path) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($lines.Count -ne 1) { throw 'agent must contain exactly one key' }
     $match = [regex]::Match($lines[0], '^\s*[0-9]+\s+(SHA256:\S+)\s+')
@@ -238,6 +242,30 @@ function Test-P3AgentState([object]$Manifest, [object]$AgentReceipt, [scriptbloc
     }
 }
 
+function Wait-P3BoundedAgentExit(
+    [int]$ProcessId,
+    [scriptblock]$ObserveRunner,
+    [scriptblock]$SleepRunner,
+    [scriptblock]$ClockRunner,
+    [int]$TimeoutSeconds = 10,
+    [int]$PollMilliseconds = 50
+) {
+    if ($ProcessId -le 0 -or $TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30 -or
+        $PollMilliseconds -lt 1 -or $PollMilliseconds -gt 1000) { throw 'agent bounded wait input differs' }
+    $started = ([DateTime](& $ClockRunner)).ToUniversalTime()
+    $deadline = $started.AddSeconds($TimeoutSeconds)
+    $maximumPolls = [int][Math]::Ceiling(($TimeoutSeconds * 1000.0) / $PollMilliseconds)
+    for ($poll = 0; $poll -le $maximumPolls; $poll++) {
+        $observed = @(& $ObserveRunner $ProcessId)
+        if ($observed.Count -eq 0) { return [pscustomobject]@{ process_absent = $true } }
+        if ($observed.Count -ne 1 -or [int]$observed[0].Id -ne $ProcessId) { throw 'agent process wait identity differs' }
+        $now = ([DateTime](& $ClockRunner)).ToUniversalTime()
+        if ($now -lt $started -or $now -ge $deadline -or $poll -eq $maximumPolls) { throw 'agent process wait timed out' }
+        & $SleepRunner $PollMilliseconds
+    }
+    throw 'agent process wait timed out'
+}
+
 function Stop-P3Agent(
     [object]$Manifest,
     [object]$AgentReceipt,
@@ -253,13 +281,19 @@ function Stop-P3Agent(
         throw 'agent environment differs from receipt'
     }
     $null = Test-P3AgentState -Manifest $Manifest -AgentReceipt $AgentReceipt -ListRunner $ListRunner -ProcessRunner $ProcessRunner
-    $null = & $DeleteRunner
-    $null = & $StopRunner ([int]$AgentReceipt.agent_pid)
-    $null = & $WaitRunner ([int]$AgentReceipt.agent_pid)
-    if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { throw 'agent process cleanup failed' }
-    if ([bool](& $SocketExistsRunner ([string]$AgentReceipt.socket))) { throw 'agent socket cleanup failed' }
+    $failures = @()
+    try { $null = & $DeleteRunner } catch { $failures += 'key delete failure' }
+    try { $null = & $StopRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process stop failure' }
+    try { $null = & $WaitRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process wait failure' }
+    try {
+        if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { $failures += 'process reobserve failure' }
+    } catch { $failures += 'process reobserve failure' }
+    try {
+        if ([bool](& $SocketExistsRunner ([string]$AgentReceipt.socket))) { $failures += 'socket reobserve failure' }
+    } catch { $failures += 'socket reobserve failure' }
     if ([string]$env:SSH_AUTH_SOCK -ceq [string]$AgentReceipt.socket) { $env:SSH_AUTH_SOCK = $null }
     if ([string]$env:SSH_AGENT_PID -ceq [string]$AgentReceipt.agent_pid) { $env:SSH_AGENT_PID = $null }
+    if ($failures.Count -ne 0) { throw "agent cleanup failed: $($failures -join ',')" }
     return [pscustomobject]@{ schema = 'home-gateway/p3-ssh-agent-stop-receipt/v1'; stopped = $true; removed_key_count = 1 }
 }
 
@@ -268,22 +302,32 @@ function Stop-P3OwnedAgentEmergency(
     [object]$AgentReceipt,
     [scriptblock]$DeleteRunner,
     [scriptblock]$StopRunner,
+    [scriptblock]$ProcessRunner,
     [scriptblock]$WaitRunner,
     [scriptblock]$ReobserveRunner,
     [scriptblock]$SocketExistsRunner
 ) {
-    $null = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
+    $toolchain = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
     try {
         $null = [DateTime]::Parse([string]$AgentReceipt.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
     } catch { throw 'owned agent start binding differs' }
     $failures = @()
+    $identityMismatch = $false
+    try { $processes = @(& $ProcessRunner ([int]$AgentReceipt.agent_pid)) }
+    catch { $processes = $null }
+    if ($null -ne $processes) {
+        try { $null = Assert-P3AgentObservedProcess -Toolchain $toolchain -AgentReceipt $AgentReceipt -Processes $processes }
+        catch { $identityMismatch = $true; $failures += 'process identity failure' }
+    }
     $socketMatches = [string]$env:SSH_AUTH_SOCK -ceq [string]$AgentReceipt.socket
     $pidMatches = [string]$env:SSH_AGENT_PID -ceq [string]$AgentReceipt.agent_pid
-    if ($socketMatches -and $pidMatches) {
+    if ($socketMatches -and $pidMatches -and -not $identityMismatch) {
         try { $null = & $DeleteRunner } catch { $failures += 'key delete failure' }
-    } else { $failures += 'environment' }
-    try { $null = & $StopRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process stop failure' }
-    try { $null = & $WaitRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process wait failure' }
+    } elseif (-not $identityMismatch) { $failures += 'environment' }
+    if (-not $identityMismatch) {
+        try { $null = & $StopRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process stop failure' }
+        try { $null = & $WaitRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process wait failure' }
+    }
     try {
         if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { $failures += 'process reobserve failure' }
     } catch { $failures += 'process reobserve failure' }

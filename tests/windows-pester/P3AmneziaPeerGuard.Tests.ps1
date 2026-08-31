@@ -328,6 +328,20 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $child.Dispose()
     }
 
+    It 'caps a fast-exit noisy production guard stream without temp files' {
+        $powershell="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $savedTemp=$env:TEMP;$savedTmp=$env:TMP;$missing=Join-Path $TestDrive 'missing-stream-temp'
+        try {
+            $env:TEMP=$missing;$env:TMP=$missing
+            $result=Invoke-P3NativeGuardStreamProcess -Executable $powershell `
+                -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-Command',"[Console]::Out.Write('x' * 131072)") `
+                -InputJson '{}' -OnEvent { throw 'event must not be emitted' } -TimeoutSeconds 10 -MaximumBytes 1024
+        } finally {$env:TEMP=$savedTemp;$env:TMP=$savedTmp}
+        $result.Oversized|Should -BeTrue
+        $result.TimedOut|Should -BeFalse
+        $result.StdErr|Should -BeExactly ''
+    }
+
     It 'builds only fixed strict protocol v2 requests' {
         $nonce = 'A' * 64
         $request = New-P3RemoteRequest -Context $script:Context -Mode 'guard' -Operation 'guest' -Nonce $nonce
@@ -473,16 +487,15 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
 
     It 'kills and waits the exact stream child when OnEvent throws before temp cleanup' {
         $script:Kills = 0; $script:Waits = 0
-        $script:FakeProcess = [pscustomobject]@{ HasExited = $false; ExitCode = 1 }
-        $script:FakeProcess | Add-Member -MemberType ScriptMethod -Name Refresh -Value { }
-        { Invoke-P3NativeGuardStreamProcess -Executable 'synthetic.exe' -Arguments @() -InputJson '{}' `
+        $powershell="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        { Invoke-P3NativeGuardStreamProcess -Executable $powershell `
+            -Arguments @('-NoLogo','-NoProfile','-NonInteractive','-Command',"[Console]::Out.WriteLine('synthetic-event');Start-Sleep -Seconds 30") -InputJson '{}' `
             -OnEvent { throw 'synthetic OnEvent failure' } -TimeoutSeconds 2 -MaximumBytes 65536 `
             -ProcessRunner {
-                param($Executable, $Arguments, $InputPath, $OutputPath, $ErrorPath)
-                [IO.File]::WriteAllText($OutputPath, "synthetic-event`n", [Text.UTF8Encoding]::new($false))
-                $script:FakeProcess
-            } -KillRunner { param($Process) $script:Kills++; $Process.HasExited = $true } `
-            -WaitRunner { param($Process) $script:Waits++ } } | Should -Throw '*OnEvent failure*'
+                param($StartInfo)
+                $child=[Diagnostics.Process]::new();$child.StartInfo=$StartInfo;$null=$child.Start();$child
+            } -KillRunner { param($Process) $script:Kills++; $Process.Kill() } `
+            -WaitRunner { param($Process) $script:Waits++;$Process.WaitForExit() } } | Should -Throw '*OnEvent failure*'
         $script:Kills | Should -Be 1
         $script:Waits | Should -Be 1
     }

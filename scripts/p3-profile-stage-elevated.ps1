@@ -55,7 +55,7 @@ function Invoke-PinnedProfileInspection(
     try {
         $profileSHA256 = Get-StreamSHA256 $source
         if ((Get-StreamSHA256 $hgctlStream) -cne $ExpectedHgctlSHA256) { throw 'hgctl hash differs' }
-        $arguments = @('tunnel','inspect','--config',$ProfilePath,'--json')
+        $arguments = @('tunnel','inspect','--config',$ProfilePath,'--config-sha256',$profileSHA256,'--json')
         if ($null -eq $Runner) {
             $Runner = { param($Executable,$Arguments,$LockedProfilePath) $null = & $Executable @Arguments; return $LASTEXITCODE }
         }

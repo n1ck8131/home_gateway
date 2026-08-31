@@ -337,13 +337,15 @@ function Assert-P3PrerequisiteKnownHostPin([object]$Trust) {
     }
 }
 
-function New-P3PrerequisitePlan([object]$Manifest, [string]$Nonce) {
+function New-P3PrerequisitePlan([object]$Manifest, [string]$Nonce, [string]$PrerequisiteRoot) {
     Import-P3PrerequisiteRuntime
     $null = Test-P3PrerequisiteManifest $Manifest
     Assert-P3SHA256 $Nonce 'observer nonce'
+    $canonicalRoot = Resolve-P3FixedCleanPath $PrerequisiteRoot 'prerequisite root'
     $identity = [pscustomobject][ordered]@{
-        schema='home-gateway/p3-prelive-prerequisite-plan/v1'
+        schema='home-gateway/p3-prelive-prerequisite-plan/v2'
         prerequisite_manifest_sha256=[string]$Manifest.manifest_sha256
+        prerequisite_root_sha256=Get-P3SHA256Text $canonicalRoot.ToUpperInvariant()
         nonce_sha256=Get-P3SHA256Text $Nonce
         payload_sha256=[string]$Manifest.payload_sha256;protocol_sha256=[string]$Manifest.protocol_sha256
         ssh_trust_sha256=[string]$Manifest.ssh_trust_sha256
@@ -628,6 +630,43 @@ function Invoke-P3PrerequisiteNativeProcess(
     }
 }
 
+function Read-P3PrerequisiteBoundedHttpBody(
+    [IO.Stream]$Stream,
+    [Threading.CancellationToken]$CancellationToken,
+    [int]$MaximumBytes = 65536,
+    [scriptblock]$ReadRunner = $null
+) {
+    if ($null -eq $Stream -or $MaximumBytes -ne 65536) { throw 'prerequisite HTTPS body boundary differs' }
+    if ($null -eq $ReadRunner) {
+        $ReadRunner = { param($Body,$Buffer,$Offset,$Count,$Token) $Body.ReadAsync($Buffer,$Offset,$Count,$Token) }
+    }
+    $memory=[IO.MemoryStream]::new();$buffer=[byte[]]::new(4096)
+    try {
+        while ($true) {
+            if ($CancellationToken.IsCancellationRequested) { throw 'prerequisite HTTPS body timed out' }
+            $remaining=$MaximumBytes-[int]$memory.Length
+            $requested=[Math]::Min($buffer.Length,$remaining+1)
+            $task=& $ReadRunner $Stream $buffer 0 $requested $CancellationToken
+            if ($null -eq $task -or $task -isnot [Threading.Tasks.Task]) { throw 'prerequisite HTTPS body read differs' }
+            while (-not $task.IsCompleted) {
+                if ($CancellationToken.IsCancellationRequested) { throw 'prerequisite HTTPS body timed out' }
+                Start-Sleep -Milliseconds 5
+            }
+            try { $read=[int]$task.GetAwaiter().GetResult() }
+            catch {
+                if ($CancellationToken.IsCancellationRequested) { throw 'prerequisite HTTPS body timed out' }
+                throw 'prerequisite HTTPS body read differs'
+            }
+            if ($read -lt 0 -or $read -gt $requested) { throw 'prerequisite HTTPS body read differs' }
+            if ($read -eq 0) { break }
+            if ($memory.Length+$read -gt $MaximumBytes) { throw 'prerequisite HTTPS response exceeds its bound' }
+            $memory.Write($buffer,0,$read)
+        }
+        try { return [Text.UTF8Encoding]::new($false,$true).GetString($memory.ToArray()) }
+        catch { throw 'prerequisite HTTPS response UTF-8 differs' }
+    } finally { $memory.Dispose();$Stream.Dispose() }
+}
+
 function Invoke-P3PrerequisiteNativeHttps([object]$Entry, [scriptblock]$ClockRunner) {
     Import-P3PrerequisiteRuntime
     Assert-P3ExactProperties $Entry @('endpoint','authority_sha256') 'prerequisite HTTPS authority'
@@ -639,26 +678,23 @@ function Invoke-P3PrerequisiteNativeHttps([object]$Entry, [scriptblock]$ClockRun
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.AllowAutoRedirect = $false
     $client = [Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [TimeSpan]::FromSeconds(10)
+    $client.Timeout = [Threading.Timeout]::InfiniteTimeSpan
+    $cancellation=[Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(10))
     try {
-        $response = $client.GetAsync($uri,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        try { $response = $client.GetAsync($uri,[Net.Http.HttpCompletionOption]::ResponseHeadersRead,$cancellation.Token).GetAwaiter().GetResult() }
+        catch { if($cancellation.IsCancellationRequested){throw 'prerequisite HTTPS request timed out'};throw }
         try {
             if ([int]$response.StatusCode -ne 200) { throw 'prerequisite HTTPS status differs' }
-            if ($null -ne $response.Content.Headers.ContentLength -and [long]$response.Content.Headers.ContentLength -gt 128) {
+            if ($null -ne $response.Content.Headers.ContentLength -and [long]$response.Content.Headers.ContentLength -gt 65536) {
                 throw 'prerequisite HTTPS response exceeds its bound'
             }
-            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
-            try {
-                $buffer = [byte[]]::new(129)
-                $count = 0
-                while ($count -le 128) {
-                    $read = $stream.Read($buffer,$count,129-$count)
-                    if ($read -eq 0) { break }
-                    $count += $read
-                    if ($count -gt 128) { throw 'prerequisite HTTPS response exceeds its bound' }
-                }
-            } finally { $stream.Dispose() }
-            $text = [Text.UTF8Encoding]::new($false,$true).GetString($buffer,0,$count).Trim()
+            $streamTask=$response.Content.ReadAsStreamAsync()
+            while(-not $streamTask.IsCompleted){
+                if($cancellation.IsCancellationRequested){$response.Dispose();throw 'prerequisite HTTPS body timed out'}
+                Start-Sleep -Milliseconds 5
+            }
+            try{$stream=$streamTask.GetAwaiter().GetResult()}catch{if($cancellation.IsCancellationRequested){throw 'prerequisite HTTPS body timed out'};throw}
+            $text=(Read-P3PrerequisiteBoundedHttpBody $stream $cancellation.Token 65536).Trim()
             $address = $null
             if (-not [Net.IPAddress]::TryParse($text,[ref]$address) -or
                 $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
@@ -671,7 +707,7 @@ function Invoke-P3PrerequisiteNativeHttps([object]$Entry, [scriptblock]$ClockRun
                 observed_at_utc=([DateTime](& $ClockRunner)).ToUniversalTime().ToString('o')
             }
         } finally { $response.Dispose() }
-    } finally { $client.Dispose(); $handler.Dispose() }
+    } finally { $cancellation.Dispose();$client.Dispose(); $handler.Dispose() }
 }
 
 function Invoke-P3PrerequisiteProductionObservation(
@@ -689,7 +725,7 @@ function Invoke-P3PrerequisiteProductionObservation(
     $trust = Test-P3PrerequisiteSshTrust $InputObject.ssh_trust $manifest
     $agentManifest = Test-P3PrerequisiteAgentTrust $trust $InputObject.agent_manifest $manifest
     Assert-P3SHA256 ([string]$InputObject.nonce) 'observer nonce'
-    $plan = New-P3PrerequisitePlan $manifest ([string]$InputObject.nonce)
+    $plan = New-P3PrerequisitePlan $manifest ([string]$InputObject.nonce) $PrerequisiteRoot
     if ([string]$InputObject.expected_plan_sha256 -cne [string]$plan.plan_sha256 -or
         [string]$InputObject.confirmation_challenge -cne [string]$plan.confirmation_challenge) {
         throw 'prerequisite observation approval differs'
@@ -721,7 +757,7 @@ function Invoke-P3PrerequisiteProductionObservation(
             expected_plan_sha256=[string]$InputObject.expected_plan_sha256
             confirmation_challenge=[string]$InputObject.confirmation_challenge
         }
-        $observationBatch = Invoke-P3PrerequisiteObserve $bodyInput $bodyBoundaries $protectedCombined
+        $observationBatch = Invoke-P3PrerequisiteObserve $bodyInput $bodyBoundaries $protectedCombined $PrerequisiteRoot
     }
     finally {
         $protectedReceiptFailure = $null
@@ -756,7 +792,7 @@ function Invoke-P3PrerequisiteProductionObservation(
         -ObservationBatch $observationBatch -NonceSHA256 (Get-P3SHA256Text ([string]$InputObject.nonce))
 }
 
-function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries, [object]$AgentReceipt) {
+function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries, [object]$AgentReceipt, [string]$PrerequisiteRoot) {
     Import-P3PrerequisiteRuntime
     Assert-P3ExactProperties $Boundaries @('ClockRunner', 'HttpsRunner', 'ObserverRunner') 'prerequisite observe boundaries'
     Assert-P3ExactProperties $InputObject @('manifest', 'ssh_trust', 'nonce', 'expected_plan_sha256', 'confirmation_challenge') 'prerequisite observe input'
@@ -764,7 +800,7 @@ function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries,
     $trust = Test-P3PrerequisiteSshTrust $InputObject.ssh_trust $manifest
     Assert-P3SHA256 ([string]$InputObject.nonce) 'observer nonce'
     Assert-P3SHA256 ([string]$InputObject.expected_plan_sha256) 'prerequisite approval plan'
-    $approvedPlan = New-P3PrerequisitePlan $manifest ([string]$InputObject.nonce)
+    $approvedPlan = New-P3PrerequisitePlan $manifest ([string]$InputObject.nonce) $PrerequisiteRoot
     if ([string]$InputObject.expected_plan_sha256 -cne [string]$approvedPlan.plan_sha256 -or
         [string]$InputObject.confirmation_challenge -cne [string]$approvedPlan.confirmation_challenge) {
         throw 'prerequisite observation approval differs'
@@ -1061,13 +1097,15 @@ function Invoke-P3PrerequisiteAction([string]$SelectedAction, [object]$InputObje
         'Plan' {
             Import-P3PrerequisiteRuntime
             Assert-P3ExactProperties $InputObject @('manifest','nonce') 'prerequisite plan input'
-            return New-P3PrerequisitePlan $InputObject.manifest ([string]$InputObject.nonce)
+            Assert-P3ExactProperties $Boundaries @('PrerequisiteRoot') 'prerequisite plan boundaries'
+            return New-P3PrerequisitePlan $InputObject.manifest ([string]$InputObject.nonce) ([string]$Boundaries.PrerequisiteRoot)
         }
         'Observe' {
             Import-P3PrerequisiteRuntime
             Assert-P3ExactProperties $InputObject @('manifest', 'ssh_trust', 'nonce', 'expected_plan_sha256', 'confirmation_challenge') 'prerequisite observe input'
             $null = Test-P3PrerequisiteSshTrust $InputObject.ssh_trust $InputObject.manifest
-            $approvedPlan = New-P3PrerequisitePlan $InputObject.manifest ([string]$InputObject.nonce)
+            if ($null -eq $Boundaries -or $Boundaries.PSObject.Properties.Name -notcontains 'PrerequisiteRoot') { throw 'prerequisite Observe root differs' }
+            $approvedPlan = New-P3PrerequisitePlan $InputObject.manifest ([string]$InputObject.nonce) ([string]$Boundaries.PrerequisiteRoot)
             if ([string]$InputObject.expected_plan_sha256 -cne [string]$approvedPlan.plan_sha256 -or
                 [string]$InputObject.confirmation_challenge -cne [string]$approvedPlan.confirmation_challenge) {
                 throw 'prerequisite observation approval differs'
@@ -1077,7 +1115,7 @@ function Invoke-P3PrerequisiteAction([string]$SelectedAction, [object]$InputObje
             }
             $observeCommand = Get-Command Invoke-P3PrerequisiteObserve
             return Invoke-P3PrerequisiteOwnedObservation -StartRunner $Boundaries.StartRunner `
-                -ValidateRunner $Boundaries.ValidateRunner -ObserveRunner { param($receipt) & $observeCommand $InputObject $bodyBoundaries $receipt }.GetNewClosure() `
+                -ValidateRunner $Boundaries.ValidateRunner -ObserveRunner { param($receipt) & $observeCommand $InputObject $bodyBoundaries $receipt ([string]$Boundaries.PrerequisiteRoot) }.GetNewClosure() `
                 -StopRunner $Boundaries.StopRunner
         }
         'RecordCloudFirewall' {
@@ -1124,7 +1162,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
     switch ($Action) {
         'Plan' {
             Assert-P3ExactProperties $inputObject @('manifest','nonce') 'prerequisite plan input'
-            New-P3PrerequisitePlan $inputObject.manifest ([string]$inputObject.nonce) | ConvertTo-Json -Depth 20 -Compress
+            New-P3PrerequisitePlan $inputObject.manifest ([string]$inputObject.nonce) $PrerequisiteRoot | ConvertTo-Json -Depth 20 -Compress
         }
         'Observe' {
             $candidateAgentManifest = $inputObject.agent_manifest

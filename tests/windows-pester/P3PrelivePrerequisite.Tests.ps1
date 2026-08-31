@@ -172,7 +172,8 @@ Describe 'P3 pre-live prerequisite boundary' {
 
     It 'routes Plan and Observe through the fixed injected action switch' {
         $f = New-PrerequisiteFixture
-        $plan = Invoke-P3PrerequisiteAction -SelectedAction Plan -InputObject ([pscustomobject]@{manifest=$f.Manifest;nonce=('c' * 64)}) -Boundaries ([pscustomobject]@{})
+        $root=Join-Path $TestDrive 'action-switch-root'
+        $plan = Invoke-P3PrerequisiteAction -SelectedAction Plan -InputObject ([pscustomobject]@{manifest=$f.Manifest;nonce=('c' * 64)}) -Boundaries ([pscustomobject]@{PrerequisiteRoot=$root})
         $plan.confirmation_challenge | Should -Match '^P3-PRELIVE-PREREQUISITE-[0-9A-F]{16}$'
         $baselineSHA256 = Get-P3ServerBaselineSHA256 $f.Baseline
         $nonceSHA256 = Get-P3SHA256Text ('c' * 64)
@@ -181,6 +182,7 @@ Describe 'P3 pre-live prerequisite boundary' {
             manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c' * 64);expected_plan_sha256=$plan.plan_sha256
             confirmation_challenge=$plan.confirmation_challenge
         }) -Boundaries ([pscustomobject]@{
+            PrerequisiteRoot=$root
             StartRunner={ $calls.Add('start'); [pscustomobject]@{owned=$true} }.GetNewClosure()
             ValidateRunner={ param($receipt) $calls.Add('validate'); $receipt }.GetNewClosure()
             StopRunner={ param($receipt) $calls.Add('stop') }.GetNewClosure()
@@ -202,6 +204,49 @@ Describe 'P3 pre-live prerequisite boundary' {
         $calls[-1] | Should -BeExactly 'stop'
         $observed.egress.Count | Should -Be 3
         $observed.server_baseline_sha256 | Should -BeExactly (Get-P3ServerBaselineSHA256 $f.Baseline)
+    }
+
+    It 'binds approval to one canonical prerequisite root and rejects replay before mutation' {
+        $p=New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'root-bound-fixture');$f=$p.Fixture
+        $approvedRoot=$p.Agent.Root
+        $foreignRoot=Join-Path $TestDrive 'foreign-root'
+        $plan=New-P3PrerequisitePlan $f.Manifest ('c'*64) $approvedRoot
+        $plan.schema|Should -BeExactly 'home-gateway/p3-prelive-prerequisite-plan/v2'
+        $plan.prerequisite_root_sha256|Should -BeExactly (Get-P3SHA256Text ([IO.Path]::GetFullPath($approvedRoot).ToUpperInvariant()))
+        $other=New-P3PrerequisitePlan $f.Manifest ('c'*64) $foreignRoot
+        $other.plan_sha256|Should -Not -BeExactly $plan.plan_sha256
+        $calls=[Collections.Generic.List[string]]::new()
+        $boundaries=[pscustomobject]@{
+            AgentRunner={$calls.Add('start')}.GetNewClosure();AddRunner={$calls.Add('add')}.GetNewClosure()
+            ListRunner={$calls.Add('list')}.GetNewClosure();ProcessRunner={$calls.Add('process')}.GetNewClosure()
+            DeleteRunner={$calls.Add('delete')}.GetNewClosure();StopRunner={$calls.Add('stop')}.GetNewClosure()
+            WaitRunner={$calls.Add('wait')}.GetNewClosure();ReobserveRunner={$calls.Add('reobserve')}.GetNewClosure()
+            SocketExistsRunner={$calls.Add('socket')}.GetNewClosure();ReceiptRemoveRunner={$calls.Add('receipt')}.GetNewClosure()
+            SshRunner={$calls.Add('ssh')}.GetNewClosure();HttpsRunner={$calls.Add('https')}.GetNewClosure();ClockRunner={$f.Now}.GetNewClosure()
+        }
+        {Invoke-P3PrerequisiteProductionObservation -PrerequisiteRoot $foreignRoot -InputObject ([pscustomobject]@{
+                manifest=$f.Manifest;ssh_trust=$p.Trust;agent_manifest=$p.Agent.Manifest;nonce=('c'*64)
+                expected_plan_sha256=$plan.plan_sha256;confirmation_challenge=$plan.confirmation_challenge
+            }) -Boundaries $boundaries}|Should -Throw '*approval*'
+        $calls.Count|Should -Be 0
+        Test-Path $foreignRoot|Should -BeFalse
+    }
+
+    It 'cancels a slow HTTPS body and caps a fast oversized body without lingering streams' {
+        $slow=[IO.MemoryStream]::new([byte[]](1,2,3));$cts=[Threading.CancellationTokenSource]::new(40)
+        $script:slowTask=$null
+        {Read-P3PrerequisiteBoundedHttpBody -Stream $slow -CancellationToken $cts.Token -MaximumBytes 65536 -ReadRunner {
+                param($stream,$buffer,$offset,$count,$token)
+                $script:slowTask=[Threading.Tasks.Task]::Delay(30000,$token)
+                return $script:slowTask
+            }}|Should -Throw '*timed out*'
+        $script:slowTask.IsCompleted|Should -BeTrue
+        $slow.CanRead|Should -BeFalse
+        $cts.Dispose()
+        $large=[IO.MemoryStream]::new([byte[]]::new(65537));$open=[Threading.CancellationTokenSource]::new()
+        {Read-P3PrerequisiteBoundedHttpBody -Stream $large -CancellationToken $open.Token -MaximumBytes 65536}|Should -Throw '*exceeds*'
+        $large.CanRead|Should -BeFalse
+        $open.Dispose()
     }
 
     It 'owns prerequisite AgentPlan Start Validate Stop under its protected root' {
@@ -231,13 +276,15 @@ Describe 'P3 pre-live prerequisite boundary' {
 
     It 'tears down failed Observe actions and blocks on stop failure' {
         $f = New-PrerequisiteFixture
+        $root=Join-Path $TestDrive 'failed-observe-root'
         $calls = [Collections.Generic.List[string]]::new()
-        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64) $root
         $observeInput = [pscustomobject]@{
             manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c' * 64);expected_plan_sha256=$plan.plan_sha256
             confirmation_challenge=$plan.confirmation_challenge
         }
         $boundaries = [pscustomobject]@{
+            PrerequisiteRoot=$root
             StartRunner={ $calls.Add('start'); [pscustomobject]@{owned=$true} }.GetNewClosure()
             ValidateRunner={param($receipt) $calls.Add('validate');$receipt}.GetNewClosure()
             StopRunner={param($receipt) $calls.Add('stop')}.GetNewClosure()
@@ -254,13 +301,15 @@ Describe 'P3 pre-live prerequisite boundary' {
 
     It 'rejects an Observe approval mismatch before any owned or network boundary' {
         $f = New-PrerequisiteFixture
-        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $root=Join-Path $TestDrive 'approval-mismatch-root'
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64) $root
         $calls = [Collections.Generic.List[string]]::new()
         $observeApprovalInput = [pscustomobject]@{
             manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c' * 64);expected_plan_sha256=('0' * 64)
             confirmation_challenge=$plan.confirmation_challenge
         }
         $boundaries = [pscustomobject]@{
+            PrerequisiteRoot=$root
             StartRunner={ $calls.Add('start') }.GetNewClosure()
             ValidateRunner={ $calls.Add('validate') }.GetNewClosure()
             StopRunner={ $calls.Add('stop') }.GetNewClosure()
@@ -360,7 +409,7 @@ Describe 'P3 pre-live prerequisite boundary' {
     It 'executes the production owned Observe switch and always removes its exact agent' {
         $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'production-observe')
         $f = $p.Fixture
-        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64) $p.Agent.Root
         $calls = [Collections.Generic.List[string]]::new()
         $baselineSHA256 = Get-P3ServerBaselineSHA256 $f.Baseline
         $serverReceipt = [pscustomobject]@{
@@ -396,7 +445,7 @@ Describe 'P3 pre-live prerequisite boundary' {
     It 'emergency tears down the exact owned agent when its protected receipt changes before cleanup' {
         $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'tampered-agent-receipt')
         $f = $p.Fixture
-        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64) $p.Agent.Root
         $calls = [Collections.Generic.List[string]]::new()
         $boundaries = [pscustomobject]@{
             AgentRunner={param($exe)$calls.Add('start');"SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4343; export SSH_AGENT_PID;"}.GetNewClosure()

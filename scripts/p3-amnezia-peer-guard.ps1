@@ -881,46 +881,69 @@ function Invoke-P3NativeGuardStreamProcess(
     [int]$TimeoutSeconds, [int]$MaximumBytes,
     [scriptblock]$ProcessRunner = $null, [scriptblock]$KillRunner = $null, [scriptblock]$WaitRunner = $null
 ) {
-    $inputPath = [IO.Path]::GetTempFileName(); $outputPath = [IO.Path]::GetTempFileName(); $errorPath = [IO.Path]::GetTempFileName()
-    $process = $null; $waited = $false
+    $inputBytes=[Text.UTF8Encoding]::new($false).GetBytes($InputJson)
+    if($inputBytes.Length -lt 2 -or $inputBytes.Length -gt 131072 -or $TimeoutSeconds -lt 1 -or
+        $TimeoutSeconds -gt 300 -or $MaximumBytes -lt 1024 -or $MaximumBytes -gt 65536){throw 'guard stream child boundary differs'}
+    $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$Executable;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $start.Arguments=@($Arguments|ForEach-Object{ConvertTo-P3GuardNativeArgument ([string]$_)}) -join ' '
+    $process = $null; $waited = $false; $writeClosed=$false
     if ($null -eq $ProcessRunner) {
-        $ProcessRunner = { param($Executable, $Arguments, $InputPath, $OutputPath, $ErrorPath) Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardInput $InputPath -RedirectStandardOutput $OutputPath -RedirectStandardError $ErrorPath -PassThru }
+        $ProcessRunner = { param($StartInfo) $child=[Diagnostics.Process]::new();$child.StartInfo=$StartInfo;if(-not $child.Start()){throw 'guard stream child start differs'};return $child }
     }
     if ($null -eq $KillRunner) { $KillRunner = { param($Process) $Process.Kill() } }
     if ($null -eq $WaitRunner) { $WaitRunner = { param($Process) $Process.WaitForExit() } }
+    $pending=[IO.MemoryStream]::new();$stderr=[IO.MemoryStream]::new()
     try {
-        [IO.File]::WriteAllText($inputPath, $InputJson, [Text.UTF8Encoding]::new($false))
-        $process = & $ProcessRunner $Executable $Arguments $inputPath $outputPath $errorPath
+        $process = & $ProcessRunner $start
         if ($null -eq $process) { throw 'guard stream child start differs' }
-        $watch = [Diagnostics.Stopwatch]::StartNew(); $processed = 0; $timedOut = $false; $oversized = $false
-        while (-not $process.HasExited) {
-            $length = ([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length
-            if ($length -gt $MaximumBytes) { $oversized = $true; & $KillRunner $process; break }
-            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) { $timedOut = $true; & $KillRunner $process; break }
-            $text = [IO.File]::ReadAllText($outputPath, [Text.UTF8Encoding]::new($false, $true))
-            $lines = @($text -split "`r?`n")
-            $completeCount = if ($text.EndsWith("`n")) { $lines.Count - 1 } else { [Math]::Max(0, $lines.Count - 1) }
-            while ($processed -lt $completeCount) { if (-not [string]::IsNullOrEmpty($lines[$processed])) { & $OnEvent $lines[$processed] (-not $process.HasExited) }; $processed++ }
-            Start-Sleep -Milliseconds 50; $process.Refresh()
+        $writeTask=$process.StandardInput.BaseStream.WriteAsync($inputBytes,0,$inputBytes.Length)
+        $outBuffer=[byte[]]::new(4096);$errBuffer=[byte[]]::new(4096)
+        $outTask=$process.StandardOutput.BaseStream.ReadAsync($outBuffer,0,$outBuffer.Length)
+        $errTask=$process.StandardError.BaseStream.ReadAsync($errBuffer,0,$errBuffer.Length)
+        $outDone=$false;$errDone=$false;$watch=[Diagnostics.Stopwatch]::StartNew();$timedOut=$false;$oversized=$false;$total=0
+        $encoding=[Text.UTF8Encoding]::new($false,$true)
+        while(-not $outDone -or -not $errDone -or -not $process.HasExited){
+            if(-not $writeClosed -and $writeTask.IsCompleted){try{$null=$writeTask.GetAwaiter().GetResult()}catch{};$process.StandardInput.Close();$writeClosed=$true}
+            foreach($channel in @('out','err')){
+                $task=if($channel -ceq 'out'){$outTask}else{$errTask}
+                if($null -eq $task -or -not $task.IsCompleted){continue}
+                $count=$task.GetAwaiter().GetResult()
+                if($count -eq 0){if($channel -ceq 'out'){$outDone=$true;$outTask=$null}else{$errDone=$true;$errTask=$null};continue}
+                $total += $count
+                if($total -gt $MaximumBytes){$oversized=$true;continue}
+                if($channel -ceq 'err'){$stderr.Write($errBuffer,0,$count);$errTask=$process.StandardError.BaseStream.ReadAsync($errBuffer,0,$errBuffer.Length);continue}
+                for($index=0;$index -lt $count;$index++){
+                    $value=$outBuffer[$index]
+                    if($value -eq 10){
+                        $lineBytes=$pending.ToArray();$pending.SetLength(0)
+                        if($lineBytes.Length -gt 0 -and $lineBytes[$lineBytes.Length-1] -eq 13){$lineBytes=if($lineBytes.Length -eq 1){[byte[]]@()}else{[byte[]]$lineBytes[0..($lineBytes.Length-2)]}}
+                        $line=$encoding.GetString($lineBytes)
+                        if(-not [string]::IsNullOrEmpty($line)){& $OnEvent $line (-not $process.HasExited)}
+                    }else{$pending.WriteByte($value)}
+                }
+                $outTask=$process.StandardOutput.BaseStream.ReadAsync($outBuffer,0,$outBuffer.Length)
+            }
+            if(($oversized -or $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) -and -not $process.HasExited){if(-not $oversized){$timedOut=$true};& $KillRunner $process}
+            if($oversized -and $process.HasExited){$outDone=$true;$errDone=$true}
+            if(-not $outDone -or -not $errDone -or -not $process.HasExited){Start-Sleep -Milliseconds 5;$process.Refresh()}
         }
-        & $WaitRunner $process; $waited = $true
-        $text = if ($oversized) { '' } else { [IO.File]::ReadAllText($outputPath, [Text.UTF8Encoding]::new($false, $true)) }
-        $lines = @($text -split "`r?`n"); $endsNewline = $text.EndsWith("`n")
-        $completeCount = if ($endsNewline) { $lines.Count - 1 } else { [Math]::Max(0, $lines.Count - 1) }
-        while ($processed -lt $completeCount) { if (-not [string]::IsNullOrEmpty($lines[$processed])) { & $OnEvent $lines[$processed] $false }; $processed++ }
+        if(-not $writeClosed){try{$null=$writeTask.GetAwaiter().GetResult()}catch{};$process.StandardInput.Close();$writeClosed=$true}
+        & $WaitRunner $process;$waited=$true
         return [pscustomobject]@{
             ExitCode = $process.ExitCode; TimedOut = $timedOut; Oversized = $oversized
-            StdErr = if ($oversized) { '' } else { [IO.File]::ReadAllText($errorPath, [Text.UTF8Encoding]::new($false, $true)) }
-            PartialLine = (-not $endsNewline -and $text.Length -gt 0)
+            StdErr = if ($oversized) { '' } else { $encoding.GetString($stderr.ToArray()) }
+            PartialLine = (-not $oversized -and $pending.Length -gt 0)
         }
     } catch {
         if ($null -ne $process -and -not [bool]$process.HasExited) { & $KillRunner $process }
         if ($null -ne $process -and -not $waited) { & $WaitRunner $process; $waited = $true }
         throw
     } finally {
+        if(-not $writeClosed -and $null -ne $process){try{$process.StandardInput.Close()}catch{}}
         if ($null -ne $process -and -not [bool]$process.HasExited) { & $KillRunner $process }
         if ($null -ne $process -and -not $waited) { & $WaitRunner $process }
-        foreach ($path in @($inputPath, $outputPath, $errorPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+        $pending.Dispose();$stderr.Dispose();if($null -ne $process){$process.Dispose()}
     }
 }
 

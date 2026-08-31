@@ -64,6 +64,7 @@ Describe 'protected P3 profile staging' {
         $exclusiveWriteBlocked = $false
         $runner = {
             param($Executable,$Arguments,$ProfilePath)
+            $script:actualArguments=@($Arguments)
             try {
                 $probe = [IO.File]::Open($ProfilePath,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::None)
                 $probe.Dispose()
@@ -78,6 +79,7 @@ Describe 'protected P3 profile staging' {
         $result = Invoke-PinnedProfileInspection -HgctlPath $child -ExpectedHgctlSHA256 $childHash -ProfilePath $profile -Runner $runner
 
         $result.profile_sha256 | Should -Be (Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.ToLowerInvariant()
+        $script:actualArguments | Should -Be @('tunnel','inspect','--config',$profile,'--config-sha256',$result.profile_sha256,'--json')
         $script:exclusiveWriteBlocked | Should -BeTrue
     }
 }

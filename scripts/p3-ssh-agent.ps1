@@ -289,6 +289,72 @@ function Get-P3ProtectedAgentManifest([string]$Root, [string]$ManifestSHA256) {
     } finally { $Action = $savedAction }
 }
 
+function Assert-P3AgentManifestMatchesProtected([object]$Candidate, [object]$Protected) {
+    $expected = @(
+        'git_scp_path', 'git_scp_sha256', 'git_ssh_add_path', 'git_ssh_add_sha256',
+        'git_ssh_agent_path', 'git_ssh_agent_sha256', 'git_ssh_path', 'git_ssh_sha256',
+        'manifest_sha256', 'private_key_path', 'public_key_fingerprint_sha256', 'public_key_path'
+    )
+    if ($null -eq $Candidate -or $Candidate -is [Array] -or
+        @(Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject @($Candidate.PSObject.Properties.Name | Sort-Object)).Count -ne 0 -or
+        (Get-P3AgentCanonicalSHA256 $Candidate) -cne (Get-P3AgentCanonicalSHA256 $Protected)) {
+        throw 'caller agent manifest differs from protected runtime'
+    }
+}
+
+function Invoke-P3AgentAction(
+    [string]$SelectedAction,
+    [string]$RuntimeRoot,
+    [string]$ExpectedManifestSHA256,
+    [string]$ExpectedPlanSHA256,
+    [string]$Confirmation,
+    [object]$InputObject,
+    [object]$Boundaries
+) {
+    if ($SelectedAction -notin @('AgentStart', 'AgentValidate', 'AgentStop')) { throw 'protected agent action differs' }
+    $required = @(
+        'AddRunner', 'AgentRunner', 'DeleteRunner', 'ListRunner', 'ProcessRunner', 'ReceiptRemoveRunner',
+        'ReobserveRunner', 'SocketExistsRunner', 'StopRunner', 'WaitRunner'
+    )
+    if ($null -eq $Boundaries -or $Boundaries -is [Array] -or
+        @(Compare-Object -ReferenceObject ($required | Sort-Object) -DifferenceObject @($Boundaries.PSObject.Properties.Name | Sort-Object)).Count -ne 0) {
+        throw 'protected agent boundaries differ'
+    }
+    $protected = Get-P3ProtectedAgentManifest -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256
+    $candidate = if ($SelectedAction -ceq 'AgentStart') { $InputObject } else { $InputObject.manifest }
+    Assert-P3AgentManifestMatchesProtected -Candidate $candidate -Protected $protected
+    switch ($SelectedAction) {
+        'AgentStart' {
+            $plan = New-P3AgentPlan -Manifest $protected
+            if ($ExpectedPlanSHA256 -cne $plan.plan_sha256 -or $Confirmation -cne $plan.confirmation_challenge -or
+                $Confirmation -cnotmatch '^P3-SSH-AGENT-[0-9A-F]{16}$') { throw 'agent approval differs' }
+            return Start-P3Agent -Manifest $protected -AgentRunner $Boundaries.AgentRunner `
+                -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
+        }
+        'AgentValidate' {
+            if ([string]$InputObject.receipt.manifest_sha256 -cne $ExpectedManifestSHA256) { throw 'caller agent receipt differs from protected runtime' }
+            $combined = Test-P3AgentState -Manifest $protected -AgentReceipt $InputObject.receipt `
+                -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner
+            Write-P3ProtectedAgentReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $combined
+            return $combined
+        }
+        'AgentStop' {
+            if ([string]$InputObject.receipt.manifest_sha256 -cne $ExpectedManifestSHA256 -or
+                [string]$InputObject.combined_receipt.manifest_sha256 -cne $ExpectedManifestSHA256) {
+                throw 'caller agent receipt differs from protected runtime'
+            }
+            $stop = Stop-P3Agent -Manifest $protected -AgentReceipt $InputObject.receipt `
+                -DeleteRunner $Boundaries.DeleteRunner -StopRunner $Boundaries.StopRunner `
+                -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
+                -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
+                -SocketExistsRunner $Boundaries.SocketExistsRunner
+            Remove-P3ProtectedAgentState -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 `
+                -Receipt $InputObject.combined_receipt -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
+            return $stop
+        }
+    }
+}
+
 function Remove-P3ProtectedAgentState(
     [string]$Root,
     [string]$ManifestSHA256,
@@ -310,35 +376,19 @@ function Remove-P3ProtectedAgentState(
 if (-not [string]::IsNullOrEmpty($Action)) {
     $requestText = [Console]::In.ReadToEnd()
     $request = ConvertFrom-Json -InputObject $requestText -ErrorAction Stop
-    switch ($Action) {
-        'AgentPlan' { New-P3AgentPlan -Manifest $request | ConvertTo-Json -Depth 16 -Compress }
-        'AgentStart' {
-            $plan = New-P3AgentPlan -Manifest $request
-            if ($ExpectedPlanSHA256 -cne $plan.plan_sha256 -or $Confirmation -cne $plan.confirmation_challenge -or $Confirmation -cnotmatch '^P3-SSH-AGENT-[0-9A-F]{16}$') { throw 'agent approval differs' }
-            Start-P3Agent -Manifest $request `
-                -AgentRunner { param($Executable) & $Executable -s } `
-                -AddRunner { param($KeyPath) & $request.git_ssh_add_path $KeyPath } `
-                -StopRunner { param($ProcessId) Stop-Process -Id $ProcessId -ErrorAction Stop } | ConvertTo-Json -Compress
+    if ($Action -ceq 'AgentPlan') { New-P3AgentPlan -Manifest $request | ConvertTo-Json -Depth 16 -Compress }
+    else {
+        $boundaries = [pscustomobject]@{
+            AgentRunner={param($Executable)& $Executable -s};AddRunner={param($KeyPath)& $protected.git_ssh_add_path $KeyPath}
+            StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
+            ListRunner={param($Executable)& $Executable -l -E sha256}
+            ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}
+            DeleteRunner={& $protected.git_ssh_add_path -D};WaitRunner={param($ProcessId)Wait-Process -Id $ProcessId -ErrorAction Stop}
+            ReobserveRunner={param($ProcessId)@(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)}
+            SocketExistsRunner={param($Path)[IO.File]::Exists($Path)};ReceiptRemoveRunner={param($Path)[IO.File]::Delete($Path)}
         }
-        'AgentValidate' {
-            $combined = Test-P3AgentState -Manifest $request.manifest -AgentReceipt $request.receipt `
-                -ListRunner { param($Executable) & $Executable -l -E sha256 } `
-                -ProcessRunner { param($ProcessId) Get-Process -Id $ProcessId -ErrorAction Stop | Select-Object Id, Path, StartTime }
-            Write-P3ProtectedAgentReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $combined
-            $combined | ConvertTo-Json -Compress
-        }
-        'AgentStop' {
-            $stop = Stop-P3Agent -Manifest $request.manifest -AgentReceipt $request.receipt `
-                -DeleteRunner { & $request.manifest.git_ssh_add_path -D } `
-                -StopRunner { param($ProcessId) Stop-Process -Id $ProcessId -ErrorAction Stop } `
-                -ListRunner { param($Executable) & $Executable -l -E sha256 } `
-                -ProcessRunner { param($ProcessId) Get-Process -Id $ProcessId -ErrorAction Stop | Select-Object Id, Path, StartTime } `
-                -WaitRunner { param($ProcessId) Wait-Process -Id $ProcessId -ErrorAction Stop } `
-                -ReobserveRunner { param($ProcessId) @(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) } `
-                -SocketExistsRunner { param($Path) [IO.File]::Exists($Path) }
-            Remove-P3ProtectedAgentState -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $request.combined_receipt `
-                -ReceiptRemoveRunner { param($Path) [IO.File]::Delete($Path) }
-            $stop | ConvertTo-Json -Compress
-        }
+        Invoke-P3AgentAction -SelectedAction $Action -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
+            -ExpectedPlanSHA256 $ExpectedPlanSHA256 -Confirmation $Confirmation -InputObject $request -Boundaries $boundaries |
+            ConvertTo-Json -Depth 16 -Compress
     }
 }

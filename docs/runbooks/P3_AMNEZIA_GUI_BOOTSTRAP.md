@@ -8,7 +8,7 @@ The protected profile staging, sanitized Windows observation schema and distinct
 
 Task 6A is offline evidence only. It grants no authority to execute any gate below, and no later gate inherits approval from an earlier one.
 
-1. **Gate 6.4L:** prepare the protected runtime bundle, then start and validate the one-key Git OpenSSH agent. Stop on any manifest, ACL, toolchain, host-key, key-count or fingerprint mismatch.
+1. **Gate 6.4L:** prepare the protected runtime bundle and prove the read-only `AgentPlan`. Do not start a standalone operator-owned session. Stop on any manifest, ACL, toolchain, host-key, key-count or fingerprint mismatch.
 2. **Gate 6.4R-pre:** form the read-only `RemoteInstallPlan`, then record separately owner-observed Cloud Firewall and current local-baseline receipts. Execute no install and no server mutation.
 3. **Gate 6.4P:** after its own exact approval, install one exact helper at `/usr/local/libexec/home-gateway-p3-peer-guard`. The helper is inert when not invoked and remains installed through P3 so every later observation uses the same attested payload.
 4. **Gate 6.4R-post:** attest the installed helper and run the server and combined reconciliation. Require the exact container, image, listener, host policy, public ingress, baseline peer set, zero leftovers, payload and protocol identities.
@@ -20,4 +20,6 @@ Task 6A is offline evidence only. It grants no authority to execute any gate bel
 
 Use the pinned Windows AmneziaVPN `5.0.1.5` **Self-hosted VPN** GUI flow with **AmneziaWG only**. Do not call internal Amnezia shell scripts as a stable API. The accepted terminal topology is exactly the preserved baseline Admin, one `homegateway` management Admin and one static PC Guest; any other delta stops the gate. **Clear server from Amnezia software** remains prohibited without a new destructive-action approval.
 
-`AgentStop` is mandatory on every success, failure, cancellation and rollback terminal path. It must stop only the gate-owned agent and remove only its gate-owned socket/receipt state. Helper removal is not part of normal gate cleanup.
+The selected `p3-amnezia-peer-guard.ps1` action is the only documented executable entrypoint for guard, client-observation and emergency terminal work. That launcher owns one complete batch: it loads the protected context, starts and validates exactly one dedicated agent/session, executes the selected action, then in `finally` performs receipt-bound `AgentStop`, waits for and re-observes the exact PID/socket disappearance, and removes only the protected receipt. A cleanup failure is terminal even when the action body already failed or was cancelled. `AgentPlan` and `RemoteInstallPlan` remain read-only preparation actions and do not create a session.
+
+Helper removal is not part of normal gate cleanup.

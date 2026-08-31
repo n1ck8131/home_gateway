@@ -406,12 +406,83 @@ function Write-P3ProtectedInstallReceipt([string]$Root, [string]$ManifestSHA256,
     try {
         . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
         $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
+        $manifest = Open-P3BoundedStableJson -Path (Join-Path $Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
         Assert-P3ExactProperties -Value $Receipt -ExpectedProperties $script:P3InstallReceiptProperties -Label 'install receipt'
-        if ([string]$Receipt.schema -cne 'home-gateway/p3-remote-helper-install-receipt/v1' -or [string]$Receipt.payload_sha256 -cnotmatch '^[0-9a-f]{64}$') {
-            throw 'install receipt binding differs'
+        if ([string]$Receipt.schema -cne 'home-gateway/p3-remote-helper-install-receipt/v1' -or
+            [string]$Receipt.payload_sha256 -cne [string]$manifest.local_payload_sha256) {
+            throw 'install receipt payload differs from protected manifest'
         }
         Write-P3RuntimeJson -RuntimeRoot $Root -Name 'remote-install-receipt.json' -Value $Receipt
     } finally { $Action = $savedAction }
+}
+
+function Get-P3ProtectedRemoteContext([string]$Root, [string]$ManifestSHA256) {
+    $savedAction = $Action
+    try {
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
+        $trust = Open-P3BoundedStableJson -Path (Join-Path $Root 'trust.json') -MaximumBytes 65536 -ExpectedProperties $script:P3TrustProperties
+        $manifest = Open-P3BoundedStableJson -Path (Join-Path $Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+        $egressReceipt = Open-P3BoundedStableJson -Path (Join-Path $Root 'egress-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3EgressReceiptProperties
+        $agent = Open-P3BoundedStableJson -Path (Join-Path $Root 'agent-receipt.json') -MaximumBytes 65536 -ExpectedProperties $script:P3CombinedAgentReceiptProperties
+        $egress = @()
+        foreach ($observation in @($egressReceipt.observations)) {
+            Assert-P3ExactProperties -Value $observation -ExpectedProperties $script:P3EgressObservationProperties -Label 'remote egress observation'
+            $egress += [pscustomobject]@{
+                authority_sha256 = [string]$observation.authority_sha256
+                source_cidr_sha256 = [string]$observation.source_cidr_sha256
+            }
+        }
+        return [pscustomobject]@{
+            manifest_sha256 = $ManifestSHA256
+            Trust = [pscustomobject]@{
+                ssh_user=[string]$trust.ssh_user;ssh_host=[string]$trust.ssh_host
+                known_hosts_path=[string]$trust.known_hosts_path;known_hosts_sha256=[string]$manifest.known_hosts_sha256
+                git_ssh_path=[string]$trust.git_ssh_path;git_ssh_sha256=[string]$manifest.git_ssh_sha256
+                git_scp_path=[string]$trust.git_scp_path;git_scp_sha256=[string]$manifest.git_scp_sha256
+                local_payload_path=[string]$trust.local_payload_path;local_payload_sha256=[string]$manifest.local_payload_sha256
+                remote_payload_sha256=[string]$manifest.remote_payload_sha256
+                management_source_cidr_sha256=[string]$manifest.management_source_cidr_sha256;egress=$egress
+            }
+            Agent = $agent
+        }
+    } finally { $Action = $savedAction }
+}
+
+function Assert-P3RemoteContextMatchesProtected([object]$Candidate, [object]$Protected) {
+    if ($null -eq $Candidate -or $Candidate -is [Array] -or
+        (Get-P3RemoteCanonicalSHA256 $Candidate) -cne (Get-P3RemoteCanonicalSHA256 $Protected)) {
+        throw 'caller remote context differs from protected runtime'
+    }
+}
+
+function Invoke-P3RemoteAction(
+    [string]$SelectedAction,
+    [string]$RuntimeRoot,
+    [string]$ExpectedManifestSHA256,
+    [string]$ExpectedPlanSHA256,
+    [string]$Confirmation,
+    [object]$InputObject,
+    [object]$Boundaries
+) {
+    if ($SelectedAction -notin @('RemoteInstall', 'RemoteRemove')) { throw 'protected remote action differs' }
+    Assert-P3RemoteExactProperties -Value $Boundaries -Expected @('ScpRunner', 'SshRunner') -Label 'protected remote boundaries'
+    $protected = Get-P3ProtectedRemoteContext -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256
+    Assert-P3RemoteContextMatchesProtected -Candidate $InputObject.context -Protected $protected
+    if ($SelectedAction -ceq 'RemoteInstall') {
+        if ([string]$InputObject.plan.plan_sha256 -cne $ExpectedPlanSHA256 -or
+            $Confirmation -cne [string]$InputObject.plan.confirmation_challenge -or
+            $Confirmation -cnotmatch '^P3-REMOTE-INSTALL-[0-9A-F]{16}$') { throw 'remote install approval differs' }
+        $receipt = Invoke-P3RemoteInstall -Context $protected -Plan $InputObject.plan `
+            -ScpRunner $Boundaries.ScpRunner -SshRunner $Boundaries.SshRunner
+        Write-P3ProtectedInstallReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $receipt
+        return $receipt
+    }
+    if ([string]$InputObject.remove_plan.remove_plan_sha256 -cne $ExpectedPlanSHA256 -or
+        $Confirmation -cne [string]$InputObject.remove_plan.confirmation_challenge -or
+        $Confirmation -cnotmatch '^P3-REMOTE-REMOVE-[0-9A-F]{16}$') { throw 'remote remove approval differs' }
+    return Invoke-P3RemoteRemove -Context $protected -InstallReceipt $InputObject.install_receipt `
+        -RemovePlan $InputObject.remove_plan -SshRunner $Boundaries.SshRunner
 }
 
 if (-not [string]::IsNullOrEmpty($Action)) {
@@ -426,17 +497,20 @@ if (-not [string]::IsNullOrEmpty($Action)) {
     switch ($Action) {
         'RemoteInstallPlan' { Invoke-P3RemoteInstallPlan -Context $request.context -SshRunner $nativeSshRunner | ConvertTo-Json -Depth 16 -Compress }
         'RemoteInstall' {
-            if ([string]$request.plan.plan_sha256 -cne $ExpectedPlanSHA256 -or $Confirmation -cne [string]$request.plan.confirmation_challenge -or $Confirmation -cnotmatch '^P3-REMOTE-INSTALL-[0-9A-F]{16}$') { throw 'remote install approval differs' }
-            $receipt = Invoke-P3RemoteInstall -Context $request.context -Plan $request.plan `
-                -ScpRunner { param($Executable, $Arguments, $Source, $Target) & $Executable @Arguments $Source "homegateway@$($request.context.Trust.ssh_host):$Target"; [pscustomobject]@{ exit_code = $LASTEXITCODE } } `
-                -SshRunner $nativeSshRunner
-            Write-P3ProtectedInstallReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 -Receipt $receipt
-            $receipt | ConvertTo-Json -Compress
+            $boundaries = [pscustomobject]@{
+                SshRunner=$nativeSshRunner
+                ScpRunner={param($Executable,$Arguments,$Source,$Target)& $Executable @Arguments $Source "homegateway@$($protected.Trust.ssh_host):$Target";[pscustomobject]@{exit_code=$LASTEXITCODE}}
+            }
+            Invoke-P3RemoteAction -SelectedAction $Action -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
+                -ExpectedPlanSHA256 $ExpectedPlanSHA256 -Confirmation $Confirmation -InputObject $request -Boundaries $boundaries |
+                ConvertTo-Json -Compress
         }
         'RemoteRemovePlan' { Invoke-P3RemoteRemovePlan -Context $request.context -InstallReceipt $request.install_receipt -SshRunner $nativeSshRunner | ConvertTo-Json -Compress }
         'RemoteRemove' {
-            if ([string]$request.remove_plan.remove_plan_sha256 -cne $ExpectedPlanSHA256 -or $Confirmation -cne [string]$request.remove_plan.confirmation_challenge -or $Confirmation -cnotmatch '^P3-REMOTE-REMOVE-[0-9A-F]{16}$') { throw 'remote remove approval differs' }
-            Invoke-P3RemoteRemove -Context $request.context -InstallReceipt $request.install_receipt -RemovePlan $request.remove_plan -SshRunner $nativeSshRunner | ConvertTo-Json -Compress
+            Invoke-P3RemoteAction -SelectedAction $Action -RuntimeRoot $RuntimeRoot -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
+                -ExpectedPlanSHA256 $ExpectedPlanSHA256 -Confirmation $Confirmation -InputObject $request `
+                -Boundaries ([pscustomobject]@{SshRunner=$nativeSshRunner;ScpRunner={throw 'SCP is not allowed for remove'}}) |
+                ConvertTo-Json -Compress
         }
     }
 }

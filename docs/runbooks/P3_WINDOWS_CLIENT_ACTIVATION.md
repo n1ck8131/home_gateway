@@ -7,7 +7,7 @@ This runbook is an offline-prepared field contract. It does not authorize an Amn
 - Use only a protected runtime pin set. Never copy a host, address, public key, private-key path, profile field, or raw egress value into tracked files or evidence.
 - Pin the exported profile SHA-256 and AmneziaVPN `5.0.1.5` file version, Authenticode signer result, and binary SHA-256.
 - Pin the expected Guest peer fingerprint SHA-256 from the sanitized Gate 6.5 receipt and the expected self-hosted egress identity SHA-256 from protected runtime state.
-- The protected runtime pins the local payload, remote payload/protocol identities, known-hosts file, three HTTPS authority hashes and current public `/32` hash. The client gate calls the same tracked launcher `ClientObserve` action through its fixed child boundary; it does not contain a second server observer.
+- The protected runtime pins the local payload, remote payload/protocol identities, known-hosts file, three HTTPS authority hashes and current public `/32` hash. The client gate calls the same tracked launcher `ClientObserve` action through its fixed child boundary; it does not contain a second server observer. The tracked launcher action is the single executable owned batch: it starts and validates exactly one protected agent/session and always stops, waits for and re-observes that exact PID/socket in `finally` before removing only its receipt.
 - Stop if RedShield or Cisco baseline collection is incomplete, a self-hosted adapter already exists, any pin is stale, or a requested action would affect another profile/adapter.
 
 ## Ordered client gate
@@ -29,4 +29,4 @@ All evidence is sanitized: schema/version, hashes, counts, freshness booleans, a
 
 `PostRollback` requires a sanitized `profile_absent=true` observation and never hashes an expected-absent profile path. P3 is not terminal until the network `FullRestore` and the separately planned/approved, network-plan-bound `RestoreConfigAcl` both pass.
 
-The remote helper stays installed but inert throughout P3. `AgentStop` is mandatory at every terminal success, failure, cancellation and rollback path. Gate 6.6 approval does not authorize Gate 7.2, adapter-loss recovery, reboot recovery, Gate 7.3, helper removal or emergency rollback; each remains separately candidate-bound.
+The remote helper stays installed but inert throughout P3. Operators must not split `AgentStart`, action execution and `AgentStop` into separate terminal steps: guard, `ClientObserve` and emergency paths use the tracked launcher-owned batch, and cleanup failure is terminal. Gate 6.6 approval does not authorize Gate 7.2, adapter-loss recovery, reboot recovery, Gate 7.3, helper removal or emergency rollback; each remains separately candidate-bound.

@@ -160,7 +160,7 @@ FileLister: TypeAlias = Callable[[pathlib.Path], Sequence[pathlib.Path]]
 Collector: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
 Clock: TypeAlias = Callable[[], float]
 AtomicFilesystem: TypeAlias = Callable[[dict[str, Any]], dict[str, Any]]
-SyncconfRunner: TypeAlias = Callable[[pathlib.Path], None]
+SyncconfRunner: TypeAlias = Callable[[pathlib.Path, str], None]
 
 
 def _canonical(value: Any) -> bytes:
@@ -1389,7 +1389,7 @@ def run_emergency_rollback(
                 or recovered["recovery_syncconf_path"] != request["syncconf_path"]
             ):
                 raise RuntimeError("interrupted recovery differs")
-            syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
+            syncconf(pathlib.Path(recovered["recovery_syncconf_path"]), recovery_state)
             restored = filesystem({"action": "verify-recovery", **file_context})
             _require_rollback_observation(
                 restored,
@@ -1425,7 +1425,7 @@ def run_emergency_rollback(
         )
         if removed != {"removed": True}:
             raise RuntimeError("candidate removal failed")
-        syncconf(pathlib.Path(request["syncconf_path"]))
+        syncconf(pathlib.Path(request["syncconf_path"]), recovery_state)
         verified = filesystem({"action": "verify", **file_context})
         _require_rollback_observation(
             verified,
@@ -1456,7 +1456,7 @@ def run_emergency_rollback(
                 or recovered.get("recovered") is not True
             ):
                 raise RuntimeError("emergency rollback recovery failed")
-            syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
+            syncconf(pathlib.Path(recovered["recovery_syncconf_path"]), recovery_state)
             recovery_verified = filesystem(
                 {"action": "verify-recovery", **file_context}
             )
@@ -1637,6 +1637,7 @@ class ContainerRollbackFilesystem:
         self.stream_runner = stream_runner
         self.recovery_root = recovery_root
         self.container_id: str | None = None
+        self._authorized_sync: tuple[dict[str, Any], str] | None = None
 
     def _run(self, arguments: Sequence[str], maximum: int = MAX_COMMAND_BYTES) -> bytes:
         return run_checked_command(arguments, runner=self.runner, maximum_bytes=maximum)
@@ -1874,17 +1875,35 @@ class ContainerRollbackFilesystem:
         )
 
     def _discover_recovery_state(self, action: dict[str, Any]) -> str | None:
-        manifests = sorted(self.recovery_root.glob(".p3-recovery-*.json"))
-        if not manifests:
+        artifacts = sorted(self.recovery_root.glob(".p3-recovery-*"))
+        if not artifacts:
             return None
-        if len(manifests) != 1:
-            raise RuntimeError("ROLLBACK_UNPROVEN: recovery manifest count differs")
-        match = re.fullmatch(r"\.p3-recovery-([0-9a-f]{64})\.json", manifests[0].name)
-        if match is None:
-            raise RuntimeError("ROLLBACK_UNPROVEN: recovery manifest name differs")
-        token = match.group(1)
-        self._load_recovery_state(action, token)
+        tokens: set[str] = set()
+        for artifact in artifacts:
+            match = re.fullmatch(
+                r"\.p3-recovery-([0-9a-f]{64})(?:\.conf|\.clients|\.tmp|\.new-conf|\.new-clients|\.json)",
+                artifact.name,
+            )
+            if match is None:
+                raise RuntimeError("ROLLBACK_UNPROVEN: recovery artifact name differs")
+            tokens.add(match.group(1))
+        if len(tokens) != 1:
+            raise RuntimeError(
+                "ROLLBACK_UNPROVEN: recovery artifact token count differs"
+            )
+        token = next(iter(tokens))
+        if not self._recovery_paths(token)["manifest"].exists():
+            raise RuntimeError("ROLLBACK_UNPROVEN: recovery manifest is absent")
+        try:
+            self._load_recovery_state(action, token)
+        except Exception as exc:
+            raise RuntimeError(
+                "ROLLBACK_UNPROVEN: recovery artifact set differs"
+            ) from exc
         return token
+
+    def _unlink_recovery_path(self, path: pathlib.Path, *, missing_ok: bool) -> None:
+        path.unlink(missing_ok=missing_ok)
 
     def _write_container(
         self, container_id: str, target: str, stage: str, data: bytes
@@ -1933,8 +1952,17 @@ class ContainerRollbackFilesystem:
             runner=self.stream_runner,
         )
 
-    def syncconf(self, _path: pathlib.Path) -> None:
+    def syncconf(self, path: pathlib.Path, recovery_state: str) -> None:
+        if path != pathlib.Path(CONTAINER_CONFIG_PATH) or self._authorized_sync is None:
+            raise ValueError("rollback syncconf authorization differs")
+        action, authorized_state = self._authorized_sync
+        self._authorized_sync = None
+        if recovery_state != authorized_state:
+            raise ValueError("rollback syncconf authorization differs")
+        state = self._load_recovery_state(action, recovery_state)
         container_id = self._resolve_container()
+        if state["container_id"] != container_id:
+            raise ValueError("rollback container identity changed")
         self._run(
             [
                 "/usr/bin/docker",
@@ -1961,8 +1989,9 @@ class ContainerRollbackFilesystem:
             self._cleanup_container_stages(action, container_id)
             paths = state["paths"]
             for name in ("config", "clients", "temporary", "new_config", "new_clients"):
-                paths[name].unlink(missing_ok=True)
-            paths["manifest"].unlink()
+                self._unlink_recovery_path(paths[name], missing_ok=True)
+            self._unlink_recovery_path(paths["manifest"], missing_ok=False)
+            self._authorized_sync = None
             return {"cleaned": True}
         if mode == "recover":
             state = self._load_recovery_state(action, action["recovery_state"])
@@ -2004,6 +2033,10 @@ class ContainerRollbackFilesystem:
                         action["temporary_path"],
                     ]
                 )
+            self._authorized_sync = (
+                {name: action[name] for name in ROLLBACK_PLAN_KEYS},
+                action["recovery_state"],
+            )
             return {
                 "recovered": True,
                 "recovery_syncconf_path": action["syncconf_path"],
@@ -2034,6 +2067,10 @@ class ContainerRollbackFilesystem:
                     "p3-temp-remove",
                     action["temporary_path"],
                 ]
+            )
+            self._authorized_sync = (
+                {name: action[name] for name in ROLLBACK_PLAN_KEYS},
+                action["recovery_state"],
             )
             return {"removed": True}
         if mode != "begin":
@@ -2122,8 +2159,8 @@ def _system_atomic_filesystem(action: dict[str, Any]) -> dict[str, Any]:
     return _SYSTEM_ROLLBACK(action)
 
 
-def _system_syncconf(path: pathlib.Path) -> None:
-    _SYSTEM_ROLLBACK.syncconf(path)
+def _system_syncconf(path: pathlib.Path, recovery_state: str) -> None:
+    _SYSTEM_ROLLBACK.syncconf(path, recovery_state)
 
 
 def main() -> int:

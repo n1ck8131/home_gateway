@@ -130,7 +130,7 @@ Do not repeat a failed command until its cause or relevant state changes.
 
 ## Task 10: Generate, do not execute, the next exact candidate
 
-Use only the reviewed tracked candidate generator and ignored local seed paths. Generate one sanitized `home-gateway/p3-prelive-prerequisite-plan/v1` artifact containing:
+Use only the reviewed tracked candidate generator and ignored local seed paths. Generate one sanitized `home-gateway/p3-prelive-prerequisite-plan/v2` artifact containing:
 
 - current HEAD and tracked payload hashes;
 - exact plan SHA-256 and confirmation challenge;

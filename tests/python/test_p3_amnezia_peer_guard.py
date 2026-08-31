@@ -7,6 +7,7 @@ import io
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -177,6 +178,67 @@ class FakeClock:
     def sleep(self, seconds):
         self.sleeps.append(seconds)
         self.now += seconds
+
+
+class FakeContainerRollbackFilesystem(guard.ContainerRollbackFilesystem):
+    def __init__(self, recovery_root, *, fail_write_number=None, fail_temporary=False):
+        super().__init__(
+            runner=lambda *args, **kwargs: None,
+            stream_runner=lambda *args, **kwargs: None,
+            recovery_root=recovery_root,
+        )
+        public_key_bytes = b"x" * 32
+        public_key = base64.b64encode(public_key_bytes).decode()
+        self.candidate = sha(public_key_bytes)
+        self.config = (
+            "[Interface]\nAddress = 10.0.0.1\n[Peer]\nPublicKey = " + public_key + "\n"
+        ).encode()
+        self.clients = json.dumps(
+            [{"clientId": public_key, "userData": {"name": "synthetic"}}],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.temporary = b"synthetic-candidate-temp"
+        self.events = []
+        self.fail_write_number = fail_write_number
+        self.fail_temporary = fail_temporary
+        self.write_count = 0
+
+    def _resolve_container(self):
+        self.container_id = "synthetic-container-id"
+        return self.container_id
+
+    def _preflight(self, action, container_id):
+        self.events.append("preflight")
+
+    def _observation(self, action):
+        return guard.rollback_expected_observation(action, phase="pre")
+
+    def _read_container(self, container_id, path):
+        return self.config if path == guard.CONTAINER_CONFIG_PATH else self.clients
+
+    def _temporary_bytes(self, container_id, path):
+        return self.temporary
+
+    def _write_container(self, container_id, target, stage, data):
+        self.write_count += 1
+        self.events.append(("write", target, stage))
+        if self.write_count == self.fail_write_number:
+            raise RuntimeError("synthetic interrupted container write")
+        if target == guard.CONTAINER_CONFIG_PATH:
+            self.config = data
+        else:
+            self.clients = data
+
+    def _write_temporary(self, container_id, target, stage, data):
+        self.events.append(("temp", target, stage))
+        if self.fail_temporary:
+            raise RuntimeError("synthetic interrupted temporary write")
+        self.temporary = data
+
+    def _run(self, arguments, maximum=guard.MAX_COMMAND_BYTES):
+        self.events.append(("run", tuple(arguments)))
+        return b""
 
 
 class PeerGuardProtocolTests(unittest.TestCase):
@@ -634,6 +696,7 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             "baseline_metadata_sha256": "7" * 64,
             "baseline_temporary_state_sha256": sha(b"ABSENT"),
             "baseline_runtime_identity_sha256": "a" * 64,
+            "baseline_ipv6_policy_sha256": "b" * 64,
         }
         identity = {key: request[key] for key in guard.ROLLBACK_PLAN_KEYS}
         request["rollback_plan_sha256"] = sha(identity)
@@ -641,6 +704,138 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             "P3-EMERGENCY-ROLLBACK-" + request["rollback_plan_sha256"][:16].upper()
         )
         return request
+
+    def adapter_action(self, adapter):
+        request = self.rollback_request()
+        request["candidate_fingerprint_sha256"] = adapter.candidate
+        request["pre_peer_fingerprint_sha256"] = []
+        request["post_peer_fingerprint_sha256"] = [adapter.candidate]
+        request["baseline_peer_set_sha256"] = sha([])
+        request["pre_live_peer_set_sha256"] = sha([adapter.candidate])
+        request["rollback_plan_sha256"] = sha(
+            {key: request[key] for key in guard.ROLLBACK_PLAN_KEYS}
+        )
+        request["confirmation"] = (
+            "P3-EMERGENCY-ROLLBACK-"
+            + request["rollback_plan_sha256"][:16].upper()
+        )
+        return request
+
+    def test_container_adapter_reopens_durable_state_after_process_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = FakeContainerRollbackFilesystem(pathlib.Path(directory))
+            action = self.adapter_action(first)
+            token = first({"action": "begin", **action})["recovery_state"]
+            restarted = FakeContainerRollbackFilesystem(pathlib.Path(directory))
+            recovered = restarted(
+                {"action": "recover", **action, "recovery_state": token}
+            )
+            self.assertEqual(
+                recovered,
+                {"recovered": True, "recovery_syncconf_path": guard.CONTAINER_CONFIG_PATH},
+            )
+            self.assertEqual(restarted.config, first.config)
+            self.assertEqual(restarted.clients, first.clients)
+            self.assertEqual(restarted.temporary, first.temporary)
+
+    def test_container_adapter_recovers_after_interrupted_second_write_and_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = FakeContainerRollbackFilesystem(
+                pathlib.Path(directory), fail_write_number=2
+            )
+            action = self.adapter_action(first)
+            token = first({"action": "begin", **action})["recovery_state"]
+            with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                first({"action": "remove", **action, "recovery_state": token})
+            restarted = FakeContainerRollbackFilesystem(pathlib.Path(directory))
+            restarted(
+                {"action": "recover", **action, "recovery_state": token}
+            )
+            writes = [event for event in restarted.events if isinstance(event, tuple)]
+            self.assertEqual([event[0] for event in writes[:3]], ["run", "write", "write"])
+            self.assertEqual(writes[1][2:][0], guard.container_staging_paths(action["nonce"])[0])
+            self.assertEqual(writes[2][2:][0], guard.container_staging_paths(action["nonce"])[1])
+
+    def test_container_adapter_recovers_after_interrupted_temporary_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = FakeContainerRollbackFilesystem(
+                pathlib.Path(directory), fail_temporary=True
+            )
+            action = self.adapter_action(first)
+            token = first({"action": "begin", **action})["recovery_state"]
+            with self.assertRaisesRegex(RuntimeError, "temporary"):
+                first({"action": "recover", **action, "recovery_state": token})
+            restarted = FakeContainerRollbackFilesystem(pathlib.Path(directory))
+            restarted({"action": "recover", **action, "recovery_state": token})
+            self.assertEqual(restarted.temporary, first.temporary)
+            self.assertEqual(restarted.events[0][0], "run")
+
+    def test_temporary_recovery_is_staged_and_atomically_renamed(self):
+        calls = []
+
+        def stream_runner(arguments, data, timeout_seconds, maximum_bytes):
+            calls.append((arguments, data))
+            return guard.CommandResult(0, b"", b"")
+
+        adapter = guard.ContainerRollbackFilesystem(stream_runner=stream_runner)
+        target = "/tmp/p3-candidate-" + ("d" * 32) + ".tmp"
+        stage = "/tmp/.p3-recover-" + ("d" * 32) + ".tmp"
+        adapter._write_temporary("synthetic-container-id", target, stage, b"temp")
+        self.assertEqual(len(calls), 1)
+        arguments = calls[0][0]
+        self.assertIn(stage, arguments)
+        self.assertIn(target, arguments)
+        self.assertIn("mv -T", arguments[-5])
+
+    def test_rollback_observation_reuses_canonical_server_snapshot_hashes(self):
+        adapter = guard.ContainerRollbackFilesystem()
+        action = self.rollback_request()
+        snapshot = server_snapshot(
+            container_identity_sha256=sha(b"synthetic-container-id"),
+            persistent_config_sha256="1" * 64,
+            metadata_sha256="2" * 64,
+            temporary_state_sha256="3" * 64,
+            runtime_identity_sha256="4" * 64,
+            live_peer_set_sha256=sha(action["post_peer_fingerprint_sha256"]),
+            peer_fingerprint_sha256=action["post_peer_fingerprint_sha256"],
+        )
+        with (
+            mock.patch.object(adapter, "_resolve_container", return_value="synthetic-container-id"),
+            mock.patch.object(adapter, "_run", return_value=b"canonical-syncconf"),
+            mock.patch.object(guard, "collect_server_snapshot", return_value=snapshot) as collector,
+        ):
+            observed = adapter._observation(action)
+        self.assertEqual(observed["persistent_config_sha256"], snapshot["persistent_config_sha256"])
+        self.assertEqual(observed["metadata_sha256"], snapshot["metadata_sha256"])
+        self.assertEqual(observed["temporary_state_sha256"], snapshot["temporary_state_sha256"])
+        self.assertEqual(observed["runtime_identity_sha256"], snapshot["runtime_identity_sha256"])
+        self.assertEqual(
+            collector.call_args.args[0]["expected_ipv6_policy_sha256"],
+            action["baseline_ipv6_policy_sha256"],
+        )
+
+    def test_interrupted_process_is_recovered_and_requires_new_approval(self):
+        calls = []
+
+        def filesystem(action):
+            calls.append(action["action"])
+            if action["action"] == "resume":
+                return {"recovery_state": "d" * 64}
+            if action["action"] == "recover":
+                return {"recovered": True, "recovery_syncconf_path": action["syncconf_path"]}
+            if action["action"] == "verify-recovery":
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "cleanup":
+                return {"cleaned": True}
+            raise AssertionError(action)
+
+        syncs = []
+        with self.assertRaisesRegex(RuntimeError, "RECOVERED_INTERRUPTED"):
+            guard.run_emergency_rollback(
+                self.rollback_request(), filesystem, lambda path: syncs.append(str(path))
+            )
+        self.assertEqual(calls, ["resume", "recover", "verify-recovery", "cleanup"])
+        self.assertEqual(syncs, [str(pathlib.Path(guard.CONTAINER_CONFIG_PATH))])
 
     def test_container_rollback_staging_and_writer_are_nonce_bound(self):
         config_stage, clients_stage = guard.container_staging_paths("d" * 64)
@@ -694,6 +889,8 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
 
         def filesystem(action):
             calls.append((action["action"], action.get("candidate_fingerprint_sha256")))
+            if action["action"] == "resume":
+                return {"recovery_state": ""}
             if action["action"] == "inspect":
                 return guard.rollback_expected_observation(action, phase="pre")
             if action["action"] == "begin":
@@ -715,7 +912,7 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         self.assertTrue(receipt["restored"])
         self.assertEqual(
             [name for name, _ in calls],
-            ["inspect", "begin", "remove", "syncconf", "verify", "cleanup"],
+            ["resume", "inspect", "begin", "remove", "syncconf", "verify", "cleanup"],
         )
 
     def test_emergency_rollback_revalidates_before_any_mutation(self):
@@ -725,14 +922,14 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
                 self.rollback_request(),
                 lambda action: (
                     calls.append(action)
-                    or {
+                    or ({"recovery_state": ""} if action["action"] == "resume" else {
                         **guard.rollback_expected_observation(action, phase="pre"),
                         "candidate_fingerprint_sha256": "0" * 64,
-                    }
+                    })
                 ),
                 lambda path: calls.append(path),
             )
-        self.assertEqual(len(calls), 1)
+        self.assertEqual([item["action"] for item in calls], ["resume", "inspect"])
 
     def test_emergency_rollback_recomputes_plan_and_rejects_every_bound_mutation(self):
         original = self.rollback_request()
@@ -753,6 +950,8 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
 
         def filesystem(action):
             calls.append(action["action"])
+            if action["action"] == "resume":
+                return {"recovery_state": ""}
             if action["action"] == "inspect":
                 return guard.rollback_expected_observation(action, phase="pre")
             if action["action"] == "begin":
@@ -782,7 +981,7 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             guard.run_emergency_rollback(self.rollback_request(), filesystem, syncconf)
         self.assertEqual(
             calls,
-            ["inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
+            ["resume", "inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
         )
         self.assertEqual(len(sync_calls), 2)
 
@@ -791,6 +990,8 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
 
         def filesystem(action):
             calls.append(action["action"])
+            if action["action"] == "resume":
+                return {"recovery_state": ""}
             if action["action"] == "inspect":
                 return guard.rollback_expected_observation(action, phase="pre")
             if action["action"] == "begin":
@@ -809,7 +1010,7 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             guard.run_emergency_rollback(self.rollback_request(), filesystem, lambda path: None)
         self.assertEqual(
             calls,
-            ["inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
+            ["resume", "inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
         )
 
     def test_emergency_rollback_preserves_recovery_material_when_recovery_is_unproved(self):
@@ -817,6 +1018,8 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
 
         def filesystem(action):
             calls.append(action["action"])
+            if action["action"] == "resume":
+                return {"recovery_state": ""}
             if action["action"] == "inspect":
                 return guard.rollback_expected_observation(action, phase="pre")
             if action["action"] == "begin":

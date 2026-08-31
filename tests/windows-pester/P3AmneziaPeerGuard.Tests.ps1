@@ -28,8 +28,8 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
                 BaselineTemporaryStateSHA256 = ('4' * 64)
                 BaselineRuntimeIdentitySHA256 = ('5' * 64)
                 Rollback = [pscustomobject]@{
-                    persistent_config_path = '/opt/amnezia/awg/wg0.conf'; metadata_path = '/opt/amnezia/awg/peers.json'
-                    temporary_path = '/run/home-gateway-p3-peer-guard/candidate.tmp'; syncconf_path = '/run/home-gateway-p3-peer-guard/awg.conf'
+                    persistent_config_path = '/opt/amnezia/awg/awg0.conf'; metadata_path = '/opt/amnezia/awg/clientsTable'
+                    temporary_path = '/tmp/p3-candidate-{nonce32}.tmp'; syncconf_path = '/opt/amnezia/awg/awg0.conf'
                 }
                 Trust = [pscustomobject]@{
                     ssh_user = 'homegateway'; ssh_host = '192.0.2.10'; known_hosts_path = 'C:\synthetic\known_hosts'
@@ -312,9 +312,16 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
             persistent_config_sha256 = ('6' * 64); live_peer_set_sha256 = $candidate.post_peer_set_sha256; metadata_sha256 = ('7' * 64)
             temporary_state_sha256 = ('8' * 64); runtime_identity_sha256 = ('9' * 64); prepared_syncconf_sha256 = ('a' * 64)
         }
-        $plan = New-P3EmergencyRollbackPlan -Context $script:Context -CandidateReceipt $candidate -CurrentReceipt $current
+        $nonce = 'd' * 64
+        $plan = New-P3EmergencyRollbackPlan -Context $script:Context -CandidateReceipt $candidate -CurrentReceipt $current -Nonce $nonce
         $plan.plan_sha256 | Should -Match '^[0-9a-f]{64}$'
         $plan.confirmation_challenge | Should -Match '^P3-EMERGENCY-ROLLBACK-[0-9A-F]{16}$'
+        $plan.nonce | Should -BeExactly $nonce
+        $plan.temporary_path | Should -BeExactly ('/tmp/p3-candidate-' + ('d' * 32) + '.tmp')
+        $plan.syncconf_path | Should -BeExactly '/opt/amnezia/awg/awg0.conf'
+        $request = New-P3RemoteRequest -Context $script:Context -Mode 'emergency-rollback' -Operation '' -Nonce $nonce -RollbackPlan $plan
+        $request.rollback_plan_sha256 | Should -BeExactly $plan.plan_sha256
+        $request.PSObject.Properties.Name | Should -Not -Contain 'plan_sha256'
         $calls = 0
         { Invoke-P3EmergencyRollback -Context $script:Context -Plan $plan -ExpectedPlanSHA256 ('0' * 64) `
             -Confirmation $plan.confirmation_challenge -Runner { $calls++ } } | Should -Throw '*approval*'

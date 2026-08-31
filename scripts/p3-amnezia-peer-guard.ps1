@@ -313,6 +313,10 @@ function New-P3RemoteRequest(
         nonce = $nonceValue
     }
     if ($Mode -in @('reconcile', 'guard')) {
+        if ([string]$Context.Rollback.persistent_config_path -cne '/opt/amnezia/awg/awg0.conf' -or
+            [string]$Context.Rollback.metadata_path -cne '/opt/amnezia/awg/clientsTable' -or
+            [string]$Context.Rollback.temporary_path -cne '/tmp/p3-candidate-{nonce32}.tmp' -or
+            [string]$Context.Rollback.syncconf_path -cne '/opt/amnezia/awg/awg0.conf') { throw 'rollback paths differ' }
         $request.expected_container_identity_sha256 = [string]$Context.ExpectedContainerIdentitySHA256
         $request.expected_image_identity_sha256 = [string]$Context.ExpectedImageIdentitySHA256
         $request.expected_udp_publication_sha256 = [string]$Context.ExpectedUdpPublicationSHA256
@@ -325,7 +329,7 @@ function New-P3RemoteRequest(
         $request.expected_ipv6_policy_sha256 = [string]$Context.ExpectedIPv6PolicySHA256
         $request.persistent_config_path = [string]$Context.Rollback.persistent_config_path
         $request.metadata_path = [string]$Context.Rollback.metadata_path
-        $request.temporary_path = [string]$Context.Rollback.temporary_path
+        $request.temporary_path = '/tmp/p3-candidate-' + $nonceValue.Substring(0, 32) + '.tmp'
     }
     if ($Mode -ceq 'guard') {
         if ($Operation -notin @('admin', 'guest')) { throw 'remote guard operation differs' }
@@ -344,7 +348,8 @@ function New-P3RemoteRequest(
     if ($Mode -ceq 'emergency-rollback') {
         if ($null -eq $RollbackPlan) { throw 'emergency rollback plan is required' }
         foreach ($property in $RollbackPlan.PSObject.Properties) {
-            if ($property.Name -notin @('schema', 'confirmation_challenge')) { $request[$property.Name] = $property.Value }
+            if ($property.Name -eq 'plan_sha256') { $request.rollback_plan_sha256 = $property.Value }
+            elseif ($property.Name -notin @('schema', 'confirmation_challenge')) { $request[$property.Name] = $property.Value }
         }
         $request.confirmation = [string]$RollbackPlan.confirmation_challenge
     }
@@ -517,8 +522,14 @@ function Invoke-P3GuardStream([object]$Context, [string]$Operation, [string]$Non
     }
 }
 
-function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt, [object]$CurrentReceipt) {
+function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt, [object]$CurrentReceipt, [string]$Nonce) {
     $null = Test-P3PreliveInputs -Context $Context -NowUtc ([DateTime]::UtcNow)
+    Assert-P3GuardSHA256 -Value $Nonce -Label 'emergency rollback nonce'
+    $nonceValue = $Nonce.ToLowerInvariant()
+    if ([string]$Context.Rollback.persistent_config_path -cne '/opt/amnezia/awg/awg0.conf' -or
+        [string]$Context.Rollback.metadata_path -cne '/opt/amnezia/awg/clientsTable' -or
+        [string]$Context.Rollback.temporary_path -cne '/tmp/p3-candidate-{nonce32}.tmp' -or
+        [string]$Context.Rollback.syncconf_path -cne '/opt/amnezia/awg/awg0.conf') { throw 'rollback paths differ' }
     Assert-P3GuardExactProperties -Value $CandidateReceipt -Expected $script:P3LocalGuardProperties -Label 'candidate receipt'
     Assert-P3GuardExactProperties -Value $CurrentReceipt -Expected $script:P3RollbackObservationProperties -Label 'rollback observation'
     foreach ($name in @('candidate_fingerprint_sha256', 'post_peer_set_sha256', 'pre_peer_set_sha256')) { Assert-P3GuardSHA256 -Value ([string]$CandidateReceipt.$name) -Label $name }
@@ -532,6 +543,7 @@ function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt
     $postPeers = @($CurrentReceipt.peer_fingerprint_sha256 | Sort-Object)
     if ($postPeers.Count -ne ($prePeers.Count + 1) -or @($postPeers | Where-Object { $_ -notin ($prePeers + @([string]$CandidateReceipt.candidate_fingerprint_sha256)) }).Count -ne 0) { throw 'emergency rollback peer delta differs' }
     $identity = [pscustomobject][ordered]@{
+        nonce = $nonceValue
         manifest_sha256 = [string]$Context.ManifestSHA256
         payload_sha256 = [string]$Context.PayloadSHA256
         protocol_sha256 = [string]$Context.ProtocolSHA256
@@ -543,8 +555,8 @@ function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt
         baseline_peer_set_sha256 = [string]$CandidateReceipt.pre_peer_set_sha256
         persistent_config_path = [string]$Context.Rollback.persistent_config_path
         metadata_path = [string]$Context.Rollback.metadata_path
-        temporary_path = [string]$Context.Rollback.temporary_path
-        syncconf_path = [string]$Context.Rollback.syncconf_path
+        temporary_path = '/tmp/p3-candidate-' + $nonceValue.Substring(0, 32) + '.tmp'
+        syncconf_path = '/opt/amnezia/awg/awg0.conf'
         prepared_syncconf_sha256 = [string]$CurrentReceipt.prepared_syncconf_sha256
         pre_persistent_config_sha256 = [string]$CurrentReceipt.persistent_config_sha256
         pre_live_peer_set_sha256 = [string]$CurrentReceipt.live_peer_set_sha256
@@ -555,6 +567,7 @@ function New-P3EmergencyRollbackPlan([object]$Context, [object]$CandidateReceipt
         baseline_metadata_sha256 = [string]$Context.BaselineMetadataSHA256
         baseline_temporary_state_sha256 = [string]$Context.BaselineTemporaryStateSHA256
         baseline_runtime_identity_sha256 = [string]$Context.BaselineRuntimeIdentitySHA256
+        baseline_ipv6_policy_sha256 = [string]$Context.ExpectedIPv6PolicySHA256
     }
     $hash = Get-P3GuardCanonicalSHA256 $identity
     $result = [ordered]@{ schema = 'home-gateway/p3-emergency-rollback-plan/v2' }
@@ -573,8 +586,11 @@ function Invoke-P3EmergencyRollback([object]$Context, [object]$Plan, [string]$Ex
     if ([string]$Plan.schema -cne 'home-gateway/p3-emergency-rollback-plan/v2' -or $computed -cne [string]$Plan.plan_sha256 -or
         [string]$Plan.plan_sha256 -cne $ExpectedPlanSHA256 -or $Confirmation -cne [string]$Plan.confirmation_challenge -or
         $Confirmation -cnotmatch '^P3-EMERGENCY-ROLLBACK-[0-9A-F]{16}$') { throw 'emergency rollback approval differs' }
-    $nonce = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).ToLowerInvariant()
-    $request = New-P3RemoteRequest -Context $Context -Mode 'emergency-rollback' -Operation '' -Nonce $nonce -RollbackPlan $Plan
+    Assert-P3GuardSHA256 -Value ([string]$Plan.nonce) -Label 'emergency rollback nonce'
+    if ([string]$Plan.temporary_path -cne ('/tmp/p3-candidate-' + ([string]$Plan.nonce).Substring(0, 32) + '.tmp')) {
+        throw 'emergency rollback approval differs'
+    }
+    $request = New-P3RemoteRequest -Context $Context -Mode 'emergency-rollback' -Operation '' -Nonce ([string]$Plan.nonce) -RollbackPlan $Plan
     return Invoke-P3BoundedJsonSsh -Context $Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $Runner
 }
 
@@ -742,7 +758,8 @@ function Invoke-P3ApprovedGuardBody(
             return Invoke-P3BoundedJsonSsh -Context $Context -Request $request -TimeoutSeconds 30 -MaximumBytes 65536 -Runner $Boundaries.JsonRunner
         }
         'EmergencyRollbackPlan' {
-            return New-P3EmergencyRollbackPlan -Context $Context -CandidateReceipt $InputObject.candidate -CurrentReceipt $InputObject.current
+            return New-P3EmergencyRollbackPlan -Context $Context -CandidateReceipt $InputObject.candidate `
+                -CurrentReceipt $InputObject.current -Nonce ([string]$InputObject.nonce)
         }
         'EmergencyRollback' {
             return Invoke-P3EmergencyRollback -Context $Context -Plan $InputObject -ExpectedPlanSHA256 $ExpectedBodyPlanSHA256 `

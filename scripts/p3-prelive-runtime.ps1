@@ -387,16 +387,15 @@ function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
     $baseline = $Trust.accepted_server_baseline
     $baselineSHA256 = Get-P3ServerBaselineSHA256 -Baseline $baseline
     Assert-P3ExactProperties -Value $Trust.rollback_paths -ExpectedProperties $script:P3RollbackPathProperties -Label 'rollback paths'
-    $rollbackRoots = @{
-        persistent_config_path = '/opt/amnezia/awg/'
-        metadata_path = '/opt/amnezia/awg/'
-        temporary_path = '/run/home-gateway-p3-peer-guard/'
-        syncconf_path = '/run/home-gateway-p3-peer-guard/'
+    $rollbackPaths = @{
+        persistent_config_path = '/opt/amnezia/awg/awg0.conf'
+        metadata_path = '/opt/amnezia/awg/clientsTable'
+        temporary_path = '/tmp/p3-candidate-{nonce32}.tmp'
+        syncconf_path = '/opt/amnezia/awg/awg0.conf'
     }
     foreach ($name in $script:P3RollbackPathProperties) {
         $value = [string]$Trust.rollback_paths.$name
-        if ([string]::IsNullOrWhiteSpace($value) -or -not $value.StartsWith($rollbackRoots[$name], [StringComparison]::Ordinal) -or
-            $value.Contains('..') -or $value.Contains('\') -or $value.EndsWith('/', [StringComparison]::Ordinal)) { throw 'rollback paths differ' }
+        if ($value -cne $rollbackPaths[$name]) { throw 'rollback paths differ' }
     }
     $egress = @($Trust.egress_authority_sha256)
     if ($egress.Count -ne 3 -or @($egress | Select-Object -Unique).Count -ne 3) { throw 'three distinct egress authorities are required' }

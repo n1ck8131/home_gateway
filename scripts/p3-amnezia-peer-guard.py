@@ -76,6 +76,7 @@ CLIENT_KEYS = COMMON_REQUEST_KEYS | {
     "maximum_handshake_age_seconds",
 }
 ROLLBACK_PLAN_KEYS = {
+    "nonce",
     "payload_sha256",
     "protocol_sha256",
     "manifest_sha256",
@@ -99,6 +100,7 @@ ROLLBACK_PLAN_KEYS = {
     "baseline_metadata_sha256",
     "baseline_temporary_state_sha256",
     "baseline_runtime_identity_sha256",
+    "baseline_ipv6_policy_sha256",
 }
 ROLLBACK_KEYS = (
     COMMON_REQUEST_KEYS
@@ -311,6 +313,7 @@ def validate_request(mode: str, request: dict[str, Any]) -> dict[str, Any]:
             "baseline_metadata_sha256",
             "baseline_temporary_state_sha256",
             "baseline_runtime_identity_sha256",
+            "baseline_ipv6_policy_sha256",
         ):
             if not _is_sha256(request[name]):
                 raise ValueError(f"request {name} differs")
@@ -1259,6 +1262,12 @@ def container_staging_paths(nonce: str) -> tuple[str, str]:
     return root + ".conf", root + ".clients"
 
 
+def temporary_recovery_staging_path(nonce: str) -> str:
+    if not _is_sha256(nonce):
+        raise ValueError("rollback nonce differs")
+    return "/tmp/.p3-recover-" + nonce[:32] + ".tmp"
+
+
 def container_writer_arguments(
     container_id: str, target: str, staging: str, byte_count: int
 ) -> list[str]:
@@ -1357,6 +1366,35 @@ def run_emergency_rollback(
     validate_request("emergency-rollback", request)
     candidate = request["candidate_fingerprint_sha256"]
     file_context = {name: request[name] for name in ROLLBACK_PLAN_KEYS}
+    resumed = filesystem({"action": "resume", **file_context})
+    if (
+        not isinstance(resumed, dict)
+        or set(resumed) != {"recovery_state"}
+        or not isinstance(resumed["recovery_state"], str)
+    ):
+        raise RuntimeError("ROLLBACK_UNPROVEN: recovery discovery differs")
+    if resumed["recovery_state"]:
+        recovery_state = resumed["recovery_state"]
+        recovered = filesystem(
+            {"action": "recover", **file_context, "recovery_state": recovery_state}
+        )
+        if (
+            recovered.get("recovered") is not True
+            or set(recovered) != {"recovered", "recovery_syncconf_path"}
+            or recovered["recovery_syncconf_path"] != request["syncconf_path"]
+        ):
+            raise RuntimeError("ROLLBACK_UNPROVEN: interrupted recovery differs")
+        syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
+        restored = filesystem({"action": "verify-recovery", **file_context})
+        _require_rollback_observation(
+            restored, rollback_expected_observation(request, phase="pre"), "recovery"
+        )
+        cleaned = filesystem(
+            {"action": "cleanup", **file_context, "recovery_state": recovery_state}
+        )
+        if cleaned != {"cleaned": True}:
+            raise RuntimeError("ROLLBACK_UNPROVEN: recovery cleanup differs")
+        raise RuntimeError("RECOVERED_INTERRUPTED: retry requires a new approval")
     inspected = filesystem({"action": "inspect", **file_context})
     _require_rollback_observation(
         inspected, rollback_expected_observation(request, phase="pre"), "pre"
@@ -1588,7 +1626,6 @@ class ContainerRollbackFilesystem:
         self.stream_runner = stream_runner
         self.recovery_root = recovery_root
         self.container_id: str | None = None
-        self.states: dict[str, dict[str, Any]] = {}
 
     def _run(self, arguments: Sequence[str], maximum: int = MAX_COMMAND_BYTES) -> bytes:
         return run_checked_command(arguments, runner=self.runner, maximum_bytes=maximum)
@@ -1657,26 +1694,13 @@ class ContainerRollbackFilesystem:
 
     def _observation(self, action: dict[str, Any]) -> dict[str, Any]:
         container_id = self._resolve_container()
-        config = self._read_container(container_id, CONTAINER_CONFIG_PATH)
-        clients = self._read_container(container_id, CONTAINER_CLIENTS_PATH)
-        live = sorted(
-            _public_key_fingerprint(line)
-            for line in _read_utf8_lines(
-                self._run(
-                    [
-                        "/usr/bin/docker",
-                        "exec",
-                        container_id,
-                        "/usr/bin/awg",
-                        "show",
-                        CONTAINER_INTERFACE,
-                        "peers",
-                    ]
-                ),
-                "rollback live peer observation",
-            )
-        )
-        temporary = self._temporary_bytes(container_id, action["temporary_path"])
+        collector_request = dict(action)
+        collector_request["expected_ipv6_policy_sha256"] = action[
+            "baseline_ipv6_policy_sha256"
+        ]
+        snapshot = collect_server_snapshot(collector_request, runner=self.runner)
+        if snapshot["container_identity_sha256"] != _sha(container_id.encode("utf-8")):
+            raise ValueError("rollback container identity changed")
         prepared = self._run(
             [
                 "/usr/bin/docker",
@@ -1687,28 +1711,17 @@ class ContainerRollbackFilesystem:
                 CONTAINER_CONFIG_PATH,
             ]
         )
-        runtime = _sha(
-            [
-                _sha(self._run(["/usr/bin/docker", "inspect", container_id])),
-                _sha(self._run(["/usr/bin/docker", "port", container_id, "38556/udp"])),
-                _sha(self._run(["/usr/bin/ss", "-H", "-lntu"])),
-                normalized_policy_sha256(self._run(["/usr/sbin/iptables-save"])),
-                normalized_policy_sha256(self._run(["/usr/sbin/ip6tables-save"])),
-            ]
-        )
         return {
             "schema": "home-gateway/p3-peer-rollback-observation/v2",
             "candidate_receipt_sha256": action["candidate_receipt_sha256"],
             "candidate_fingerprint_sha256": action["candidate_fingerprint_sha256"],
-            "peer_fingerprint_sha256": live,
-            "peer_set_sha256": _sha(live),
-            "persistent_config_sha256": _sha(config),
-            "live_peer_set_sha256": _sha(live),
-            "metadata_sha256": _sha(clients),
-            "temporary_state_sha256": _sha(
-                b"ABSENT" if temporary is None else temporary
-            ),
-            "runtime_identity_sha256": runtime,
+            "peer_fingerprint_sha256": snapshot["peer_fingerprint_sha256"],
+            "peer_set_sha256": snapshot["live_peer_set_sha256"],
+            "persistent_config_sha256": snapshot["persistent_config_sha256"],
+            "live_peer_set_sha256": snapshot["live_peer_set_sha256"],
+            "metadata_sha256": snapshot["metadata_sha256"],
+            "temporary_state_sha256": snapshot["temporary_state_sha256"],
+            "runtime_identity_sha256": snapshot["runtime_identity_sha256"],
             "prepared_syncconf_sha256": _sha(prepared),
         }
 
@@ -1719,6 +1732,149 @@ class ContainerRollbackFilesystem:
             stream.flush()
             os.fsync(stream.fileno())
 
+    def _recovery_paths(self, token: str) -> dict[str, pathlib.Path]:
+        if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+            raise ValueError("emergency rollback recovery state differs")
+        prefix = self.recovery_root / (".p3-recovery-" + token)
+        return {
+            "config": pathlib.Path(str(prefix) + ".conf"),
+            "clients": pathlib.Path(str(prefix) + ".clients"),
+            "temporary": pathlib.Path(str(prefix) + ".tmp"),
+            "new_config": pathlib.Path(str(prefix) + ".new-conf"),
+            "new_clients": pathlib.Path(str(prefix) + ".new-clients"),
+            "manifest": pathlib.Path(str(prefix) + ".json"),
+        }
+
+    def _action_sha256(self, action: dict[str, Any]) -> str:
+        return _sha({name: action[name] for name in ROLLBACK_PLAN_KEYS})
+
+    def _load_recovery_state(
+        self, action: dict[str, Any], token: str
+    ) -> dict[str, Any]:
+        paths = self._recovery_paths(token)
+        try:
+            manifest = json.loads(
+                _read_atomic_file(paths["manifest"], MAX_COMMAND_BYTES).decode(
+                    "utf-8", errors="strict"
+                )
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("emergency rollback recovery manifest differs") from exc
+        expected_keys = {
+            "schema",
+            "recovery_state",
+            "action_sha256",
+            "container_id",
+            "container_identity_sha256",
+            "config_backup_sha256",
+            "metadata_backup_sha256",
+            "temporary_backup_sha256",
+            "temporary_present",
+            "new_config_sha256",
+            "new_metadata_sha256",
+        }
+        _require_exact_keys(manifest, expected_keys)
+        protected_names = ["manifest", "config", "clients", "new_config", "new_clients"]
+        if bool(manifest.get("temporary_present")):
+            protected_names.append("temporary")
+        for name in protected_names:
+            item = paths[name].lstat()
+            if not stat.S_ISREG(item.st_mode) or stat.S_ISLNK(item.st_mode):
+                raise ValueError("emergency rollback recovery file differs")
+            if os.name != "nt" and (
+                stat.S_IMODE(item.st_mode) != 0o600 or item.st_uid != os.geteuid()
+            ):
+                raise ValueError("emergency rollback recovery file differs")
+        container_id = manifest["container_id"]
+        if (
+            manifest["schema"] != "home-gateway/p3-peer-rollback-recovery/v2"
+            or manifest["recovery_state"] != token
+            or manifest["action_sha256"] != self._action_sha256(action)
+            or not isinstance(container_id, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", container_id) is None
+            or manifest["container_identity_sha256"]
+            != _sha(container_id.encode("utf-8"))
+            or not isinstance(manifest["temporary_present"], bool)
+        ):
+            raise ValueError("emergency rollback recovery manifest differs")
+        for name in (
+            "config_backup_sha256",
+            "metadata_backup_sha256",
+            "temporary_backup_sha256",
+            "new_config_sha256",
+            "new_metadata_sha256",
+        ):
+            if not _is_sha256(manifest[name]):
+                raise ValueError("emergency rollback recovery manifest differs")
+        values = {
+            "config": _read_atomic_file(paths["config"], MAX_COMMAND_BYTES),
+            "clients": _read_atomic_file(paths["clients"], MAX_COMMAND_BYTES),
+            "new_config": _read_atomic_file(paths["new_config"], MAX_COMMAND_BYTES),
+            "new_clients": _read_atomic_file(paths["new_clients"], MAX_COMMAND_BYTES),
+        }
+        if (
+            _sha(values["config"]) != manifest["config_backup_sha256"]
+            or _sha(values["clients"]) != manifest["metadata_backup_sha256"]
+            or _sha(values["new_config"]) != manifest["new_config_sha256"]
+            or _sha(values["new_clients"]) != manifest["new_metadata_sha256"]
+        ):
+            raise ValueError("emergency rollback recovery backup differs")
+        if manifest["temporary_present"]:
+            values["temporary"] = _read_atomic_file(
+                paths["temporary"], MAX_COMMAND_BYTES
+            )
+            if _sha(values["temporary"]) != manifest["temporary_backup_sha256"]:
+                raise ValueError("emergency rollback recovery backup differs")
+        else:
+            if paths["temporary"].exists() or manifest["temporary_backup_sha256"] != _sha(
+                b"ABSENT"
+            ):
+                raise ValueError("emergency rollback recovery backup differs")
+            values["temporary"] = None
+        return {
+            "paths": paths,
+            "config": values["config"],
+            "clients": values["clients"],
+            "new_config": values["new_config"],
+            "new_clients": values["new_clients"],
+            "temporary": values["temporary"],
+            "container_id": container_id,
+            "temporary_present": manifest["temporary_present"],
+        }
+
+    def _cleanup_container_stages(
+        self, action: dict[str, Any], container_id: str
+    ) -> None:
+        config_stage, clients_stage = container_staging_paths(action["nonce"])
+        temporary_stage = temporary_recovery_staging_path(action["nonce"])
+        self._run(
+            [
+                "/usr/bin/docker",
+                "exec",
+                container_id,
+                "/bin/bash",
+                "-c",
+                'rm -f -- "$1" "$2" "$3"; [ ! -e "$1" ] && [ ! -e "$2" ] && [ ! -e "$3" ]',
+                "p3-stage-cleanup",
+                config_stage,
+                clients_stage,
+                temporary_stage,
+            ]
+        )
+
+    def _discover_recovery_state(self, action: dict[str, Any]) -> str | None:
+        manifests = sorted(self.recovery_root.glob(".p3-recovery-*.json"))
+        if not manifests:
+            return None
+        if len(manifests) != 1:
+            raise RuntimeError("ROLLBACK_UNPROVEN: recovery manifest count differs")
+        match = re.fullmatch(r"\.p3-recovery-([0-9a-f]{64})\.json", manifests[0].name)
+        if match is None:
+            raise RuntimeError("ROLLBACK_UNPROVEN: recovery manifest name differs")
+        token = match.group(1)
+        self._load_recovery_state(action, token)
+        return token
+
     def _write_container(
         self, container_id: str, target: str, stage: str, data: bytes
     ) -> None:
@@ -1728,17 +1884,25 @@ class ContainerRollbackFilesystem:
             runner=self.stream_runner,
         )
 
-    def _write_temporary(self, container_id: str, target: str, data: bytes) -> None:
+    def _write_temporary(
+        self, container_id: str, target: str, stage: str, data: bytes
+    ) -> None:
+        target_match = re.fullmatch(r"/tmp/p3-candidate-([0-9a-f]{32})\.tmp", target)
+        stage_match = re.fullmatch(r"/tmp/\.p3-recover-([0-9a-f]{32})\.tmp", stage)
         if (
-            re.fullmatch(r"/tmp/p3-candidate-[0-9a-f]{32}\.tmp", target) is None
+            target_match is None
+            or stage_match is None
+            or target_match.group(1) != stage_match.group(1)
             or not data
             or len(data) > MAX_COMMAND_BYTES
         ):
             raise ValueError("rollback temporary recovery differs")
         program = (
-            "set -euo pipefail; target=$1; count=$2; umask 077; "
-            'cat >"$target"; [ $(stat -c %s -- "$target") -eq "$count" ]; '
-            'sync -f "$target" 2>/dev/null || sync'
+            "set -euo pipefail; stage=$1; target=$2; count=$3; umask 077; "
+            '[ ! -e "$stage" ]; cat >"$stage"; '
+            '[ $(stat -c %s -- "$stage") -eq "$count" ]; '
+            'sync -f "$stage" 2>/dev/null || sync; mv -T -- "$stage" "$target"; '
+            '[ -f "$target" ] && [ ! -e "$stage" ]'
         )
         run_checked_stream_command(
             [
@@ -1750,6 +1914,7 @@ class ContainerRollbackFilesystem:
                 "-c",
                 program,
                 "p3-temp-recovery",
+                stage,
                 target,
                 str(len(data)),
             ],
@@ -1774,55 +1939,46 @@ class ContainerRollbackFilesystem:
         mode = action["action"]
         if mode in {"inspect", "verify", "verify-recovery"}:
             return self._observation(action)
+        if mode == "resume":
+            token = self._discover_recovery_state(action)
+            return {"recovery_state": token or ""}
         if mode == "cleanup":
-            state = self.states.get(action["recovery_state"])
-            if state is None:
-                raise ValueError("emergency rollback recovery state differs")
+            state = self._load_recovery_state(action, action["recovery_state"])
             container_id = self._resolve_container()
-            stages = container_staging_paths(action["nonce"])
-            self._run(
-                [
-                    "/usr/bin/docker",
-                    "exec",
-                    container_id,
-                    "/bin/bash",
-                    "-c",
-                    'rm -f -- "$1" "$2"; [ ! -e "$1" ] && [ ! -e "$2" ]',
-                    "p3-stage-cleanup",
-                    stages[0],
-                    stages[1],
-                ]
-            )
-            for name in ("config", "clients", "temporary", "manifest"):
-                value = state.get(name)
-                if isinstance(value, pathlib.Path):
-                    value.unlink(missing_ok=True)
-            self.states.pop(action["recovery_state"], None)
+            if state["container_id"] != container_id:
+                raise ValueError("rollback container identity changed")
+            self._cleanup_container_stages(action, container_id)
+            paths = state["paths"]
+            for name in ("config", "clients", "temporary", "new_config", "new_clients"):
+                paths[name].unlink(missing_ok=True)
+            paths["manifest"].unlink()
             return {"cleaned": True}
         if mode == "recover":
-            state = self.states.get(action["recovery_state"])
-            if state is None:
-                raise ValueError("emergency rollback recovery state differs")
+            state = self._load_recovery_state(action, action["recovery_state"])
             container_id = self._resolve_container()
+            if state["container_id"] != container_id:
+                raise ValueError("rollback container identity changed")
             stages = container_staging_paths(action["nonce"])
+            self._cleanup_container_stages(action, container_id)
             self._write_container(
                 container_id,
                 CONTAINER_CONFIG_PATH,
                 stages[0],
-                _read_atomic_file(state["config"], MAX_COMMAND_BYTES),
+                state["config"],
             )
             self._write_container(
                 container_id,
                 CONTAINER_CLIENTS_PATH,
                 stages[1],
-                _read_atomic_file(state["clients"], MAX_COMMAND_BYTES),
+                state["clients"],
             )
             temporary = state["temporary"]
-            if isinstance(temporary, pathlib.Path):
+            if temporary is not None:
                 self._write_temporary(
                     container_id,
                     action["temporary_path"],
-                    _read_atomic_file(temporary, MAX_COMMAND_BYTES),
+                    temporary_recovery_staging_path(action["nonce"]),
+                    temporary,
                 )
             else:
                 self._run(
@@ -1842,9 +1998,7 @@ class ContainerRollbackFilesystem:
                 "recovery_syncconf_path": action["syncconf_path"],
             }
         if mode == "remove":
-            state = self.states.get(action.get("recovery_state"))
-            if state is None:
-                raise ValueError("emergency rollback recovery state differs")
+            state = self._load_recovery_state(action, action["recovery_state"])
             container_id = self._resolve_container()
             if state["container_id"] != container_id:
                 raise ValueError("rollback container identity changed")
@@ -1901,37 +2055,52 @@ class ContainerRollbackFilesystem:
             ]
         ).encode()
         new_clients = _canonical([row for row in rows if row not in matching_rows])
+        self.recovery_root.mkdir(mode=0o700, parents=False, exist_ok=True)
+        root_item = self.recovery_root.lstat()
+        if not stat.S_ISDIR(root_item.st_mode) or stat.S_ISLNK(root_item.st_mode):
+            raise ValueError("emergency rollback recovery root differs")
+        if os.name != "nt" and (
+            stat.S_IMODE(root_item.st_mode) != 0o700 or root_item.st_uid != os.geteuid()
+        ):
+            raise ValueError("emergency rollback recovery root differs")
         token = os.urandom(32).hex()
-        config_backup = self.recovery_root / (".p3-recovery-" + token + ".conf")
-        clients_backup = self.recovery_root / (".p3-recovery-" + token + ".clients")
-        temporary_backup = self.recovery_root / (".p3-recovery-" + token + ".tmp")
-        self._write_backup(config_backup, config)
-        self._write_backup(clients_backup, clients)
-        temporary = self._temporary_bytes(container_id, action["temporary_path"])
-        if temporary is not None:
-            self._write_backup(temporary_backup, temporary)
-        manifest_path = self.recovery_root / (".p3-recovery-" + token + ".json")
-        state: dict[str, Any] = {
-            "config": config_backup,
-            "clients": clients_backup,
-            "temporary": temporary_backup if temporary is not None else False,
-            "manifest": manifest_path,
-            "container_id": container_id,
-            "new_config": new_config,
-            "new_clients": new_clients,
-        }
-        recovery_manifest = {
-            "schema": "home-gateway/p3-peer-rollback-recovery/v1",
-            "container_identity_sha256": _sha(container_id.encode()),
-            "config_backup_sha256": _sha(config),
-            "metadata_backup_sha256": _sha(clients),
-            "temporary_backup_sha256": _sha(
-                b"ABSENT" if temporary is None else temporary
-            ),
-            "temporary_present": temporary is not None,
-        }
-        self._write_backup(manifest_path, _canonical(recovery_manifest))
-        self.states[token] = state
+        paths = self._recovery_paths(token)
+        created: list[pathlib.Path] = []
+        try:
+            self._write_backup(paths["config"], config)
+            created.append(paths["config"])
+            self._write_backup(paths["clients"], clients)
+            created.append(paths["clients"])
+            temporary = self._temporary_bytes(container_id, action["temporary_path"])
+            if temporary is not None:
+                self._write_backup(paths["temporary"], temporary)
+                created.append(paths["temporary"])
+            self._write_backup(paths["new_config"], new_config)
+            created.append(paths["new_config"])
+            self._write_backup(paths["new_clients"], new_clients)
+            created.append(paths["new_clients"])
+            recovery_manifest = {
+                "schema": "home-gateway/p3-peer-rollback-recovery/v2",
+                "recovery_state": token,
+                "action_sha256": self._action_sha256(action),
+                "container_id": container_id,
+                "container_identity_sha256": _sha(container_id.encode()),
+                "config_backup_sha256": _sha(config),
+                "metadata_backup_sha256": _sha(clients),
+                "temporary_backup_sha256": _sha(
+                    b"ABSENT" if temporary is None else temporary
+                ),
+                "temporary_present": temporary is not None,
+                "new_config_sha256": _sha(new_config),
+                "new_metadata_sha256": _sha(new_clients),
+            }
+            self._write_backup(paths["manifest"], _canonical(recovery_manifest))
+            created.append(paths["manifest"])
+            self._load_recovery_state(action, token)
+        except Exception:
+            for path in reversed(created):
+                path.unlink(missing_ok=True)
+            raise
         return {"recovery_state": token}
 
 

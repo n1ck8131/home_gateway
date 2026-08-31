@@ -66,8 +66,8 @@ Describe 'P3 protected pre-live runtime' {
                 rollback_paths = [ordered]@{
                     persistent_config_path = '/opt/amnezia/awg/awg0.conf'
                     metadata_path = '/opt/amnezia/awg/clientsTable'
-                    temporary_path = '/run/home-gateway-p3-peer-guard/candidate.tmp'
-                    syncconf_path = '/run/home-gateway-p3-peer-guard/awg.conf'
+                    temporary_path = '/tmp/p3-candidate-{nonce32}.tmp'
+                    syncconf_path = '/opt/amnezia/awg/awg0.conf'
                 }
                 egress_authority_sha256 = $authorityHashes
             }
@@ -288,6 +288,13 @@ Describe 'P3 protected pre-live runtime' {
         { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
                 -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } |
             Should -Throw '*already consumed*'
+        Test-Path -LiteralPath $script:Root | Should -BeFalse
+    }
+
+    It 'accepts only the canonical container rollback path contract' {
+        $script:Trust.rollback_paths.temporary_path = '/run/home-gateway-p3-peer-guard/candidate.tmp'
+        { New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root } |
+            Should -Throw '*rollback paths differ*'
         Test-Path -LiteralPath $script:Root | Should -BeFalse
     }
 

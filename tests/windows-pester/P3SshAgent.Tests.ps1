@@ -90,6 +90,22 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $receipt.expected_key_match | Should -BeTrue
     }
 
+    It 'keeps persisted UTC receipt identity exact across the PS7 JSON timestamp type' {
+        $receipt = [pscustomobject]@{
+            schema = 'home-gateway/p3-ssh-agent-combined-receipt/v2'; manifest_sha256 = ('a' * 64)
+            agent_pid = 4242; socket = '/tmp/ssh-synthetic/agent.4242'
+            agent_executable_path = $script:Paths.'ssh-agent.exe'; agent_executable_sha256 = $script:Manifest.git_ssh_agent_sha256
+            expected_fingerprint_sha256 = $script:Manifest.public_key_fingerprint_sha256
+            started_at_utc = '2026-08-31T12:34:56.1234500Z'
+            loaded_key_count = 1; expected_key_match = $true; agent_pid_match = $true; toolchain_match = $true
+        }
+        $persisted = $receipt | ConvertTo-Json -Depth 16 -Compress | ConvertFrom-Json
+
+        (Get-P3AgentCanonicalSHA256 $persisted) | Should -BeExactly (Get-P3AgentCanonicalSHA256 $receipt)
+        $persisted.socket = '/tmp/ssh-synthetic/agent.changed'
+        (Get-P3AgentCanonicalSHA256 $persisted) | Should -Not -BeExactly (Get-P3AgentCanonicalSHA256 $receipt)
+    }
+
     It 'rejects zero two or wrong agent keys and PID reuse' {
         { Test-P3AgentState -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt -ListRunner { '' } `
             -ProcessRunner { [pscustomobject]@{ Id = 4242; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow } } } |

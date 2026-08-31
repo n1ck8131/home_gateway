@@ -39,6 +39,12 @@ function Get-P3AgentFileSHA256([string]$Path) {
 
 function ConvertTo-P3AgentCanonicalValue([object]$Value) {
     if ($null -eq $Value) { return $null }
+    if ($Value -is [DateTime]) {
+        $utc = if ($Value.Kind -eq [DateTimeKind]::Unspecified) {
+            [DateTime]::SpecifyKind($Value, [DateTimeKind]::Utc)
+        } else { $Value.ToUniversalTime() }
+        return $utc.ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+    }
     if ($Value -is [Collections.IDictionary]) {
         $ordered = [ordered]@{}
         foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object -CaseSensitive)) {

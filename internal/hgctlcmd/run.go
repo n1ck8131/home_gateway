@@ -57,7 +57,7 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	if command, ok := parseCanaryPlanCommand(args); ok {
 		return runCanaryPlan(command, stdout, stderr, dependencies)
 	}
-	configPath, command, ok := parseReadOnlyCommand(args)
+	configPath, configSHA256, command, ok := parseReadOnlyCommand(args)
 	if !ok {
 		writeUsage(program, stderr)
 		return 2
@@ -68,7 +68,7 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	if command == "redshield-inspect" {
 		backend = redshield.Backend{}
 	}
-	inspection, err := backend.Inspect(ctx, tunnel.ConfigSource{Path: configPath})
+	inspection, err := backend.Inspect(ctx, tunnel.ConfigSource{Path: configPath, SHA256: configSHA256})
 	if err != nil {
 		fmt.Fprintln(stderr, "Tunnel config inspection failed:", err)
 		return 1
@@ -104,19 +104,21 @@ func runWithDependencies(program string, args []string, stdout, stderr io.Writer
 	return 0
 }
 
-func parseReadOnlyCommand(args []string) (string, string, bool) {
+func parseReadOnlyCommand(args []string) (string, string, string, bool) {
+	if len(args) == 7 && args[0] == "tunnel" && args[1] == "inspect" && args[2] == "--config" && args[3] != "" &&
+		args[4] == "--config-sha256" && lowercaseSHA256Pattern.MatchString(args[5]) && args[6] == "--json" {
+		return args[3], args[5], "tunnel-inspect", true
+	}
 	if len(args) != 5 || args[2] != "--config" || args[3] == "" || args[4] != "--json" {
-		return "", "", false
+		return "", "", "", false
 	}
 	switch {
 	case args[0] == "redshield" && args[1] == "inspect":
-		return args[3], "redshield-inspect", true
-	case args[0] == "tunnel" && args[1] == "inspect":
-		return args[3], "tunnel-inspect", true
+		return args[3], "", "redshield-inspect", true
 	case args[0] == "windows" && args[1] == "preflight":
-		return args[3], "windows-preflight", true
+		return args[3], "", "windows-preflight", true
 	default:
-		return "", "", false
+		return "", "", "", false
 	}
 }
 
@@ -133,7 +135,7 @@ func encodeJSON(stdout, stderr io.Writer, value any) int {
 func writeUsage(program string, writer io.Writer) {
 	fmt.Fprintf(writer, "usage: %s version --json\n", program)
 	fmt.Fprintf(writer, "       %s redshield inspect --config <path> --json\n", program)
-	fmt.Fprintf(writer, "       %s tunnel inspect --config <path> --json\n", program)
+	fmt.Fprintf(writer, "       %s tunnel inspect --config <path> --config-sha256 <lowercase-sha256> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows preflight --config <path> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary plan --config <path> --config-sha256 <lowercase-sha256> --state-root <absolute-path> --revision <id> --target <ip> [--target <ip>] --dns-namespace <suffix> --json\n", program)
 	fmt.Fprintf(writer, "       %s windows canary <apply|confirm> <plan-options> --candidate-sha256 <lowercase-sha256> --confirm-live <challenge> --json\n", program)

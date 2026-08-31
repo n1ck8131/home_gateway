@@ -223,6 +223,11 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $receipt=Invoke-P3ProtectedEvidenceAction -SelectedAction ManagementReceiptRecord -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
             -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner={[DateTime]::UtcNow}})
         $receipt.owner_observed|Should -BeTrue;$receipt.server_role_confirmed|Should -BeFalse
+        [IO.File]::WriteAllText($client,'changed-client')
+        {Invoke-P3ProtectedEvidenceAction -SelectedAction ManagementReceiptConsume -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+                -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner={[DateTime]::UtcNow}})}|Should -Throw '*client binary*'
+        (Test-Path (Join-Path $root 'consumed.json'))|Should -BeFalse
+        [IO.File]::WriteAllText($client,'synthetic-client')
         $consumed=Invoke-P3ProtectedEvidenceAction -SelectedAction ManagementReceiptConsume -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
             -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner={[DateTime]::UtcNow}})
         $consumed.receipt_sha256|Should -Match '^[0-9a-f]{64}$'
@@ -243,9 +248,10 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
             runtime_identity_sha256=('c'*64);subject=[pscustomobject]@{hgctl_path=$hgctl;profile_path=$profile}}
         $root=Join-Path $TestDrive 'guest-evidence';$plan=Invoke-P3ProtectedEvidenceAction GuestProfilePlan $root $input '' '' $null
         $inspectorCalls=[Collections.Generic.List[string]]::new()
-        $boundaries=[pscustomobject]@{ClockRunner={[DateTime]::UtcNow};ProfileInspectorRunner={
+        $fixedNow=[DateTime]::Parse('2026-08-31T12:34:56.1234000Z',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind)
+        $boundaries=[pscustomobject]@{ClockRunner={$fixedNow};ProfileInspectorRunner={
             param($exe,$arguments,$timeout,$maximum)$inspectorCalls.Add('inspect');$exe|Should -BeExactly $hgctl
-            $arguments|Should -Be @('tunnel','inspect','--config',$profile,'--json')
+            $arguments|Should -Be @('tunnel','inspect','--config',$profile,'--config-sha256',$plan.profile_sha256,'--json')
             [pscustomobject]@{ExitCode=0;TimedOut=$false;Oversized=$false;StdErr='';StdOut=([ordered]@{
                 metadata=@{};status=@{};capabilities=@{};interface_public_fingerprint_sha256=('b'*64)}|ConvertTo-Json -Compress)}
         }.GetNewClosure()}
@@ -254,6 +260,15 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $inspectorCalls.Count|Should -Be 1;$receipt.derived_public_fingerprint_sha256|Should -BeExactly ('b'*64)
         $receipt.raw_key_exposed|Should -BeFalse
         (Get-Content (Join-Path $root 'receipt.json') -Raw)|Should -Not -Match 'synthetic-private-profile'
+        $consumeClock={$fixedNow}.GetNewClosure()
+        [IO.File]::WriteAllText($hgctl,'changed-hgctl')
+        {Invoke-P3ProtectedEvidenceAction -SelectedAction GuestProfileConsume -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+                -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner=$consumeClock})}|Should -Throw '*inspection input*'
+        (Test-Path (Join-Path $root 'consumed.json'))|Should -BeFalse
+        [IO.File]::WriteAllText($hgctl,'synthetic-hgctl');[IO.File]::WriteAllText($profile,'changed-private-profile')
+        {Invoke-P3ProtectedEvidenceAction -SelectedAction GuestProfileConsume -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) `
+                -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries ([pscustomobject]@{ClockRunner=$consumeClock})}|Should -Throw '*inspection input*'
+        (Test-Path (Join-Path $root 'consumed.json'))|Should -BeFalse
     }
 
     It 'rejects protected evidence approval or Guest fingerprint mismatch without a durable receipt' {
@@ -270,6 +285,47 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
         $script:InspectorCalls|Should -Be 0;Test-Path $root|Should -BeFalse
         {Invoke-P3ProtectedEvidenceAction -SelectedAction GuestProfileInspect -Root $root -InputObject ([pscustomobject]@{plan=$plan;candidate_receipt=$candidate}) -ExpectedPlanSHA256 $plan.plan_sha256 -Confirmation $plan.confirmation_challenge -Boundaries $boundaries}|Should -Throw '*fingerprint*'
         Test-Path $root|Should -BeFalse
+    }
+
+    It 'rejects fabricated or wrong-class local guard receipts before root creation' {
+        $hgctl=Join-Path $TestDrive 'candidate-hgctl.exe';$profile=Join-Path $TestDrive 'candidate-guest.conf'
+        [IO.File]::WriteAllText($hgctl,'synthetic-hgctl');[IO.File]::WriteAllText($profile,'synthetic-profile')
+        $candidate=[pscustomobject][ordered]@{schema='home-gateway/p3-local-guard-receipt/v2';operation='guest';ready_emitted=$true;candidate_received=$true
+            candidate_fingerprint_sha256=('b'*64);pre_peer_set_sha256=('9'*64);post_peer_set_sha256=('a'*64);nonce_sha256=('8'*64);live_mutation_performed=$false}
+        $planInput=[pscustomobject]@{manifest_sha256=('1'*64);candidate_receipt=$candidate;candidate_nonce_sha256=('8'*64);pre_peer_set_sha256=('9'*64)
+            post_peer_set_sha256=('a'*64);candidate_fingerprint_sha256=('b'*64);runtime_identity_sha256=('c'*64);subject=[pscustomobject]@{hgctl_path=$hgctl;profile_path=$profile}}
+        foreach($mutation in @(
+            @{name='schema';value='foreign'},@{name='operation';value='admin'},@{name='ready_emitted';value=$false},
+            @{name='candidate_received';value=$false},@{name='live_mutation_performed';value=$true}
+        )){
+            $copy=$candidate|ConvertTo-Json -Compress|ConvertFrom-Json;$copy.($mutation.name)=$mutation.value;$planInput.candidate_receipt=$copy
+            $root=Join-Path $TestDrive ('candidate-' + $mutation.name)
+            {Invoke-P3ProtectedEvidenceAction GuestProfilePlan $root $planInput '' '' $null}|Should -Throw '*candidate*'
+            Test-Path $root|Should -BeFalse
+        }
+    }
+
+    It 'caps fast Guest child output without temp files and bounds CLI stdin before root creation' {
+        $powershell="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $savedTemp=$env:TEMP;$savedTmp=$env:TMP;$missing=Join-Path $TestDrive 'missing-guest-temp'
+        try {
+            $env:TEMP=$missing;$env:TMP=$missing
+            $result=Invoke-P3NativeJsonProcess $powershell @('-NoLogo','-NoProfile','-NonInteractive','-Command',"[Console]::Out.Write('x' * 131072)") '{}' 10 1024
+        } finally {$env:TEMP=$savedTemp;$env:TMP=$savedTmp}
+        $result.Oversized|Should -BeTrue;$result.TimedOut|Should -BeFalse;$result.StdOut|Should -BeExactly ''
+
+        $root=Join-Path $TestDrive 'oversized-guest-root';$pwsh=(Get-Process -Id $PID).Path
+        $oversized='{"padding":"' + ('x'*140000) + '"}'
+        $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$pwsh;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+        $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        $start.Arguments='-NoLogo -NoProfile -NonInteractive -File "'+$script:Launcher+'" -Action GuestProfilePlan -EvidenceRoot "'+$root+'"'
+        $child=[Diagnostics.Process]::new();$child.StartInfo=$start;$null=$child.Start()
+        $child.StandardInput.Write($oversized);$child.StandardInput.Close()
+        $output=$child.StandardOutput.ReadToEnd()+$child.StandardError.ReadToEnd();$child.WaitForExit()
+        $child.ExitCode|Should -Not -Be 0
+        ($output|Out-String)|Should -Match 'stdin exceeds'
+        Test-Path $root|Should -BeFalse
+        $child.Dispose()
     }
 
     It 'builds only fixed strict protocol v2 requests' {

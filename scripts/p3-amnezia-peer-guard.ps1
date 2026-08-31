@@ -253,6 +253,11 @@ function New-P3ProtectedEvidencePlan([string]$Kind, [string]$Root, [object]$Inpu
         'post_peer_set_sha256','pre_peer_set_sha256','runtime_identity_sha256','subject'
     ) 'protected evidence plan input'
     Assert-P3GuardExactProperties $InputObject.candidate_receipt $script:P3LocalGuardProperties 'candidate receipt'
+    $expectedOperation = if($Kind -ceq 'management'){'admin'}else{'guest'}
+    if([string]$InputObject.candidate_receipt.schema -cne 'home-gateway/p3-local-guard-receipt/v2' -or
+        [string]$InputObject.candidate_receipt.operation -cne $expectedOperation -or
+        -not [bool]$InputObject.candidate_receipt.ready_emitted -or -not [bool]$InputObject.candidate_receipt.candidate_received -or
+        [bool]$InputObject.candidate_receipt.live_mutation_performed){throw 'protected evidence candidate differs'}
     $candidateReceiptSHA256 = Get-P3GuardCanonicalSHA256 $InputObject.candidate_receipt
     foreach ($name in @('candidate_fingerprint_sha256','candidate_nonce_sha256','manifest_sha256','post_peer_set_sha256',
             'pre_peer_set_sha256','runtime_identity_sha256')) { Assert-P3GuardSHA256 ([string]$InputObject.$name) $name }
@@ -287,6 +292,7 @@ function New-P3ProtectedEvidencePlan([string]$Kind, [string]$Root, [object]$Inpu
         $hgctl = Get-P3EvidenceFileFacts ([string]$InputObject.subject.hgctl_path) 67108864 'pinned hgctl'
         $profile = Get-P3EvidenceFileFacts ([string]$InputObject.subject.profile_path) 1048576 'protected Guest profile'
         $identity.hgctl_path=$hgctl.path;$identity.hgctl_sha256=$hgctl.content_sha256
+        $identity.hgctl_file_identity_sha256=$hgctl.file_identity_sha256;$identity.hgctl_acl_identity_sha256=$hgctl.acl_identity_sha256
         $identity.profile_path=$profile.path;$identity.profile_sha256=$profile.content_sha256
         $identity.profile_file_identity_sha256=$profile.file_identity_sha256;$identity.profile_acl_identity_sha256=$profile.acl_identity_sha256
     }
@@ -364,8 +370,15 @@ function Invoke-P3ProtectedEvidenceAction(
         $storedReceipt=Open-P3BoundedStableJson $receiptPath 65536 $receiptProperties
         $now=([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
         if($kind -ceq 'management'){
+            $current=Get-P3EvidenceFileFacts ([string]$plan.client_binary_path) 67108864 'management client binary'
+            if($current.content_sha256 -cne [string]$plan.client_binary_sha256 -or $current.file_identity_sha256 -cne [string]$plan.client_binary_file_identity_sha256 -or
+                $current.acl_identity_sha256 -cne [string]$plan.client_binary_acl_identity_sha256){throw 'management client binary differs'}
             $null=Test-P3ManagementOperationContextReceipt $storedReceipt $plan.manifest_sha256 $plan.candidate_receipt_sha256 $plan.ui_action_class_sha256 $now
         }else{
+            $profile=Get-P3EvidenceFileFacts ([string]$plan.profile_path) 1048576 'protected Guest profile';$hgctl=Get-P3EvidenceFileFacts ([string]$plan.hgctl_path) 67108864 'pinned hgctl'
+            if($profile.content_sha256 -cne [string]$plan.profile_sha256 -or $profile.file_identity_sha256 -cne [string]$plan.profile_file_identity_sha256 -or
+                $profile.acl_identity_sha256 -cne [string]$plan.profile_acl_identity_sha256 -or $hgctl.content_sha256 -cne [string]$plan.hgctl_sha256 -or
+                $hgctl.file_identity_sha256 -cne [string]$plan.hgctl_file_identity_sha256 -or $hgctl.acl_identity_sha256 -cne [string]$plan.hgctl_acl_identity_sha256){throw 'Guest inspection input differs'}
             $null=Test-P3GuestProfileIdentityReceipt $storedReceipt $plan.manifest_sha256 $plan.candidate_receipt_sha256 $plan.candidate_fingerprint_sha256 $plan.profile_acl_identity_sha256 $now
         }
         $marker=[pscustomobject][ordered]@{receipt_sha256=$receiptSHA256;schema='home-gateway/p3-protected-evidence-consumption/v1'}
@@ -386,8 +399,10 @@ function Invoke-P3ProtectedEvidenceAction(
                 -RuntimeIdentitySHA256 $plan.runtime_identity_sha256 -NowUtc $now
         }else{
             $profile=Get-P3EvidenceFileFacts ([string]$plan.profile_path) 1048576 'protected Guest profile';$hgctl=Get-P3EvidenceFileFacts ([string]$plan.hgctl_path) 67108864 'pinned hgctl'
-            if($profile.content_sha256 -cne [string]$plan.profile_sha256 -or $profile.file_identity_sha256 -cne [string]$plan.profile_file_identity_sha256 -or $profile.acl_identity_sha256 -cne [string]$plan.profile_acl_identity_sha256 -or $hgctl.content_sha256 -cne [string]$plan.hgctl_sha256){throw 'Guest inspection input differs'}
-            $result=& $Boundaries.ProfileInspectorRunner $plan.hgctl_path @('tunnel','inspect','--config',$plan.profile_path,'--json') 30 65536
+            if($profile.content_sha256 -cne [string]$plan.profile_sha256 -or $profile.file_identity_sha256 -cne [string]$plan.profile_file_identity_sha256 -or $profile.acl_identity_sha256 -cne [string]$plan.profile_acl_identity_sha256 -or
+                $hgctl.content_sha256 -cne [string]$plan.hgctl_sha256 -or $hgctl.file_identity_sha256 -cne [string]$plan.hgctl_file_identity_sha256 -or
+                $hgctl.acl_identity_sha256 -cne [string]$plan.hgctl_acl_identity_sha256){throw 'Guest inspection input differs'}
+            $result=& $Boundaries.ProfileInspectorRunner $plan.hgctl_path @('tunnel','inspect','--config',$plan.profile_path,'--config-sha256',$plan.profile_sha256,'--json') 30 65536
             $null=Test-P3ProcessResult $result 65536 'Guest profile inspector'
             $profileAfter=Get-P3EvidenceFileFacts ([string]$plan.profile_path) 1048576 'protected Guest profile';$hgctlAfter=Get-P3EvidenceFileFacts ([string]$plan.hgctl_path) 67108864 'pinned hgctl'
             if($profileAfter.content_sha256 -cne $profile.content_sha256 -or $profileAfter.file_identity_sha256 -cne $profile.file_identity_sha256 -or
@@ -405,6 +420,7 @@ function Invoke-P3ProtectedEvidenceAction(
         }
         $bytes=ConvertTo-P3CanonicalJson $receipt;$hash=Get-P3SHA256Bytes $bytes;$null=Install-P3ExactRuntimeFile $bytes (Join-Path $resolved 'receipt.json') $hash
         $reopened=Open-P3BoundedStableJson (Join-Path $resolved 'receipt.json') 65536 @($receipt.PSObject.Properties.Name)
+        if($reopened.observed_at_utc -is [DateTime]){$reopened.observed_at_utc=([DateTime]$reopened.observed_at_utc).ToUniversalTime().ToString('o')}
         if((Get-P3GuardCanonicalSHA256 $reopened) -cne (Get-P3GuardCanonicalSHA256 $receipt)){throw 'protected evidence receipt differs'}
         $null=Assert-P3ProtectedEvidenceRoot $Root $plan @('.home-gateway-p3-evidence-owner.v1','plan.json','candidate-receipt.json','receipt.json')
         return $reopened
@@ -803,24 +819,61 @@ function Invoke-P3OwnedAgentLifecycle([scriptblock]$StartRunner, [scriptblock]$B
     }
 }
 
+function ConvertTo-P3GuardNativeArgument([string]$Value) {
+    if($null -eq $Value){$Value=''}
+    if($Value.Length -gt 0 -and $Value -notmatch '[\s"]'){return $Value}
+    $builder=[Text.StringBuilder]::new();$null=$builder.Append('"');$slashes=0
+    foreach($character in $Value.ToCharArray()){
+        if($character -eq '\'){$slashes++;continue}
+        if($character -eq '"'){$null=$builder.Append(('\'*(($slashes*2)+1)));$null=$builder.Append('"');$slashes=0;continue}
+        if($slashes -gt 0){$null=$builder.Append(('\'*$slashes));$slashes=0};$null=$builder.Append($character)
+    }
+    if($slashes -gt 0){$null=$builder.Append(('\'*($slashes*2)))};$null=$builder.Append('"');return $builder.ToString()
+}
+
+function Read-P3GuardBoundedUtf8Stdin([int]$MaximumBytes=131072){
+    $stream=[Console]::OpenStandardInput();$memory=[IO.MemoryStream]::new();$buffer=[byte[]]::new(4096)
+    try{
+        while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0){if($memory.Length+$read -gt $MaximumBytes){throw 'guard stdin exceeds bound'};$memory.Write($buffer,0,$read)}
+        if($memory.Length -lt 2){throw 'guard stdin differs'}
+        try{return [Text.UTF8Encoding]::new($false,$true).GetString($memory.ToArray())}catch{throw 'guard stdin UTF-8 differs'}
+    }finally{$memory.Dispose()}
+}
+
 function Invoke-P3NativeJsonProcess([string]$Executable, [string[]]$Arguments, [string]$InputJson, [int]$TimeoutSeconds, [int]$MaximumBytes) {
-    $inputPath = [IO.Path]::GetTempFileName(); $outputPath = [IO.Path]::GetTempFileName(); $errorPath = [IO.Path]::GetTempFileName()
+    $inputBytes=[Text.UTF8Encoding]::new($false).GetBytes($InputJson)
+    if($inputBytes.Length -lt 2 -or $inputBytes.Length -gt 131072 -or $TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 60 -or $MaximumBytes -lt 1024 -or $MaximumBytes -gt 65536){throw 'guard child boundary differs'}
+    $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$Executable;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $quotedArguments=@($Arguments|ForEach-Object{ConvertTo-P3GuardNativeArgument ([string]$_)})
+    $start.Arguments=$quotedArguments -join ' '
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$start;$stdout=[IO.MemoryStream]::new();$stderr=[IO.MemoryStream]::new()
+    $watch=[Diagnostics.Stopwatch]::StartNew();$timedOut=$false;$oversized=$false;$writeClosed=$false
     try {
-        [IO.File]::WriteAllText($inputPath, $InputJson, [Text.UTF8Encoding]::new($false))
-        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden -RedirectStandardInput $inputPath -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -PassThru
-        $watch = [Diagnostics.Stopwatch]::StartNew(); $timedOut = $false; $oversized = $false
-        while (-not $process.HasExited) {
-            if (([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length -gt $MaximumBytes) { $oversized = $true; $process.Kill(); break }
-            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) { $timedOut = $true; $process.Kill(); break }
-            Start-Sleep -Milliseconds 50; $process.Refresh()
+        if(-not $process.Start()){throw 'guard child start differs'}
+        $writeTask=$process.StandardInput.BaseStream.WriteAsync($inputBytes,0,$inputBytes.Length)
+        $outBuffer=[byte[]]::new(4096);$errBuffer=[byte[]]::new(4096);$outTask=$process.StandardOutput.BaseStream.ReadAsync($outBuffer,0,$outBuffer.Length);$errTask=$process.StandardError.BaseStream.ReadAsync($errBuffer,0,$errBuffer.Length)
+        $outDone=$false;$errDone=$false
+        while(-not $outDone -or -not $errDone -or -not $process.HasExited){
+            if(-not $writeClosed -and $writeTask.IsCompleted){try{$null=$writeTask.GetAwaiter().GetResult()}catch{};$process.StandardInput.Close();$writeClosed=$true}
+            foreach($channel in @('out','err')){
+                $task=if($channel -ceq 'out'){$outTask}else{$errTask}
+                if($null -ne $task -and $task.IsCompleted){
+                    $count=$task.GetAwaiter().GetResult();$target=if($channel -ceq 'out'){$stdout}else{$stderr};$source=if($channel -ceq 'out'){$outBuffer}else{$errBuffer}
+                    if($count -eq 0){if($channel -ceq 'out'){$outDone=$true;$outTask=$null}else{$errDone=$true;$errTask=$null}}
+                    else{$remaining=$MaximumBytes-[int]($stdout.Length+$stderr.Length);if($count -gt $remaining){$oversized=$true;if($remaining -gt 0){$target.Write($source,0,$remaining)}}else{$target.Write($source,0,$count)}
+                        if(-not $oversized){if($channel -ceq 'out'){$outTask=$process.StandardOutput.BaseStream.ReadAsync($outBuffer,0,$outBuffer.Length)}else{$errTask=$process.StandardError.BaseStream.ReadAsync($errBuffer,0,$errBuffer.Length)}}}
+                }
+            }
+            if(($oversized -or $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) -and -not $process.HasExited){if(-not $oversized){$timedOut=$true};$process.Kill()}
+            if($oversized -and $process.HasExited){$outDone=$true;$errDone=$true}
+            if(-not $outDone -or -not $errDone -or -not $process.HasExited){Start-Sleep -Milliseconds 5;$process.Refresh()}
         }
-        $process.WaitForExit()
-        return [pscustomobject]@{
-            ExitCode = $process.ExitCode; TimedOut = $timedOut; Oversized = $oversized
-            StdOut = if ($oversized) { '' } else { [IO.File]::ReadAllText($outputPath, [Text.UTF8Encoding]::new($false, $true)) }
-            StdErr = if ($oversized) { '' } else { [IO.File]::ReadAllText($errorPath, [Text.UTF8Encoding]::new($false, $true)) }
-        }
-    } finally { foreach ($path in @($inputPath, $outputPath, $errorPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } } }
+        if(-not $writeClosed){try{$null=$writeTask.GetAwaiter().GetResult()}catch{};$process.StandardInput.Close();$writeClosed=$true};$process.WaitForExit();$encoding=[Text.UTF8Encoding]::new($false,$true)
+        return [pscustomobject]@{ExitCode=$process.ExitCode;TimedOut=$timedOut;Oversized=$oversized;StdOut=$(if($oversized){''}else{$encoding.GetString($stdout.ToArray())});StdErr=$(if($oversized){''}else{$encoding.GetString($stderr.ToArray())})}
+    }finally{
+        if(-not $writeClosed){try{$process.StandardInput.Close()}catch{}};if(-not $process.HasExited){$process.Kill();$process.WaitForExit()};$stdout.Dispose();$stderr.Dispose();$process.Dispose()
+    }
 }
 
 function Invoke-P3NativeGuardStreamProcess(
@@ -1032,8 +1085,8 @@ function Invoke-P3OwnedGuardAction(
 if (-not [string]::IsNullOrEmpty($Action)) {
     $selectedAction = $Action
     $evidenceActions=@('ManagementReceiptPlan','ManagementReceiptRecord','ManagementReceiptConsume','GuestProfilePlan','GuestProfileInspect','GuestProfileConsume')
-    $input = if ($selectedAction -in (@('ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback') + $evidenceActions)) {
-        ConvertFrom-Json ([Console]::In.ReadToEnd()) -ErrorAction Stop
+    $inputObject = if ($selectedAction -in (@('ClientObserve', 'EmergencyRollbackPlan', 'EmergencyRollback') + $evidenceActions)) {
+        ConvertFrom-Json (Read-P3GuardBoundedUtf8Stdin 131072) -ErrorAction Stop
     } else { $null }
     $boundaries = [pscustomobject]@{
         AgentRunner = { param($Executable) & $Executable -s }
@@ -1061,11 +1114,11 @@ if (-not [string]::IsNullOrEmpty($Action)) {
             param($Executable,$Arguments,$TimeoutSeconds,$MaximumBytes)
             & $script:P3NativeJsonRunner $Executable $Arguments '{}' $TimeoutSeconds $MaximumBytes
         }
-        $result=Invoke-P3ProtectedEvidenceAction -SelectedAction $selectedAction -Root $EvidenceRoot -InputObject $input `
+        $result=Invoke-P3ProtectedEvidenceAction -SelectedAction $selectedAction -Root $EvidenceRoot -InputObject $inputObject `
             -ExpectedPlanSHA256 $ExpectedPlanSHA256 -Confirmation $Confirmation -Boundaries $boundaries
     }else{
         $result = Invoke-P3OwnedGuardAction -SelectedAction $selectedAction -RuntimeRoot $RuntimeRoot `
-            -ExpectedManifestSHA256 $ExpectedManifestSHA256 -InputObject $input -ExpectedBodyPlanSHA256 $ExpectedPlanSHA256 `
+            -ExpectedManifestSHA256 $ExpectedManifestSHA256 -InputObject $inputObject -ExpectedBodyPlanSHA256 $ExpectedPlanSHA256 `
             -BodyConfirmation $Confirmation -Boundaries $boundaries
     }
     if ($selectedAction -ceq 'Reconcile') { [Console]::Out.WriteLine('PRELIVE_READY=YES') }

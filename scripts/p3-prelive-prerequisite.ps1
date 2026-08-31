@@ -267,8 +267,12 @@ function Test-P3PrerequisiteSshTrust([object]$Trust, [object]$Manifest) {
         'command_timeout_seconds','maximum_output_bytes','no_write_scope'
     )
     Assert-P3ExactProperties $Trust $properties 'prerequisite SSH trust'
+    $sshHostAddress = $null
+    $sshHostIsExactIpv4 = [Net.IPAddress]::TryParse([string]$Trust.ssh_host,[ref]$sshHostAddress) -and
+        $sshHostAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork -and
+        $sshHostAddress.ToString() -ceq [string]$Trust.ssh_host
     if ([string]$Trust.schema -cne 'home-gateway/p3-prelive-prerequisite-ssh-trust/v1' -or
-        [string]$Trust.ssh_user -cne 'homegateway' -or [string]::IsNullOrWhiteSpace([string]$Trust.ssh_host) -or
+        [string]$Trust.ssh_user -cne 'homegateway' -or -not $sshHostIsExactIpv4 -or
         -not [bool]$Trust.no_write_scope -or
         -not (Test-P3ExactJsonInteger $Trust.connect_timeout_seconds) -or [int]$Trust.connect_timeout_seconds -ne 10 -or
         -not (Test-P3ExactJsonInteger $Trust.command_timeout_seconds) -or [int]$Trust.command_timeout_seconds -ne 30 -or
@@ -307,6 +311,30 @@ function Test-P3PrerequisiteSshTrust([object]$Trust, [object]$Manifest) {
         throw 'prerequisite SSH trust canonical identity differs'
     }
     return $Trust
+}
+
+function Assert-P3PrerequisiteKnownHostPin([object]$Trust) {
+    Import-P3PrerequisiteRuntime
+    $bytes = Read-P3BoundedStableBytes ([string]$Trust.known_hosts_path) 8192 'known-hosts'
+    try { $text = [Text.UTF8Encoding]::new($false,$true).GetString($bytes) }
+    catch { throw 'prerequisite known-hosts pin differs' }
+    $match = [regex]::Match($text,'\A(?<host>[0-9]{1,3}(?:\.[0-9]{1,3}){3}) ssh-ed25519 (?<key>[A-Za-z0-9+/]+={0,2})(?:\r?\n)?\z')
+    if (-not $match.Success -or $match.Groups['host'].Value -cne [string]$Trust.ssh_host) {
+        throw 'prerequisite known-hosts pin differs'
+    }
+    try { $blob = [Convert]::FromBase64String($match.Groups['key'].Value) }
+    catch { throw 'prerequisite known-hosts pin differs' }
+    if ($blob.Length -ne 51 -or $blob[0] -ne 0 -or $blob[1] -ne 0 -or $blob[2] -ne 0 -or $blob[3] -ne 11 -or
+        [Text.Encoding]::ASCII.GetString($blob,4,11) -cne 'ssh-ed25519' -or
+        $blob[15] -ne 0 -or $blob[16] -ne 0 -or $blob[17] -ne 0 -or $blob[18] -ne 32) {
+        throw 'prerequisite known-hosts pin differs'
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $fingerprint = 'SHA256:' + [Convert]::ToBase64String($sha.ComputeHash($blob)).TrimEnd('=') }
+    finally { $sha.Dispose() }
+    if ((Get-P3SHA256Text $fingerprint) -cne [string]$Trust.host_key_fingerprint_sha256) {
+        throw 'prerequisite known-hosts pin differs'
+    }
 }
 
 function New-P3PrerequisitePlan([object]$Manifest, [string]$Nonce) {
@@ -402,6 +430,7 @@ sys.stdout.write(json.dumps(receipt,sort_keys=True,separators=(',',':')))
     $loaderEncoded = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($loader))
     $remoteCommand = 'sudo -n /usr/bin/python3 -c "import base64;exec(base64.b64decode(''' + $loaderEncoded + '''))"'
     $arguments = @(
+        '-F','NUL','-o','GlobalKnownHostsFile=NUL',
         '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o',("IdentityAgent=" + [string]$AgentReceipt.ssh_auth_sock),
         '-o',("UserKnownHostsFile=" + [string]$Trust.known_hosts_path),'-o','StrictHostKeyChecking=yes',
         '-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-o','ClearAllForwardings=yes',
@@ -462,6 +491,7 @@ function Assert-P3PrerequisiteExternalFiles([object]$Trust) {
             throw 'prerequisite external file identity differs'
         }
     }
+    Assert-P3PrerequisiteKnownHostPin $Trust
 }
 
 function Invoke-P3PrerequisiteSshObservation(
@@ -482,6 +512,7 @@ function Invoke-P3PrerequisiteSshObservation(
         $actual = Get-P3ExactFileSHA256 $path ([string]$pair[2])
         if ($actual -cne $expected) { throw 'prerequisite SSH boundary identity differs' }
     }
+    Assert-P3PrerequisiteKnownHostPin $Trust
     $payload = Read-P3BoundedStableBytes ([string]$Trust.observer_payload_path) 524288 'observer payload'
     $invocation = New-P3PrerequisiteObserverInvocation -Trust ([pscustomobject]@{
         git_ssh_path=[string]$Trust.git_ssh_path;known_hosts_path=[string]$Trust.known_hosts_path
@@ -510,6 +541,33 @@ function Invoke-P3PrerequisiteSshObservation(
     return $receipt
 }
 
+function ConvertTo-P3PrerequisiteNativeArgument([string]$Value) {
+    if ($null -eq $Value) { $Value = '' }
+    if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
+    $builder = [Text.StringBuilder]::new();$null=$builder.Append('"');$slashes=0
+    foreach($character in $Value.ToCharArray()) {
+        if($character -eq '\'){$slashes++;continue}
+        if($character -eq '"'){$null=$builder.Append(('\' * (($slashes*2)+1)));$null=$builder.Append('"');$slashes=0;continue}
+        if($slashes -gt 0){$null=$builder.Append(('\' * $slashes));$slashes=0}
+        $null=$builder.Append($character)
+    }
+    if($slashes -gt 0){$null=$builder.Append(('\' * ($slashes*2)))}
+    $null=$builder.Append('"');return $builder.ToString()
+}
+
+function Read-P3PrerequisiteBoundedUtf8Stdin([int]$MaximumBytes = 131072) {
+    $stream=[Console]::OpenStandardInput();$memory=[IO.MemoryStream]::new();$buffer=[byte[]]::new(4096)
+    try {
+        while(($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0){
+            if($memory.Length + $read -gt $MaximumBytes){throw 'prerequisite stdin exceeds bound'}
+            $memory.Write($buffer,0,$read)
+        }
+        if($memory.Length -lt 2){throw 'prerequisite stdin differs'}
+        try{return [Text.UTF8Encoding]::new($false,$true).GetString($memory.ToArray())}
+        catch{throw 'prerequisite stdin UTF-8 differs'}
+    } finally {$memory.Dispose()}
+}
+
 function Invoke-P3PrerequisiteNativeProcess(
     [string]$Executable,
     [string[]]$Arguments,
@@ -521,43 +579,52 @@ function Invoke-P3PrerequisiteNativeProcess(
         $TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 60 -or $MaximumBytes -lt 1024 -or $MaximumBytes -gt 65536) {
         throw 'prerequisite child boundary differs'
     }
-    $inputPath = [IO.Path]::GetTempFileName()
-    $outputPath = [IO.Path]::GetTempFileName()
-    $errorPath = [IO.Path]::GetTempFileName()
-    $process = $null
+    $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$Executable;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+    $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+    $quotedArguments=@($Arguments|ForEach-Object{ConvertTo-P3PrerequisiteNativeArgument ([string]$_)})
+    $start.Arguments=$quotedArguments -join ' '
+    $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+    $stdout=[IO.MemoryStream]::new();$stderr=[IO.MemoryStream]::new();$watch=[Diagnostics.Stopwatch]::StartNew()
+    $timedOut=$false;$oversized=$false;$writeClosed=$false
     try {
-        [IO.File]::WriteAllBytes($inputPath, $InputBytes)
-        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden `
-            -RedirectStandardInput $inputPath -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -PassThru
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        $timedOut = $false
-        $oversized = $false
-        while (-not $process.HasExited) {
-            if (([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length -gt $MaximumBytes) {
-                $oversized = $true
-                $process.Kill()
-                break
+        if(-not $process.Start()){throw 'prerequisite child start differs'}
+        $writeTask=$process.StandardInput.BaseStream.WriteAsync($InputBytes,0,$InputBytes.Length)
+        $outBuffer=[byte[]]::new(4096);$errBuffer=[byte[]]::new(4096)
+        $outTask=$process.StandardOutput.BaseStream.ReadAsync($outBuffer,0,$outBuffer.Length)
+        $errTask=$process.StandardError.BaseStream.ReadAsync($errBuffer,0,$errBuffer.Length)
+        $outDone=$false;$errDone=$false
+        while(-not $outDone -or -not $errDone -or -not $process.HasExited){
+            if(-not $writeClosed -and $writeTask.IsCompleted){
+                try{$null=$writeTask.GetAwaiter().GetResult()}catch{}
+                $process.StandardInput.Close();$writeClosed=$true
             }
-            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
-                $timedOut = $true
-                $process.Kill()
-                break
+            foreach($channel in @('out','err')){
+                $task=if($channel -ceq 'out'){$outTask}else{$errTask}
+                if($null -ne $task -and $task.IsCompleted){
+                    $count=$task.GetAwaiter().GetResult();$target=if($channel -ceq 'out'){$stdout}else{$stderr};$source=if($channel -ceq 'out'){$outBuffer}else{$errBuffer}
+                    if($count -eq 0){if($channel -ceq 'out'){$outDone=$true;$outTask=$null}else{$errDone=$true;$errTask=$null}}
+                    else{
+                        $remaining=$MaximumBytes-[int]($stdout.Length+$stderr.Length)
+                        if($count -gt $remaining){$oversized=$true;if($remaining -gt 0){$target.Write($source,0,$remaining)}}else{$target.Write($source,0,$count)}
+                        if(-not $oversized){if($channel -ceq 'out'){$outTask=$process.StandardOutput.BaseStream.ReadAsync($outBuffer,0,$outBuffer.Length)}else{$errTask=$process.StandardError.BaseStream.ReadAsync($errBuffer,0,$errBuffer.Length)}}
+                    }
+                }
             }
-            Start-Sleep -Milliseconds 50
-            $process.Refresh()
+            if(($oversized -or $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) -and -not $process.HasExited){
+                if(-not $oversized){$timedOut=$true};$process.Kill()
+            }
+            if($oversized -and $process.HasExited){$outDone=$true;$errDone=$true}
+            if(-not $outDone -or -not $errDone -or -not $process.HasExited){Start-Sleep -Milliseconds 5;$process.Refresh()}
         }
+        if(-not $writeClosed){try{$null=$writeTask.GetAwaiter().GetResult()}catch{};$process.StandardInput.Close();$writeClosed=$true}
         $process.WaitForExit()
-        $finalLength = ([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length
-        if ($finalLength -gt $MaximumBytes) { $oversized = $true }
-        return [pscustomobject][ordered]@{
-            ExitCode=[int]$process.ExitCode;TimedOut=$timedOut;Oversized=$oversized
-            StdOut=$(if($oversized){''}else{[IO.File]::ReadAllText($outputPath,[Text.UTF8Encoding]::new($false,$true))})
-            StdErr=$(if($oversized){''}else{[IO.File]::ReadAllText($errorPath,[Text.UTF8Encoding]::new($false,$true))})
-        }
-    }
-    finally {
-        if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
-        foreach ($path in @($inputPath,$outputPath,$errorPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+        $encoding=[Text.UTF8Encoding]::new($false,$true)
+        return [pscustomobject][ordered]@{ExitCode=[int]$process.ExitCode;TimedOut=$timedOut;Oversized=$oversized
+            StdOut=$(if($oversized){''}else{$encoding.GetString($stdout.ToArray())});StdErr=$(if($oversized){''}else{$encoding.GetString($stderr.ToArray())})}
+    } finally {
+        if(-not $writeClosed -and $null -ne $process.StandardInput){try{$process.StandardInput.Close()}catch{}}
+        if(-not $process.HasExited){$process.Kill();$process.WaitForExit()}
+        $stdout.Dispose();$stderr.Dispose();$process.Dispose()
     }
 }
 
@@ -657,17 +724,24 @@ function Invoke-P3PrerequisiteProductionObservation(
         $observationBatch = Invoke-P3PrerequisiteObserve $bodyInput $bodyBoundaries $protectedCombined
     }
     finally {
-        if ($null -eq $protectedCombined) {
+        $protectedReceiptFailure = $null
+        $storedCombined = $null
+        if ($null -ne $protectedCombined) {
+            try {
+                $receiptPath = Join-Path $PrerequisiteRoot 'agent-receipt.json'
+                $storedCombined = Open-P3BoundedStableJson $receiptPath 65536 $script:P3CombinedAgentReceiptProperties
+                if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $protectedCombined)) {
+                    throw 'protected prerequisite agent receipt differs'
+                }
+            } catch { $protectedReceiptFailure = $_ }
+        }
+        if ($null -eq $protectedCombined -or $null -ne $protectedReceiptFailure) {
             Stop-P3OwnedAgentEmergency -Manifest $storedManifest -AgentReceipt $started `
                 -DeleteRunner $Boundaries.DeleteRunner -StopRunner $Boundaries.StopRunner `
                 -ProcessRunner $Boundaries.ProcessRunner -WaitRunner $Boundaries.WaitRunner `
                 -ReobserveRunner $Boundaries.ReobserveRunner -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+            if ($null -ne $protectedReceiptFailure) { throw $protectedReceiptFailure }
         } else {
-            $receiptPath = Join-Path $PrerequisiteRoot 'agent-receipt.json'
-            $storedCombined = Open-P3BoundedStableJson $receiptPath 65536 $script:P3CombinedAgentReceiptProperties
-            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $protectedCombined)) {
-                throw 'protected prerequisite agent receipt differs'
-            }
             $storedReceipt = ConvertTo-P3AgentReceiptFromCombined $storedCombined
             Stop-P3Agent -Manifest $storedManifest -AgentReceipt $storedReceipt `
                 -DeleteRunner $Boundaries.DeleteRunner -StopRunner $Boundaries.StopRunner `
@@ -1044,7 +1118,9 @@ function Invoke-P3PrerequisiteAction([string]$SelectedAction, [object]$InputObje
 }
 
 if (-not [string]::IsNullOrEmpty($Action)) {
-    $inputObject = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()) -ErrorAction Stop
+    $inputText = Read-P3PrerequisiteBoundedUtf8Stdin 131072
+    Import-P3PrerequisiteRuntime
+    $inputObject = ConvertFrom-Json -InputObject $inputText -ErrorAction Stop
     switch ($Action) {
         'Plan' {
             Assert-P3ExactProperties $inputObject @('manifest','nonce') 'prerequisite plan input'

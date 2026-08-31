@@ -40,7 +40,7 @@ Describe 'P3 pre-live prerequisite boundary' {
             }
             $trust = [pscustomobject][ordered]@{
                 schema='home-gateway/p3-prelive-prerequisite-ssh-trust/v1'
-                ssh_host='example.invalid';ssh_user='homegateway';known_hosts_path='C:\synthetic\known_hosts'
+                ssh_host='192.0.2.10';ssh_user='homegateway';known_hosts_path='C:\synthetic\known_hosts'
                 known_hosts_sha256=('1' * 64);host_key_fingerprint_sha256=('2' * 64)
                 git_ssh_agent_path='C:\synthetic\ssh-agent.exe';git_ssh_agent_sha256=('3' * 64)
                 git_ssh_add_path='C:\synthetic\ssh-add.exe';git_ssh_add_sha256=('4' * 64)
@@ -96,15 +96,16 @@ Describe 'P3 pre-live prerequisite boundary' {
             $knownHosts = Join-Path $Root 'known_hosts'
             $observerPayload = Join-Path $Root 'observer.py'
             [IO.Directory]::CreateDirectory($Root) | Out-Null
-            [IO.File]::WriteAllText($knownHosts, 'synthetic pinned ED25519 host', [Text.UTF8Encoding]::new($false))
+            $hostKey = 'AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f'
+            [IO.File]::WriteAllText($knownHosts, "192.0.2.10 ssh-ed25519 $hostKey`n", [Text.UTF8Encoding]::new($false))
             [IO.File]::WriteAllText($observerPayload, 'synthetic observer payload', [Text.UTF8Encoding]::new($false))
             $f.Baseline.payload_sha256 = (Get-FileHash $observerPayload).Hash.ToLowerInvariant()
             $endpoints = @('https://one.example/ip','https://two.example/ip','https://three.example/ip')
             $authorities = @($endpoints | ForEach-Object { Get-P3SHA256Text (([Uri]$_).Authority.ToLowerInvariant()) })
             $trust = [pscustomobject][ordered]@{
                 schema='home-gateway/p3-prelive-prerequisite-ssh-trust/v1'
-                ssh_host='example.invalid';ssh_user='homegateway';known_hosts_path=$knownHosts
-                known_hosts_sha256=(Get-FileHash $knownHosts).Hash.ToLowerInvariant();host_key_fingerprint_sha256=('2' * 64)
+                ssh_host='192.0.2.10';ssh_user='homegateway';known_hosts_path=$knownHosts
+                known_hosts_sha256=(Get-FileHash $knownHosts).Hash.ToLowerInvariant();host_key_fingerprint_sha256='cfb2081423dfac1fcc8f8593d1ef587c68090f88aee7dd69a3e662fb04043559'
                 git_ssh_agent_path=$agent.Manifest.git_ssh_agent_path;git_ssh_agent_sha256=$agent.Manifest.git_ssh_agent_sha256
                 git_ssh_add_path=$agent.Manifest.git_ssh_add_path;git_ssh_add_sha256=$agent.Manifest.git_ssh_add_sha256
                 git_ssh_path=$agent.Manifest.git_ssh_path;git_ssh_sha256=$agent.Manifest.git_ssh_sha256
@@ -275,7 +276,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $f = New-PrerequisiteFixture
         $trust = [pscustomobject]@{
             git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts'
-            ssh_host='example.invalid';ssh_user='homegateway';connect_timeout_seconds=10
+            ssh_host='192.0.2.10';ssh_user='homegateway';connect_timeout_seconds=10
             command_timeout_seconds=30;maximum_output_bytes=65536
             observer_payload_sha256=(Get-P3SHA256Text 'synthetic-observer')
             observer_protocol_sha256=$f.Manifest.protocol_sha256
@@ -287,15 +288,73 @@ Describe 'P3 pre-live prerequisite boundary' {
         $invocation.arguments | Should -Contain 'BatchMode=yes'
         $invocation.arguments | Should -Contain 'IdentitiesOnly=yes'
         $invocation.arguments | Should -Contain 'StrictHostKeyChecking=yes'
+        $invocation.arguments | Should -Contain '-F'
+        $invocation.arguments | Should -Contain 'NUL'
+        $invocation.arguments | Should -Contain 'GlobalKnownHostsFile=NUL'
         $invocation.arguments | Should -Contain 'PasswordAuthentication=no'
         $invocation.arguments | Should -Contain 'KbdInteractiveAuthentication=no'
         $invocation.arguments | Should -Contain 'ClearAllForwardings=yes'
         $invocation.arguments | Should -Contain '-T'
-        $invocation.arguments[-2] | Should -BeExactly 'homegateway@example.invalid'
+        $invocation.arguments[-2] | Should -BeExactly 'homegateway@192.0.2.10'
         $invocation.arguments[-1] | Should -Match '^sudo -n /usr/bin/python3 -c '
         $invocation.stdin.Length | Should -BeGreaterThan 18
         $invocation.timeout_seconds | Should -Be 30
         $invocation.maximum_output_bytes | Should -Be 65536
+    }
+
+    It 'rejects a self-consistent foreign known-host pin before the SSH runner' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'foreign-known-host')
+        $knownHosts = [string]$p.Trust.known_hosts_path
+        $hostKey = 'AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f'
+        [IO.File]::WriteAllText($knownHosts,"192.0.2.11 ssh-ed25519 $hostKey`n",[Text.UTF8Encoding]::new($false))
+        $p.Trust.known_hosts_sha256 = (Get-FileHash $knownHosts).Hash.ToLowerInvariant()
+        $p.Fixture.Manifest.ssh_trust = $p.Trust
+        $p.Fixture.Manifest.ssh_trust_sha256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $p.Trust)
+        $script:SshCalls = 0
+        { Invoke-P3PrerequisiteSshObservation -Manifest $p.Fixture.Manifest -Trust $p.Trust `
+                -AgentReceipt ([pscustomobject]@{socket='C:\synthetic\agent.sock'}) -Nonce ('c'*64) `
+                -Runner {$script:SshCalls++;[pscustomobject]@{ExitCode=1;TimedOut=$false;Oversized=$false;StdOut='';StdErr='blocked'}} } |
+            Should -Throw '*known-host*'
+        $script:SshCalls | Should -Be 0
+    }
+
+    It 'caps a fast noisy child without temp files and preserves exact observer argv' {
+        $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $savedTemp=$env:TEMP;$savedTmp=$env:TMP;$missing=Join-Path $TestDrive 'missing-temp'
+        try {
+            $env:TEMP=$missing;$env:TMP=$missing
+            $noisy=Invoke-P3PrerequisiteNativeProcess $powershell @('-NoLogo','-NoProfile','-NonInteractive','-Command',"[Console]::Out.Write('x' * 131072)") ([Text.Encoding]::UTF8.GetBytes('{}')) 10 1024
+        } finally { $env:TEMP=$savedTemp;$env:TMP=$savedTmp }
+        $noisy.Oversized|Should -BeTrue;$noisy.TimedOut|Should -BeFalse;$noisy.StdOut|Should -BeExactly ''
+
+        $capture=Join-Path $TestDrive 'capture-argv.ps1'
+        [IO.File]::WriteAllText($capture,'[Console]::Out.Write(($args | ConvertTo-Json -Compress))',[Text.UTF8Encoding]::new($false))
+        $f=New-PrerequisiteFixture
+        $trust=[pscustomobject]@{git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts';ssh_host='192.0.2.10';ssh_user='homegateway'
+            connect_timeout_seconds=10;command_timeout_seconds=30;maximum_output_bytes=65536;observer_payload_sha256=(Get-P3SHA256Text 'payload')
+            observer_protocol_sha256=$f.Manifest.protocol_sha256;expected_ipv6_policy_sha256=('d'*64)}
+        $invocation=New-P3PrerequisiteObserverInvocation $trust ([pscustomobject]@{ssh_auth_sock='C:\synthetic\agent.sock'}) ('c'*64) ([Text.Encoding]::UTF8.GetBytes('payload'))
+        $captured=Invoke-P3PrerequisiteNativeProcess $powershell (@('-NoLogo','-NoProfile','-NonInteractive','-File',$capture)+@($invocation.arguments)) ([Text.Encoding]::UTF8.GetBytes('{}')) 10 65536
+        $captured.ExitCode|Should -Be 0;$captured.Oversized|Should -BeFalse;$captured.StdErr|Should -BeExactly ''
+        $actual=@($captured.StdOut|ConvertFrom-Json|ForEach-Object { $_ })
+        $actual[-1]|Should -BeExactly $invocation.arguments[-1]
+        $actual[-1]|Should -Match '^sudo -n /usr/bin/python3 -c '
+        $actual|Should -Contain 'GlobalKnownHostsFile=NUL'
+    }
+
+    It 'rejects oversized CLI stdin before creating a prerequisite root' {
+        $root=Join-Path $TestDrive 'oversized-cli-root';$pwsh=(Get-Process -Id $PID).Path
+        $oversized='{"padding":"' + ('x'*140000) + '"}'
+        $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$pwsh;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+        $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        $start.Arguments='-NoLogo -NoProfile -NonInteractive -File "'+$script:Driver+'" -Action Plan -PrerequisiteRoot "'+$root+'"'
+        $child=[Diagnostics.Process]::new();$child.StartInfo=$start;$null=$child.Start()
+        $child.StandardInput.Write($oversized);$child.StandardInput.Close()
+        $output=$child.StandardOutput.ReadToEnd()+$child.StandardError.ReadToEnd();$child.WaitForExit()
+        $child.ExitCode|Should -Not -Be 0
+        ($output|Out-String)|Should -Match 'stdin exceeds'
+        Test-Path $root|Should -BeFalse
+        $child.Dispose()
     }
 
     It 'executes the production owned Observe switch and always removes its exact agent' {
@@ -330,6 +389,44 @@ Describe 'P3 pre-live prerequisite boundary' {
         @($calls | Where-Object {$_ -eq 'https'}).Count | Should -Be 3
         $calls[-1] | Should -BeExactly 'receipt-remove'
         (Test-Path (Join-Path $p.Agent.Root 'observation-batch.json')) | Should -BeTrue
+        $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+        $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'emergency tears down the exact owned agent when its protected receipt changes before cleanup' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'tampered-agent-receipt')
+        $f = $p.Fixture
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $calls = [Collections.Generic.List[string]]::new()
+        $boundaries = [pscustomobject]@{
+            AgentRunner={param($exe)$calls.Add('start');"SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4343; export SSH_AGENT_PID;"}.GetNewClosure()
+            AddRunner={param($path)$calls.Add('add')}.GetNewClosure()
+            ListRunner={param($exe)"256 $($p.Agent.Fingerprint) p3 (ED25519)"}.GetNewClosure()
+            ProcessRunner={param($ProcessId)[pscustomobject]@{Id=$ProcessId;Path=$p.Agent.Manifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow}}.GetNewClosure()
+            DeleteRunner={$calls.Add('delete')}.GetNewClosure();StopRunner={param($ProcessId)$calls.Add('stop')}.GetNewClosure()
+            WaitRunner={param($ProcessId)$calls.Add('wait')}.GetNewClosure();ReobserveRunner={param($ProcessId)$calls.Add('reobserve');@()}.GetNewClosure()
+            SocketExistsRunner={param($path)$false};ReceiptRemoveRunner={param($path)$calls.Add('receipt-remove');[IO.File]::Delete($path)}.GetNewClosure()
+            SshRunner={
+                param($exe,$args,$stdin,$timeout,$maximum)
+                $calls.Add('ssh')
+                $receiptPath = Join-Path $p.Agent.Root 'agent-receipt.json'
+                $stored = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+                $stored.socket = 'C:\synthetic\foreign.sock'
+                [IO.File]::WriteAllText($receiptPath,($stored | ConvertTo-Json -Depth 16 -Compress),[Text.UTF8Encoding]::new($false))
+                throw 'synthetic body failure'
+            }.GetNewClosure()
+            HttpsRunner={param($entry,$clock)throw 'not reached'}
+            ClockRunner={$f.Now.AddSeconds(5)}.GetNewClosure()
+        }
+        { Invoke-P3PrerequisiteProductionObservation -PrerequisiteRoot $p.Agent.Root `
+                -InputObject ([pscustomobject]@{manifest=$f.Manifest;ssh_trust=$p.Trust;agent_manifest=$p.Agent.Manifest;nonce=('c'*64);expected_plan_sha256=$plan.plan_sha256;confirmation_challenge=$plan.confirmation_challenge}) `
+                -Boundaries $boundaries } | Should -Throw '*protected prerequisite agent receipt differs*'
+        $calls | Should -Contain 'ssh'
+        $calls | Should -Contain 'delete'
+        $calls | Should -Contain 'stop'
+        $calls | Should -Contain 'wait'
+        $calls | Should -Contain 'reobserve'
+        $calls | Should -Not -Contain 'receipt-remove'
         $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
         $env:SSH_AGENT_PID | Should -BeNullOrEmpty
     }

@@ -31,6 +31,7 @@ func (collector staticCollector) Collect(context.Context) (windowssystem.Invento
 type staticInspectionBackend struct {
 	redshield.Backend
 	inspection tunnel.Inspection
+	sourceSink *tunnel.ConfigSource
 }
 
 const (
@@ -39,7 +40,10 @@ const (
 	commandCiscoGUID     = "22222222-2222-4222-8222-222222222222"
 )
 
-func (backend staticInspectionBackend) Inspect(context.Context, tunnel.ConfigSource) (tunnel.Inspection, error) {
+func (backend staticInspectionBackend) Inspect(_ context.Context, source tunnel.ConfigSource) (tunnel.Inspection, error) {
+	if backend.sourceSink != nil {
+		*backend.sourceSink = source
+	}
 	return backend.inspection, nil
 }
 
@@ -91,9 +95,22 @@ func TestRunRedShieldInspectJSONIsRedacted(t *testing.T) {
 }
 
 func TestParseReadOnlyCommandAcceptsProviderNeutralTunnelInspect(t *testing.T) {
-	path, command, ok := parseReadOnlyCommand([]string{"tunnel", "inspect", "--config", "C:\\synthetic.conf", "--json"})
-	if !ok || command != "tunnel-inspect" || path != "C:\\synthetic.conf" {
-		t.Fatalf("provider-neutral inspect = %q, %q, %v", path, command, ok)
+	pin := strings.Repeat("a", 64)
+	path, configSHA256, command, ok := parseReadOnlyCommand([]string{"tunnel", "inspect", "--config", "C:\\synthetic.conf", "--config-sha256", pin, "--json"})
+	if !ok || command != "tunnel-inspect" || path != "C:\\synthetic.conf" || configSHA256 != pin {
+		t.Fatalf("provider-neutral inspect = %q, %q, %q, %v", path, configSHA256, command, ok)
+	}
+}
+
+func TestRunTunnelInspectPassesPinnedConfigSource(t *testing.T) {
+	pin := strings.Repeat("b", 64)
+	var source tunnel.ConfigSource
+	deps := dependencies{backend: staticInspectionBackend{inspection: tunnel.Inspection{}, sourceSink: &source}}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithDependencies("hgctl", []string{"tunnel", "inspect", "--config", `C:\synthetic.conf`, "--config-sha256", pin, "--json"}, &stdout, &stderr, deps)
+	if code != 0 || source.Path != `C:\synthetic.conf` || source.SHA256 != pin {
+		t.Fatalf("code=%d source=%#v stderr=%q", code, source, stderr.String())
 	}
 }
 

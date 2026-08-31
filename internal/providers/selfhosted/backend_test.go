@@ -2,7 +2,9 @@ package selfhosted
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +37,22 @@ func TestInspectReturnsOnlyDerivedInterfacePublicFingerprint(t *testing.T) {
 	}
 	if len(inspection.InterfacePublicFingerprintSHA256) != 64 || inspection.InterfacePublicFingerprintSHA256 == privateKey {
 		t.Fatalf("inspection fingerprint differs: %#v", inspection)
+	}
+}
+
+func TestInspectRejectsConfigChangedAfterPinning(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "guest.conf")
+	original := []byte("[Interface]\nPrivateKey = " + base64.StdEncoding.EncodeToString(bytesOf(1, 32)) + "\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(original)
+	pin := hex.EncodeToString(digest[:])
+	if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Backend{}).Inspect(context.Background(), tunnel.ConfigSource{Path: path, SHA256: pin}); err == nil || !strings.Contains(err.Error(), "differs") {
+		t.Fatalf("pinned changed config error = %v", err)
 	}
 }
 

@@ -18,9 +18,12 @@ class PreliveServerObserverTests(unittest.TestCase):
     def test_attested_frame_rejects_truncation_extension_hash_and_replay(self):
         payload = b"synthetic read-only observer"
         nonce = "1" * 64
-        frame = observer.encode_attested_frame(payload, nonce)
+        protocol = "3" * 64
+        ipv6 = "4" * 64
+        frame = observer.encode_attested_frame(payload, nonce, protocol, ipv6)
         self.assertEqual(
-            observer.read_attested_frame(io.BytesIO(frame), nonce), payload
+            observer.read_attested_frame(io.BytesIO(frame), nonce, protocol, ipv6),
+            payload,
         )
         for changed, message in (
             (frame[:-1], "length"),
@@ -31,9 +34,17 @@ class PreliveServerObserverTests(unittest.TestCase):
                 self.subTest(message=message),
                 self.assertRaisesRegex(ValueError, message),
             ):
-                observer.read_attested_frame(io.BytesIO(changed), nonce)
+                observer.read_attested_frame(
+                    io.BytesIO(changed), nonce, protocol, ipv6
+                )
         with self.assertRaisesRegex(ValueError, "nonce"):
-            observer.read_attested_frame(io.BytesIO(frame), "2" * 64)
+            observer.read_attested_frame(
+                io.BytesIO(frame), "2" * 64, protocol, ipv6
+            )
+        with self.assertRaisesRegex(ValueError, "protocol"):
+            observer.read_attested_frame(
+                io.BytesIO(frame), nonce, "5" * 64, ipv6
+            )
 
     def test_observation_accepts_only_exact_sanitized_27_field_baseline(self):
         baseline = json.loads(

@@ -26,7 +26,8 @@ $script:P3RuntimeFiles = @(
     'pre-receipt.json'
 )
 $script:P3TrustProperties = @(
-    'accepted_cloud_firewall_sha256', 'accepted_server_baseline', 'egress_authority_sha256',
+    'accepted_cloud_firewall_sha256', 'accepted_prerequisite_cloud_firewall_sha256',
+    'accepted_prerequisite_ssh_trust', 'accepted_server_baseline', 'egress_authority_sha256',
     'git_scp_path', 'git_ssh_add_path', 'git_ssh_agent_path', 'git_ssh_path', 'known_hosts_path',
     'local_payload_path', 'management_source_cidr_sha256', 'private_key_path', 'protocol_sha256',
     'public_key_fingerprint_sha256', 'public_key_path', 'remote_payload_sha256', 'rollback_paths', 'schema', 'ssh_host', 'ssh_user',
@@ -44,7 +45,8 @@ $script:P3ServerBaselineProperties = @(
 )
 $script:P3RollbackPathProperties = @('metadata_path', 'persistent_config_path', 'syncconf_path', 'temporary_path')
 $script:P3ManifestProperties = @(
-    'accepted_cloud_firewall_sha256', 'accepted_prerequisite_receipt_sha256', 'accepted_server_baseline_sha256',
+    'accepted_cloud_firewall_sha256', 'accepted_prerequisite_cloud_firewall_sha256',
+    'accepted_prerequisite_receipt_sha256', 'accepted_prerequisite_ssh_trust_sha256', 'accepted_server_baseline_sha256',
     'git_scp_sha256', 'git_ssh_add_sha256', 'git_ssh_agent_sha256', 'git_ssh_sha256',
     'known_hosts_sha256', 'local_payload_sha256', 'management_source_cidr_sha256',
     'protocol_sha256', 'public_key_fingerprint_sha256', 'remote_payload_sha256', 'schema', 'trust_sha256'
@@ -53,10 +55,28 @@ $script:P3PrerequisiteReceiptProperties = @(
     'schema', 'prerequisite_manifest_sha256', 'server_baseline', 'server_baseline_sha256',
     'cloud_firewall_identity_sha256', 'firewall_resource_sha256', 'droplet_resource_sha256',
     'inbound_union_sha256', 'outbound_union_sha256', 'management_source_cidr_sha256',
-    'egress_authority_sha256', 'egress_observation_sha256', 'ssh_trust_sha256', 'payload_sha256',
-    'protocol_sha256', 'observed_at_utc', 'owner_observed', 'server_confirmed',
+    'egress_authority_sha256', 'egress_observation_sha256', 'ssh_trust', 'ssh_trust_sha256', 'payload_sha256',
+    'protocol_sha256', 'nonce_sha256', 'observed_at_utc', 'owner_observed', 'server_confirmed',
     'live_mutation_performed', 'raw_identity_exposed'
 )
+$script:P3PrerequisiteSshTrustProperties = @(
+    'schema','ssh_host','ssh_user','known_hosts_path','known_hosts_sha256','host_key_fingerprint_sha256',
+    'git_ssh_agent_path','git_ssh_agent_sha256','git_ssh_add_path','git_ssh_add_sha256',
+    'git_ssh_path','git_ssh_sha256','git_scp_path','git_scp_sha256','public_key_path','public_key_sha256',
+    'public_key_fingerprint_sha256','private_key_path','observer_payload_path','observer_payload_sha256',
+    'observer_protocol_sha256','expected_ipv6_policy_sha256','egress','connect_timeout_seconds',
+    'command_timeout_seconds','maximum_output_bytes','no_write_scope'
+)
+$script:P3PrerequisiteManifestProperties = @(
+    'schema', 'manifest_sha256', 'payload_sha256', 'protocol_sha256', 'ssh_trust', 'ssh_trust_sha256',
+    'management_source_cidr_sha256', 'egress_authority_sha256', 'firewall_resource_sha256',
+    'droplet_resource_sha256', 'inbound_union_sha256', 'outbound_union_sha256'
+)
+$script:P3PrerequisiteAgentManifestProperties = @(
+    'git_scp_path','git_scp_sha256','git_ssh_add_path','git_ssh_add_sha256','git_ssh_agent_path','git_ssh_agent_sha256',
+    'git_ssh_path','git_ssh_sha256','manifest_sha256','private_key_path','public_key_fingerprint_sha256','public_key_path'
+)
+$script:P3PrerequisiteConsumptionProperties = @('prerequisite_receipt_sha256','runtime_manifest_sha256','schema')
 $script:P3CloudFirewallReceiptProperties = @(
     'cloud_firewall_identity_sha256', 'droplet_association_count', 'inbound_rule_count',
     'live_mutation_performed', 'management_source_cidr_sha256', 'observed_at_utc',
@@ -244,6 +264,113 @@ function Get-P3ExactFileSHA256([string]$Path, [string]$Label) {
     return Get-P3SHA256Bytes -Bytes (Read-P3BoundedStableBytes -Path $Path -MaximumBytes 16777216 -Label $Label)
 }
 
+function Test-P3AcceptedPrerequisiteSshTrust([object]$Accepted, [object]$Trust) {
+    Assert-P3ExactProperties $Accepted $script:P3PrerequisiteSshTrustProperties 'accepted prerequisite SSH trust'
+    if ([string]$Accepted.schema -cne 'home-gateway/p3-prelive-prerequisite-ssh-trust/v1' -or
+        [string]$Accepted.ssh_host -cne [string]$Trust.ssh_host -or [string]$Accepted.ssh_user -cne [string]$Trust.ssh_user -or
+        -not [bool]$Accepted.no_write_scope -or [int]$Accepted.connect_timeout_seconds -ne 10 -or
+        [int]$Accepted.command_timeout_seconds -ne 30 -or [int]$Accepted.maximum_output_bytes -ne 65536 -or
+        [string]$Accepted.known_hosts_path -cne [string]$Trust.known_hosts_path -or
+        [string]$Accepted.public_key_path -cne [string]$Trust.public_key_path -or
+        [string]$Accepted.private_key_path -cne [string]$Trust.private_key_path -or
+        [string]$Accepted.git_ssh_agent_path -cne [string]$Trust.git_ssh_agent_path -or
+        [string]$Accepted.git_ssh_add_path -cne [string]$Trust.git_ssh_add_path -or
+        [string]$Accepted.git_ssh_path -cne [string]$Trust.git_ssh_path -or
+        [string]$Accepted.git_scp_path -cne [string]$Trust.git_scp_path -or
+        [string]$Accepted.observer_payload_path -cne [string]$Trust.local_payload_path -or
+        [string]$Accepted.observer_payload_sha256 -cne [string]$Trust.remote_payload_sha256 -or
+        [string]$Accepted.observer_protocol_sha256 -cne [string]$Trust.protocol_sha256 -or
+        [string]$Accepted.expected_ipv6_policy_sha256 -cne [string]$Trust.accepted_server_baseline.ipv6_policy_sha256 -or
+        [string]$Accepted.public_key_fingerprint_sha256 -cne [string]$Trust.public_key_fingerprint_sha256) {
+        throw 'accepted prerequisite SSH trust differs'
+    }
+    foreach ($pair in @(
+            @('known_hosts_path','known_hosts_sha256','known-hosts'),@('git_ssh_agent_path','git_ssh_agent_sha256','Git ssh-agent'),
+            @('git_ssh_add_path','git_ssh_add_sha256','Git ssh-add'),@('git_ssh_path','git_ssh_sha256','Git ssh'),
+            @('git_scp_path','git_scp_sha256','Git scp'),@('public_key_path','public_key_sha256','public key'),
+            @('observer_payload_path','observer_payload_sha256','observer payload'))) {
+        $path = [string]$Accepted.PSObject.Properties[[string]$pair[0]].Value
+        $expected = [string]$Accepted.PSObject.Properties[[string]$pair[1]].Value
+        if ((Get-P3ExactFileSHA256 $path ([string]$pair[2])) -cne $expected) { throw 'accepted prerequisite external file differs' }
+    }
+    $authorities = @($Accepted.egress | ForEach-Object { [string]$_.authority_sha256 })
+    if ($authorities.Count -ne 3 -or @(Compare-Object -ReferenceObject @($Trust.egress_authority_sha256 | Sort-Object) `
+            -DifferenceObject @($authorities | Sort-Object)).Count -ne 0) { throw 'accepted prerequisite HTTPS authority differs' }
+    return $Accepted
+}
+
+function Assert-P3ProtectedPrerequisiteReceiptState(
+    [object]$Trust,
+    [string]$ExpectedReceiptSHA256,
+    [switch]$AllowConsumed
+) {
+    Assert-P3SHA256 $ExpectedReceiptSHA256 'expected prerequisite receipt'
+    $receiptPath = Resolve-P3FixedCleanPath ([string]$Trust.prerequisite_receipt_path) 'prerequisite receipt'
+    if ([IO.Path]::GetFileName($receiptPath) -cne 'prerequisite-receipt.json') { throw 'protected prerequisite receipt path differs' }
+    $root = Split-Path -Parent $receiptPath
+    $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'protected prerequisite root differs' }
+    $currentSID = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $root -ErrorAction Stop
+    if (-not $acl.AreAccessRulesProtected -or $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $currentSID.Value) {
+        throw 'protected prerequisite ACL differs'
+    }
+    $markerPath = Join-Path $root '.home-gateway-p3-prerequisite-owner.v1'
+    $marker = [Text.Encoding]::UTF8.GetString((Read-P3BoundedStableBytes $markerPath 256 'prerequisite owner marker'))
+    if ($marker -cne 'home-gateway/p3-prelive-prerequisite-owner/v1') { throw 'prerequisite owner marker differs' }
+    $consumedPath = Join-Path $root 'prerequisite-receipt.consumed.json'
+    if ([IO.File]::Exists($consumedPath) -and -not $AllowConsumed) { throw 'prerequisite receipt is already consumed' }
+    $expectedNames = @('.home-gateway-p3-prerequisite-owner.v1','manifest.json','agent-manifest.json',
+        'observation-batch.json','cloud-observation.json','prerequisite-receipt.json')
+    if ($AllowConsumed) { $expectedNames += 'prerequisite-receipt.consumed.json' }
+    $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop)
+    foreach ($child in $children) {
+        if ($child.Name -notin $expectedNames -or $child.PSIsContainer -or
+            ($child.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'foreign prerequisite content is present' }
+    }
+    foreach ($name in $expectedNames) {
+        if (-not [IO.File]::Exists((Join-Path $root $name))) { throw 'required prerequisite file is missing' }
+    }
+    if ((Get-P3ExactFileSHA256 $receiptPath 'prerequisite receipt') -cne $ExpectedReceiptSHA256) {
+        throw 'prerequisite receipt hash differs'
+    }
+    $receipt = Open-P3BoundedStableJson $receiptPath 131072 $script:P3PrerequisiteReceiptProperties
+    $manifest = Open-P3BoundedStableJson (Join-Path $root 'manifest.json') 65536 $script:P3PrerequisiteManifestProperties
+    if ([string]$manifest.schema -cne 'home-gateway/p3-prelive-prerequisite-manifest/v1' -or
+        [string]$manifest.manifest_sha256 -cne [string]$receipt.prerequisite_manifest_sha256 -or
+        [string]$manifest.payload_sha256 -cne [string]$receipt.payload_sha256 -or
+        [string]$manifest.protocol_sha256 -cne [string]$receipt.protocol_sha256 -or
+        [string]$manifest.ssh_trust_sha256 -cne [string]$receipt.ssh_trust_sha256 -or
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $manifest.ssh_trust)) -cne [string]$manifest.ssh_trust_sha256) {
+        throw 'protected prerequisite manifest differs'
+    }
+    foreach ($name in @('management_source_cidr_sha256','firewall_resource_sha256','droplet_resource_sha256',
+            'inbound_union_sha256','outbound_union_sha256')) {
+        if ([string]$manifest.$name -cne [string]$receipt.$name) { throw 'protected prerequisite manifest differs' }
+    }
+    if (@(Compare-Object @($manifest.egress_authority_sha256) @($receipt.egress_authority_sha256)).Count -ne 0 -or
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $manifest.ssh_trust)) -cne
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Trust.accepted_prerequisite_ssh_trust))) {
+        throw 'protected prerequisite manifest differs'
+    }
+    $agent = Open-P3BoundedStableJson (Join-Path $root 'agent-manifest.json') 65536 $script:P3PrerequisiteAgentManifestProperties
+    if ([string]$agent.manifest_sha256 -cne [string]$manifest.manifest_sha256) { throw 'protected prerequisite agent manifest differs' }
+    foreach ($pair in @(
+            @('git_ssh_agent_path','git_ssh_agent_sha256'),@('git_ssh_add_path','git_ssh_add_sha256'),
+            @('git_ssh_path','git_ssh_sha256'),@('git_scp_path','git_scp_sha256'))) {
+        if ([string]$agent.($pair[0]) -cne [string]$manifest.ssh_trust.($pair[0]) -or
+            [string]$agent.($pair[1]) -cne [string]$manifest.ssh_trust.($pair[1])) {
+            throw 'protected prerequisite agent manifest differs'
+        }
+    }
+    if ([string]$agent.public_key_path -cne [string]$manifest.ssh_trust.public_key_path -or
+        [string]$agent.private_key_path -cne [string]$manifest.ssh_trust.private_key_path -or
+        [string]$agent.public_key_fingerprint_sha256 -cne [string]$manifest.ssh_trust.public_key_fingerprint_sha256) {
+        throw 'protected prerequisite agent manifest differs'
+    }
+    return [pscustomobject]@{ root=$root;receipt=$receipt;manifest=$manifest;consumed_path=$consumedPath }
+}
+
 function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
     $null = Resolve-P3FixedCleanPath -Path $RuntimeRoot -Label 'runtime root'
     Assert-P3ExactProperties -Value $Trust -ExpectedProperties $script:P3TrustProperties -Label 'trust input'
@@ -254,7 +381,7 @@ function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
         throw 'trust SSH host must be one IPv4 address'
     }
     foreach ($name in @('public_key_fingerprint_sha256', 'management_source_cidr_sha256', 'remote_payload_sha256', 'protocol_sha256',
-            'accepted_cloud_firewall_sha256', 'expected_prerequisite_receipt_sha256')) {
+            'accepted_cloud_firewall_sha256', 'accepted_prerequisite_cloud_firewall_sha256', 'expected_prerequisite_receipt_sha256')) {
         Assert-P3SHA256 -Value ([string]$Trust.$name) -Label $name
     }
     $baseline = $Trust.accepted_server_baseline
@@ -274,6 +401,7 @@ function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
     $egress = @($Trust.egress_authority_sha256)
     if ($egress.Count -ne 3 -or @($egress | Select-Object -Unique).Count -ne 3) { throw 'three distinct egress authorities are required' }
     foreach ($hash in $egress) { Assert-P3SHA256 -Value ([string]$hash) -Label 'egress authority' }
+    $null = Test-P3AcceptedPrerequisiteSshTrust $Trust.accepted_prerequisite_ssh_trust $Trust
     foreach ($pathName in @('known_hosts_path', 'public_key_path', 'private_key_path', 'git_ssh_agent_path', 'git_ssh_add_path', 'git_ssh_path',
             'git_scp_path', 'local_payload_path', 'prerequisite_receipt_path')) {
         $null = Resolve-P3FixedCleanPath -Path ([string]$Trust.$pathName) -Label $pathName
@@ -287,19 +415,19 @@ function New-P3ManifestPlan([object]$Trust, [string]$RuntimeRoot) {
     $gitAddHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_add_path) -Label 'Git ssh-add'
     $gitAgentHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_agent_path) -Label 'Git ssh-agent'
     $gitSshHash = Get-P3ExactFileSHA256 -Path ([string]$Trust.git_ssh_path) -Label 'Git ssh'
-    $sshTrustSHA256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson ([pscustomobject][ordered]@{
-        known_hosts_sha256=$knownHostsSHA256;public_key_fingerprint_sha256=[string]$Trust.public_key_fingerprint_sha256
-        git_ssh_agent_sha256=$gitAgentHash;git_ssh_add_sha256=$gitAddHash
-        git_ssh_sha256=$gitSshHash;git_scp_sha256=$gitSCPHash
-    }))
+    $acceptedPrerequisiteSshTrustSHA256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Trust.accepted_prerequisite_ssh_trust)
     $prerequisitePath = [string]$Trust.prerequisite_receipt_path
     $prerequisiteSHA256 = Get-P3ExactFileSHA256 -Path $prerequisitePath -Label 'prerequisite receipt'
     if ($prerequisiteSHA256 -cne [string]$Trust.expected_prerequisite_receipt_sha256) { throw 'prerequisite receipt hash differs' }
     $prerequisite = Open-P3BoundedStableJson -Path $prerequisitePath -MaximumBytes 131072 -ExpectedProperties $script:P3PrerequisiteReceiptProperties
-    $null = Test-P3AcceptedPrerequisiteReceipt -Receipt $prerequisite -Trust $Trust -ExpectedSshTrustSHA256 $sshTrustSHA256 -NowUtc ([DateTime]::UtcNow)
+    $null = Test-P3AcceptedPrerequisiteReceipt -Receipt $prerequisite -Trust $Trust `
+        -ExpectedSshTrustSHA256 $acceptedPrerequisiteSshTrustSHA256 -NowUtc ([DateTime]::UtcNow)
+    $null = Assert-P3ProtectedPrerequisiteReceiptState $Trust $prerequisiteSHA256
     $manifest = [pscustomobject][ordered]@{
         accepted_cloud_firewall_sha256 = [string]$Trust.accepted_cloud_firewall_sha256
+        accepted_prerequisite_cloud_firewall_sha256 = [string]$Trust.accepted_prerequisite_cloud_firewall_sha256
         accepted_prerequisite_receipt_sha256 = $prerequisiteSHA256
+        accepted_prerequisite_ssh_trust_sha256 = $acceptedPrerequisiteSshTrustSHA256
         accepted_server_baseline_sha256 = $baselineSHA256
         git_scp_sha256 = $gitSCPHash
         git_ssh_add_sha256 = $gitAddHash
@@ -386,12 +514,31 @@ function Invoke-P3RuntimePrepare([object]$Trust, [string]$RuntimeRoot, [string]$
     $plan = New-P3ManifestPlan -Trust $Trust -RuntimeRoot $RuntimeRoot
     if ($plan.manifest_sha256 -cne $ExpectedManifestSHA256 -or $Confirmation -cne $plan.confirmation_challenge -or
         $Confirmation -cnotmatch '^P3-PRELIVE-RUNTIME-[0-9A-F]{16}$') { throw 'runtime approval differs' }
-    $resolved = Resolve-P3FixedCleanPath -Path $RuntimeRoot -Label 'runtime root'
-    if ([IO.File]::Exists($resolved) -or [IO.Directory]::Exists($resolved)) { throw 'runtime root already exists' }
-    $parent = Split-Path -Parent $resolved
-    if (-not [IO.Directory]::Exists($parent)) { throw 'runtime parent is missing' }
-    $item = [IO.Directory]::CreateDirectory($resolved)
+    $prerequisite = Assert-P3ProtectedPrerequisiteReceiptState $Trust ([string]$Trust.expected_prerequisite_receipt_sha256)
+    $consumption = [pscustomobject][ordered]@{
+        prerequisite_receipt_sha256=[string]$Trust.expected_prerequisite_receipt_sha256
+        runtime_manifest_sha256=$plan.manifest_sha256
+        schema='home-gateway/p3-prelive-prerequisite-consumption/v1'
+    }
+    $consumptionBytes = ConvertTo-P3CanonicalJson $consumption
+    $consumptionSHA256 = Get-P3SHA256Bytes $consumptionBytes
     try {
+        $null = Install-P3ExactRuntimeFile $consumptionBytes $prerequisite.consumed_path $consumptionSHA256
+    }
+    catch { throw 'prerequisite receipt is already consumed' }
+    $consumed = $true
+    $resolved = Resolve-P3FixedCleanPath -Path $RuntimeRoot -Label 'runtime root'
+    try {
+        $reopenedConsumption = Open-P3BoundedStableJson $prerequisite.consumed_path 4096 $script:P3PrerequisiteConsumptionProperties
+        if ((Get-P3ExactFileSHA256 $prerequisite.consumed_path 'prerequisite consumption') -cne $consumptionSHA256 -or
+            (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $reopenedConsumption)) -cne $consumptionSHA256) {
+            throw 'prerequisite consumption differs'
+        }
+        $null = Assert-P3ProtectedPrerequisiteReceiptState $Trust ([string]$Trust.expected_prerequisite_receipt_sha256) -AllowConsumed
+        if ([IO.File]::Exists($resolved) -or [IO.Directory]::Exists($resolved)) { throw 'runtime root already exists' }
+        $parent = Split-Path -Parent $resolved
+        if (-not [IO.Directory]::Exists($parent)) { throw 'runtime parent is missing' }
+        $item = [IO.Directory]::CreateDirectory($resolved)
         Set-Acl -LiteralPath $resolved -AclObject (New-P3RuntimeAcl) -ErrorAction Stop
         $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes($script:P3RuntimeMarkerText)
         $null = Install-P3ExactRuntimeFile -Bytes $markerBytes -Destination (Join-Path $resolved $script:P3RuntimeMarkerName) -ExpectedSHA256 (Get-P3SHA256Bytes -Bytes $markerBytes)
@@ -403,6 +550,10 @@ function Invoke-P3RuntimePrepare([object]$Trust, [string]$RuntimeRoot, [string]$
     }
     catch {
         if ([IO.Directory]::Exists($resolved)) { [IO.Directory]::Delete($resolved, $true) }
+        if ($consumed -and [IO.File]::Exists($prerequisite.consumed_path) -and
+            (Get-P3ExactFileSHA256 $prerequisite.consumed_path 'prerequisite consumption') -ceq $consumptionSHA256) {
+            [IO.File]::Delete($prerequisite.consumed_path)
+        }
         throw
     }
     return [pscustomobject][ordered]@{
@@ -583,12 +734,18 @@ function Test-P3AcceptedPrerequisiteReceipt(
     $now = $NowUtc.ToUniversalTime()
     if ($observed -gt $now.AddSeconds(5) -or $observed -lt $now.AddMinutes(-10)) { throw 'prerequisite receipt freshness differs' }
     $baselineSHA256 = Get-P3ServerBaselineSHA256 $Receipt.server_baseline
+    Assert-P3SHA256 ([string]$Receipt.nonce_sha256) 'prerequisite receipt nonce'
     if ($baselineSHA256 -cne [string]$Receipt.server_baseline_sha256 -or
         $baselineSHA256 -cne (Get-P3ServerBaselineSHA256 $Trust.accepted_server_baseline) -or
         [string]$Receipt.payload_sha256 -cne [string]$Trust.remote_payload_sha256 -or
         [string]$Receipt.protocol_sha256 -cne [string]$Trust.protocol_sha256 -or
         [string]$Receipt.management_source_cidr_sha256 -cne [string]$Trust.management_source_cidr_sha256 -or
-        [string]$Receipt.ssh_trust_sha256 -cne $ExpectedSshTrustSHA256) { throw 'prerequisite receipt binding differs' }
+        [string]$Receipt.cloud_firewall_identity_sha256 -cne [string]$Trust.accepted_prerequisite_cloud_firewall_sha256 -or
+        [string]$Receipt.ssh_trust_sha256 -cne $ExpectedSshTrustSHA256 -or
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Receipt.ssh_trust)) -cne $ExpectedSshTrustSHA256 -or
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Trust.accepted_prerequisite_ssh_trust)) -cne $ExpectedSshTrustSHA256) {
+        throw 'prerequisite receipt binding differs'
+    }
     $expectedAuthorities = @($Trust.egress_authority_sha256)
     $actualAuthorities = @($Receipt.egress_authority_sha256)
     if ($actualAuthorities.Count -ne 3 -or @(Compare-Object -ReferenceObject $expectedAuthorities -DifferenceObject $actualAuthorities).Count -ne 0) {

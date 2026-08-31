@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'Plan', 'AgentPlan', 'AgentStart', 'AgentValidate', 'Observe', 'AgentStop', 'Assemble', 'Validate')]
+    [ValidateSet('', 'Plan', 'AgentPlan', 'AgentStart', 'AgentValidate', 'Observe', 'AgentStop', 'RecordCloudFirewall', 'Assemble', 'Validate')]
     [string]$Action = '',
     [string]$PrerequisiteRoot,
     [string]$ExpectedReceiptSHA256
@@ -10,25 +10,27 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:P3PrerequisiteManifestProperties = @(
-    'schema', 'manifest_sha256', 'payload_sha256', 'protocol_sha256', 'ssh_trust_sha256',
+    'schema', 'manifest_sha256', 'payload_sha256', 'protocol_sha256', 'ssh_trust', 'ssh_trust_sha256',
     'management_source_cidr_sha256', 'egress_authority_sha256', 'firewall_resource_sha256',
     'droplet_resource_sha256', 'inbound_union_sha256', 'outbound_union_sha256'
 )
 $script:P3CloudFirewallV2Properties = @(
-    'schema', 'firewall_resource_sha256', 'droplet_resource_sha256', 'droplet_association_count',
-    'management_source_cidr_sha256', 'tcp_22_management_source_count', 'udp_38556_all_ipv4_count',
-    'udp_ipv6_count', 'extra_inbound_rule_count', 'inbound_union_sha256', 'outbound_union_sha256',
-    'outbound_icmp_all_count', 'outbound_tcp_all_count', 'outbound_udp_all_count',
-    'extra_outbound_rule_count', 'observed_at_utc', 'owner_observed', 'server_confirmed',
+    'schema', 'firewall_resource_sha256', 'droplet_resource_sha256', 'associations',
+    'management_source_cidr_sha256', 'inbound_rules', 'outbound_rules',
+    'observed_at_utc', 'owner_observed', 'server_confirmed',
     'live_mutation_performed'
 )
 $script:P3PrerequisiteEgressProperties = @('schema', 'authority_sha256', 'source_cidr_sha256', 'observed_at_utc')
+$script:P3PrerequisiteObservationBatchProperties = @(
+    'schema','server_baseline','server_baseline_sha256','egress','nonce_sha256','observed_at_utc',
+    'live_mutation_performed','raw_identity_exposed'
+)
 $script:P3PrerequisiteReceiptProperties = @(
     'schema', 'prerequisite_manifest_sha256', 'server_baseline', 'server_baseline_sha256',
     'cloud_firewall_identity_sha256', 'firewall_resource_sha256', 'droplet_resource_sha256',
     'inbound_union_sha256', 'outbound_union_sha256', 'management_source_cidr_sha256',
-    'egress_authority_sha256', 'egress_observation_sha256', 'ssh_trust_sha256', 'payload_sha256',
-    'protocol_sha256', 'observed_at_utc', 'owner_observed', 'server_confirmed',
+    'egress_authority_sha256', 'egress_observation_sha256', 'ssh_trust', 'ssh_trust_sha256', 'payload_sha256',
+    'protocol_sha256', 'nonce_sha256', 'observed_at_utc', 'owner_observed', 'server_confirmed',
     'live_mutation_performed', 'raw_identity_exposed'
 )
 
@@ -56,10 +58,18 @@ function Test-P3PrerequisiteManifest([object]$Manifest) {
     $authorities = @($Manifest.egress_authority_sha256)
     if ($authorities.Count -ne 3 -or @($authorities | Select-Object -Unique).Count -ne 3) { throw 'three distinct egress authorities are required' }
     foreach ($authority in $authorities) { Assert-P3SHA256 -Value ([string]$authority) -Label 'egress authority' }
+    if ((Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Manifest.ssh_trust)) -cne [string]$Manifest.ssh_trust_sha256) {
+        throw 'prerequisite SSH trust canonical identity differs'
+    }
     return $Manifest
 }
 
 function Get-P3PrerequisiteUtc([object]$Value, [string]$Label) {
+    if ($Value -is [DateTime]) {
+        $instant = [DateTime]$Value
+        if ($instant.Kind -ne [DateTimeKind]::Utc) { throw "$Label timestamp differs" }
+        return $instant.ToUniversalTime()
+    }
     $text = [string]$Value
     if ($text -cnotmatch 'Z$') { throw "$Label timestamp differs" }
     try { $instant = [DateTime]::Parse($text, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind) }
@@ -75,35 +85,78 @@ function Assert-P3PrerequisiteFresh([object]$Value, [DateTime]$NowUtc, [string]$
     return $observed
 }
 
+function Get-P3PrerequisiteCloudUnion([object]$CloudObservation) {
+    Import-P3PrerequisiteRuntime
+    Assert-P3ExactProperties $CloudObservation $script:P3CloudFirewallV2Properties 'Cloud Firewall observation'
+    if ([string]$CloudObservation.schema -cne 'home-gateway/p3-prelive-cloud-firewall-observation/v2' -or
+        -not [bool]$CloudObservation.owner_observed -or [bool]$CloudObservation.server_confirmed -or
+        [bool]$CloudObservation.live_mutation_performed) { throw 'Cloud Firewall observation provenance differs' }
+    foreach ($name in @('firewall_resource_sha256','droplet_resource_sha256','management_source_cidr_sha256')) {
+        Assert-P3SHA256 ([string]$CloudObservation.$name) $name
+    }
+    $associations = @($CloudObservation.associations)
+    if ($CloudObservation.associations -isnot [Array] -or $associations.Count -ne 1) { throw 'Cloud Firewall association differs' }
+    Assert-P3ExactProperties $associations[0] @('firewall_resource_sha256','droplet_resource_sha256') 'Cloud Firewall association'
+    if ([string]$associations[0].firewall_resource_sha256 -cne [string]$CloudObservation.firewall_resource_sha256 -or
+        [string]$associations[0].droplet_resource_sha256 -cne [string]$CloudObservation.droplet_resource_sha256) {
+        throw 'Cloud Firewall association differs'
+    }
+    $inbound = @($CloudObservation.inbound_rules)
+    if ($CloudObservation.inbound_rules -isnot [Array] -or $inbound.Count -ne 2) { throw 'Cloud Firewall inbound union differs' }
+    foreach ($rule in $inbound) {
+        Assert-P3ExactProperties $rule @('protocol','port','source_class','source_sha256') 'Cloud Firewall inbound rule'
+        Assert-P3SHA256 ([string]$rule.source_sha256) 'Cloud Firewall inbound source'
+        if (-not (Test-P3ExactJsonInteger $rule.port)) { throw 'Cloud Firewall inbound rule differs' }
+    }
+    $expectedInbound = @(
+        [pscustomobject][ordered]@{protocol='tcp';port=22;source_class='management_ipv4';source_sha256=[string]$CloudObservation.management_source_cidr_sha256},
+        [pscustomobject][ordered]@{protocol='udp';port=38556;source_class='all_ipv4';source_sha256=(Get-P3SHA256Text 'all_ipv4')}
+    )
+    $orderedInbound = @($inbound | Sort-Object -Property protocol,port,source_class,source_sha256)
+    $orderedExpectedInbound = @($expectedInbound | Sort-Object -Property protocol,port,source_class,source_sha256)
+    if ((Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedInbound)) -cne
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedExpectedInbound))) { throw 'Cloud Firewall inbound union differs' }
+    $outbound = @($CloudObservation.outbound_rules)
+    if ($CloudObservation.outbound_rules -isnot [Array] -or $outbound.Count -ne 6) { throw 'Cloud Firewall outbound union differs' }
+    foreach ($rule in $outbound) {
+        Assert-P3ExactProperties $rule @('protocol','destination_class') 'Cloud Firewall outbound rule'
+    }
+    $expectedOutbound = @(
+        foreach ($protocol in @('icmp','tcp','udp')) {
+            foreach ($destination in @('all_ipv4','all_ipv6')) {
+                [pscustomobject][ordered]@{protocol=$protocol;destination_class=$destination}
+            }
+        }
+    )
+    $orderedOutbound = @($outbound | Sort-Object -Property protocol,destination_class)
+    $orderedExpectedOutbound = @($expectedOutbound | Sort-Object -Property protocol,destination_class)
+    if ((Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedOutbound)) -cne
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedExpectedOutbound))) { throw 'Cloud Firewall outbound union differs' }
+    return [pscustomobject][ordered]@{
+        inbound_union_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedInbound)
+        outbound_union_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedOutbound)
+    }
+}
+
 function New-P3PrerequisiteReceipt(
     [object]$Manifest,
     [object]$ServerBaseline,
     [object]$CloudObservation,
     [object[]]$EgressObservations,
+    [string]$NonceSHA256,
     [DateTime]$NowUtc
 ) {
     Import-P3PrerequisiteRuntime
     $null = Test-P3PrerequisiteManifest $Manifest
     $baselineSHA256 = Get-P3ServerBaselineSHA256 -Baseline $ServerBaseline
-    Assert-P3ExactProperties -Value $CloudObservation -ExpectedProperties $script:P3CloudFirewallV2Properties -Label 'Cloud Firewall observation'
-    if ([string]$CloudObservation.schema -cne 'home-gateway/p3-prelive-cloud-firewall-observation/v2' -or
-        -not [bool]$CloudObservation.owner_observed -or [bool]$CloudObservation.server_confirmed -or
-        [bool]$CloudObservation.live_mutation_performed) { throw 'Cloud Firewall observation provenance differs' }
-    foreach ($name in @('firewall_resource_sha256', 'droplet_resource_sha256', 'management_source_cidr_sha256',
-            'inbound_union_sha256', 'outbound_union_sha256')) { Assert-P3SHA256 ([string]$CloudObservation.$name) $name }
-    foreach ($name in @('droplet_association_count', 'tcp_22_management_source_count', 'udp_38556_all_ipv4_count')) {
-        if (-not (Test-P3ExactJsonInteger $CloudObservation.$name) -or [int]$CloudObservation.$name -ne 1) { throw 'Cloud Firewall inbound rule differs' }
-    }
-    foreach ($name in @('udp_ipv6_count', 'extra_inbound_rule_count', 'extra_outbound_rule_count')) {
-        if (-not (Test-P3ExactJsonInteger $CloudObservation.$name) -or [int]$CloudObservation.$name -ne 0) { throw 'Cloud Firewall extra rule differs' }
-    }
-    foreach ($name in @('outbound_icmp_all_count', 'outbound_tcp_all_count', 'outbound_udp_all_count')) {
-        if (-not (Test-P3ExactJsonInteger $CloudObservation.$name) -or [int]$CloudObservation.$name -ne 2) { throw 'Cloud Firewall outbound union differs' }
-    }
+    Assert-P3SHA256 $NonceSHA256 'prerequisite receipt nonce'
+    $cloudUnion = Get-P3PrerequisiteCloudUnion $CloudObservation
     $cloudObserved = Assert-P3PrerequisiteFresh $CloudObservation.observed_at_utc $NowUtc 'Cloud Firewall observation'
-    foreach ($name in @('firewall_resource_sha256', 'droplet_resource_sha256', 'management_source_cidr_sha256',
-            'inbound_union_sha256', 'outbound_union_sha256')) {
+    foreach ($name in @('firewall_resource_sha256', 'droplet_resource_sha256', 'management_source_cidr_sha256')) {
         if ([string]$CloudObservation.$name -cne [string]$Manifest.$name) { throw "Cloud Firewall $name differs" }
+    }
+    foreach ($name in @('inbound_union_sha256','outbound_union_sha256')) {
+        if ([string]$cloudUnion.$name -cne [string]$Manifest.$name) { throw "Cloud Firewall $name differs" }
     }
     $egress = @($EgressObservations)
     if ($egress.Count -ne 3) { throw 'three egress observations are required' }
@@ -129,16 +182,18 @@ function New-P3PrerequisiteReceipt(
         schema='home-gateway/p3-prelive-prerequisite-receipt/v1'
         prerequisite_manifest_sha256=[string]$Manifest.manifest_sha256
         server_baseline=$ServerBaseline;server_baseline_sha256=$baselineSHA256
-        cloud_firewall_identity_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $CloudObservation)
+        cloud_firewall_identity_sha256=Get-P3AgentCanonicalSHA256 $CloudObservation
         firewall_resource_sha256=[string]$CloudObservation.firewall_resource_sha256
         droplet_resource_sha256=[string]$CloudObservation.droplet_resource_sha256
-        inbound_union_sha256=[string]$CloudObservation.inbound_union_sha256
-        outbound_union_sha256=[string]$CloudObservation.outbound_union_sha256
+        inbound_union_sha256=[string]$cloudUnion.inbound_union_sha256
+        outbound_union_sha256=[string]$cloudUnion.outbound_union_sha256
         management_source_cidr_sha256=[string]$CloudObservation.management_source_cidr_sha256
         egress_authority_sha256=@($Manifest.egress_authority_sha256)
-        egress_observation_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $orderedEgress)
+        egress_observation_sha256=Get-P3AgentCanonicalSHA256 $orderedEgress
+        ssh_trust=$Manifest.ssh_trust
         ssh_trust_sha256=[string]$Manifest.ssh_trust_sha256
         payload_sha256=[string]$Manifest.payload_sha256;protocol_sha256=[string]$Manifest.protocol_sha256
+        nonce_sha256=$NonceSHA256
         observed_at_utc=([DateTime]$observedAt).ToUniversalTime().ToString('o')
         owner_observed=$true;server_confirmed=$true;live_mutation_performed=$false;raw_identity_exposed=$false
     }
@@ -163,10 +218,15 @@ function Test-P3PrerequisiteReceipt([object]$Receipt, [object]$Manifest, [DateTi
     foreach ($name in @('server_baseline_sha256', 'cloud_firewall_identity_sha256', 'egress_observation_sha256')) {
         Assert-P3SHA256 ([string]$Receipt.$name) $name
     }
+    Assert-P3SHA256 ([string]$Receipt.nonce_sha256) 'prerequisite receipt nonce'
     if ([string]$Receipt.server_baseline.payload_sha256 -cne [string]$Receipt.payload_sha256 -or
         [string]$Receipt.server_baseline.protocol_sha256 -cne [string]$Receipt.protocol_sha256 -or
         @(Compare-Object -ReferenceObject @($Manifest.egress_authority_sha256) -DifferenceObject @($Receipt.egress_authority_sha256)).Count -ne 0) {
         throw 'prerequisite receipt payload or authority differs'
+    }
+    if ((Get-P3AgentCanonicalSHA256 $Receipt.ssh_trust) -cne (Get-P3AgentCanonicalSHA256 $Manifest.ssh_trust) -or
+        (Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Manifest.ssh_trust)) -cne [string]$Receipt.ssh_trust_sha256) {
+        throw 'prerequisite receipt SSH trust differs'
     }
     return $Receipt
 }
@@ -196,12 +256,67 @@ function Invoke-P3PrerequisiteOwnedObservation(
     return $bodyResult
 }
 
-function New-P3PrerequisitePlan([object]$Manifest) {
+function Test-P3PrerequisiteSshTrust([object]$Trust, [object]$Manifest) {
+    Import-P3PrerequisiteRuntime
+    $properties = @(
+        'schema','ssh_host','ssh_user','known_hosts_path','known_hosts_sha256','host_key_fingerprint_sha256',
+        'git_ssh_agent_path','git_ssh_agent_sha256','git_ssh_add_path','git_ssh_add_sha256',
+        'git_ssh_path','git_ssh_sha256','git_scp_path','git_scp_sha256','public_key_path','public_key_sha256',
+        'public_key_fingerprint_sha256','private_key_path','observer_payload_path','observer_payload_sha256',
+        'observer_protocol_sha256','expected_ipv6_policy_sha256','egress','connect_timeout_seconds',
+        'command_timeout_seconds','maximum_output_bytes','no_write_scope'
+    )
+    Assert-P3ExactProperties $Trust $properties 'prerequisite SSH trust'
+    if ([string]$Trust.schema -cne 'home-gateway/p3-prelive-prerequisite-ssh-trust/v1' -or
+        [string]$Trust.ssh_user -cne 'homegateway' -or [string]::IsNullOrWhiteSpace([string]$Trust.ssh_host) -or
+        -not [bool]$Trust.no_write_scope -or
+        -not (Test-P3ExactJsonInteger $Trust.connect_timeout_seconds) -or [int]$Trust.connect_timeout_seconds -ne 10 -or
+        -not (Test-P3ExactJsonInteger $Trust.command_timeout_seconds) -or [int]$Trust.command_timeout_seconds -ne 30 -or
+        -not (Test-P3ExactJsonInteger $Trust.maximum_output_bytes) -or [int]$Trust.maximum_output_bytes -ne 65536) {
+        throw 'prerequisite SSH trust differs'
+    }
+    foreach ($name in @('known_hosts_sha256','host_key_fingerprint_sha256','git_ssh_agent_sha256',
+            'git_ssh_add_sha256','git_ssh_sha256','git_scp_sha256','public_key_sha256','public_key_fingerprint_sha256',
+            'observer_payload_sha256','observer_protocol_sha256','expected_ipv6_policy_sha256')) {
+        Assert-P3SHA256 ([string]$Trust.$name) $name
+    }
+    foreach ($name in @('known_hosts_path','git_ssh_agent_path','git_ssh_add_path','git_ssh_path','git_scp_path',
+            'public_key_path','private_key_path','observer_payload_path')) {
+        $null = Resolve-P3FixedCleanPath ([string]$Trust.$name) $name
+    }
+    if ([string]$Trust.observer_payload_sha256 -cne [string]$Manifest.payload_sha256 -or
+        [string]$Trust.observer_protocol_sha256 -cne [string]$Manifest.protocol_sha256) {
+        throw 'prerequisite observer trust differs'
+    }
+    $egress = @($Trust.egress)
+    if ($egress.Count -ne 3) { throw 'three distinct egress authorities are required' }
+    $seen = @{}
+    foreach ($entry in $egress) {
+        Assert-P3ExactProperties $entry @('endpoint','authority_sha256') 'prerequisite HTTPS authority'
+        Assert-P3SHA256 ([string]$entry.authority_sha256) 'egress authority'
+        try { $uri = [Uri]([string]$entry.endpoint) } catch { throw 'prerequisite HTTPS authority differs' }
+        if ($uri.Scheme -cne 'https' -or -not $uri.IsAbsoluteUri -or -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+            -not [string]::IsNullOrEmpty($uri.Query) -or -not [string]::IsNullOrEmpty($uri.Fragment) -or
+            [string]$entry.authority_sha256 -cne (Get-P3SHA256Text ($uri.Authority.ToLowerInvariant())) -or
+            $seen.ContainsKey([string]$entry.authority_sha256)) { throw 'prerequisite HTTPS authority differs' }
+        $seen[[string]$entry.authority_sha256] = $true
+    }
+    if (@(Compare-Object -ReferenceObject @($Manifest.egress_authority_sha256 | Sort-Object) `
+            -DifferenceObject @($seen.Keys | Sort-Object)).Count -ne 0) { throw 'egress authority differs' }
+    if ((Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $Trust)) -cne [string]$Manifest.ssh_trust_sha256) {
+        throw 'prerequisite SSH trust canonical identity differs'
+    }
+    return $Trust
+}
+
+function New-P3PrerequisitePlan([object]$Manifest, [string]$Nonce) {
     Import-P3PrerequisiteRuntime
     $null = Test-P3PrerequisiteManifest $Manifest
+    Assert-P3SHA256 $Nonce 'observer nonce'
     $identity = [pscustomobject][ordered]@{
         schema='home-gateway/p3-prelive-prerequisite-plan/v1'
         prerequisite_manifest_sha256=[string]$Manifest.manifest_sha256
+        nonce_sha256=Get-P3SHA256Text $Nonce
         payload_sha256=[string]$Manifest.payload_sha256;protocol_sha256=[string]$Manifest.protocol_sha256
         ssh_trust_sha256=[string]$Manifest.ssh_trust_sha256
         management_source_cidr_sha256=[string]$Manifest.management_source_cidr_sha256
@@ -209,6 +324,8 @@ function New-P3PrerequisitePlan([object]$Manifest) {
         firewall_resource_sha256=[string]$Manifest.firewall_resource_sha256
         droplet_resource_sha256=[string]$Manifest.droplet_resource_sha256
         inbound_union_sha256=[string]$Manifest.inbound_union_sha256;outbound_union_sha256=[string]$Manifest.outbound_union_sha256
+        connect_timeout_seconds=10;command_timeout_seconds=30;maximum_output_bytes=65536
+        no_write_scope=$true
         live_mutation_performed=$false
     }
     $planSHA256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $identity)
@@ -219,14 +336,367 @@ function New-P3PrerequisitePlan([object]$Manifest) {
     return [pscustomobject]$result
 }
 
-function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries) {
+function New-P3PrerequisiteObserverInvocation(
+    [object]$Trust,
+    [object]$AgentReceipt,
+    [string]$Nonce,
+    [byte[]]$Payload
+) {
+    Import-P3PrerequisiteRuntime
+    Assert-P3ExactProperties $Trust @(
+        'git_ssh_path','known_hosts_path','ssh_host','ssh_user','connect_timeout_seconds',
+        'command_timeout_seconds','maximum_output_bytes','observer_payload_sha256',
+        'observer_protocol_sha256','expected_ipv6_policy_sha256'
+    ) 'prerequisite observer trust'
+    Assert-P3ExactProperties $AgentReceipt @('ssh_auth_sock') 'prerequisite observer agent receipt'
+    Assert-P3SHA256 $Nonce 'observer nonce'
+    Assert-P3SHA256 ([string]$Trust.observer_payload_sha256) 'observer payload'
+    Assert-P3SHA256 ([string]$Trust.observer_protocol_sha256) 'observer protocol'
+    Assert-P3SHA256 ([string]$Trust.expected_ipv6_policy_sha256) 'observer IPv6 policy'
+    if ([string]$Trust.ssh_user -cne 'homegateway' -or [string]::IsNullOrWhiteSpace([string]$Trust.ssh_host) -or
+        [string]::IsNullOrWhiteSpace([string]$Trust.git_ssh_path) -or
+        [string]::IsNullOrWhiteSpace([string]$Trust.known_hosts_path) -or
+        [string]::IsNullOrWhiteSpace([string]$AgentReceipt.ssh_auth_sock) -or
+        -not (Test-P3ExactJsonInteger $Trust.connect_timeout_seconds) -or [int]$Trust.connect_timeout_seconds -ne 10 -or
+        -not (Test-P3ExactJsonInteger $Trust.command_timeout_seconds) -or [int]$Trust.command_timeout_seconds -lt 1 -or [int]$Trust.command_timeout_seconds -gt 60 -or
+        -not (Test-P3ExactJsonInteger $Trust.maximum_output_bytes) -or [int]$Trust.maximum_output_bytes -lt 1024 -or [int]$Trust.maximum_output_bytes -gt 65536 -or
+        $null -eq $Payload -or $Payload.Length -lt 1 -or $Payload.Length -gt 524288 -or
+        (Get-P3SHA256Bytes $Payload) -cne [string]$Trust.observer_payload_sha256) {
+        throw 'prerequisite observer invocation differs'
+    }
+    $header = [pscustomobject][ordered]@{
+        expected_ipv6_policy_sha256=[string]$Trust.expected_ipv6_policy_sha256
+        length=$Payload.Length;nonce=$Nonce;payload_sha256=[string]$Trust.observer_payload_sha256
+        protocol_sha256=[string]$Trust.observer_protocol_sha256
+        schema='home-gateway/p3-prelive-observer-frame/v1'
+    }
+    $headerBytes = ConvertTo-P3CanonicalJson $header
+    $stdin = [byte[]]::new($headerBytes.Length + 1 + $Payload.Length)
+    [Array]::Copy($headerBytes, 0, $stdin, 0, $headerBytes.Length)
+    $stdin[$headerBytes.Length] = 10
+    [Array]::Copy($Payload, 0, $stdin, $headerBytes.Length + 1, $Payload.Length)
+    $loader = @'
+import hashlib,json,re,sys
+maximum=526337
+raw=sys.stdin.buffer.read(maximum+1)
+if not raw or len(raw)>maximum or raw.count(b'\n')<1: raise ValueError('observer frame length differs')
+header_raw,payload=raw.split(b'\n',1)
+header=json.loads(header_raw.decode('utf-8','strict'))
+expected={'expected_ipv6_policy_sha256','length','nonce','payload_sha256','protocol_sha256','schema'}
+if not isinstance(header,dict) or set(header)!=expected: raise ValueError('observer frame header differs')
+if header['schema']!='home-gateway/p3-prelive-observer-frame/v1': raise ValueError('observer frame schema differs')
+if not isinstance(header['length'],int) or isinstance(header['length'],bool) or header['length']<1 or header['length']>524288 or len(payload)!=header['length']: raise ValueError('observer frame length differs')
+for name in ('nonce','payload_sha256','protocol_sha256','expected_ipv6_policy_sha256'):
+    if not isinstance(header[name],str) or re.fullmatch('[0-9a-f]{64}',header[name]) is None: raise ValueError('observer frame identity differs')
+if hashlib.sha256(payload).hexdigest()!=header['payload_sha256']: raise ValueError('observer frame hash differs')
+scope={'__name__':'p3_transient_observer','__file__':'<memory>'}
+exec(compile(payload,'<p3-observer>','exec'),scope)
+for name in ('collect_server_snapshot','server_baseline_sha256','_sha'):
+    if name not in scope: raise ValueError('observer payload contract differs')
+scope['own_payload_sha256']=lambda: header['payload_sha256']
+baseline=scope['collect_server_snapshot']({'expected_ipv6_policy_sha256':header['expected_ipv6_policy_sha256']})
+if baseline.get('payload_sha256')!=header['payload_sha256'] or baseline.get('protocol_sha256')!=header['protocol_sha256'] or baseline.get('ipv6_non_mutation') is not True: raise ValueError('observer baseline identity differs')
+receipt={'schema':'home-gateway/p3-prelive-server-observation/v1','server_baseline':baseline,'server_baseline_sha256':scope['server_baseline_sha256'](baseline),'payload_sha256':header['payload_sha256'],'protocol_sha256':header['protocol_sha256'],'nonce_sha256':scope['_sha'](header['nonce'].encode()),'live_mutation_performed':False,'raw_identity_exposed':False}
+sys.stdout.write(json.dumps(receipt,sort_keys=True,separators=(',',':')))
+'@.Trim()
+    $loaderEncoded = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($loader))
+    $remoteCommand = 'sudo -n /usr/bin/python3 -c "import base64;exec(base64.b64decode(''' + $loaderEncoded + '''))"'
+    $arguments = @(
+        '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o',("IdentityAgent=" + [string]$AgentReceipt.ssh_auth_sock),
+        '-o',("UserKnownHostsFile=" + [string]$Trust.known_hosts_path),'-o','StrictHostKeyChecking=yes',
+        '-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-o','ClearAllForwardings=yes',
+        '-o','RequestTTY=no','-o',("ConnectTimeout=" + [string]$Trust.connect_timeout_seconds),'-T',
+        ([string]$Trust.ssh_user + '@' + [string]$Trust.ssh_host),
+        $remoteCommand
+    )
+    return [pscustomobject][ordered]@{
+        executable=[string]$Trust.git_ssh_path;arguments=$arguments;stdin=$stdin
+        timeout_seconds=[int]$Trust.command_timeout_seconds;maximum_output_bytes=[int]$Trust.maximum_output_bytes
+    }
+}
+
+function Test-P3PrerequisiteAgentTrust([object]$Trust, [object]$AgentManifest, [object]$Manifest) {
+    Import-P3PrerequisiteAgent
+    $null = Test-P3PrerequisiteSshTrust $Trust $Manifest
+    $expected = @('git_scp_path','git_scp_sha256','git_ssh_add_path','git_ssh_add_sha256','git_ssh_agent_path','git_ssh_agent_sha256',
+        'git_ssh_path','git_ssh_sha256','manifest_sha256','private_key_path','public_key_fingerprint_sha256','public_key_path')
+    Assert-P3ExactProperties $AgentManifest $expected 'prerequisite agent manifest'
+    if ([string]$AgentManifest.manifest_sha256 -cne [string]$Manifest.manifest_sha256) {
+        throw 'prerequisite agent manifest differs'
+    }
+    foreach ($name in @('git_scp_path','git_scp_sha256','git_ssh_add_path','git_ssh_add_sha256',
+            'git_ssh_agent_path','git_ssh_agent_sha256','git_ssh_path','git_ssh_sha256',
+            'private_key_path','public_key_fingerprint_sha256','public_key_path')) {
+        if ([string]$AgentManifest.$name -cne [string]$Trust.$name) {
+            throw 'prerequisite agent SSH trust differs'
+        }
+    }
+    $boundAgent = [pscustomobject][ordered]@{
+        git_scp_path=[string]$Trust.git_scp_path;git_scp_sha256=[string]$Trust.git_scp_sha256
+        git_ssh_add_path=[string]$Trust.git_ssh_add_path;git_ssh_add_sha256=[string]$Trust.git_ssh_add_sha256
+        git_ssh_agent_path=[string]$Trust.git_ssh_agent_path;git_ssh_agent_sha256=[string]$Trust.git_ssh_agent_sha256
+        git_ssh_path=[string]$Trust.git_ssh_path;git_ssh_sha256=[string]$Trust.git_ssh_sha256
+        manifest_sha256=[string]$Manifest.manifest_sha256;private_key_path=[string]$Trust.private_key_path
+        public_key_fingerprint_sha256=[string]$Trust.public_key_fingerprint_sha256
+        public_key_path=[string]$Trust.public_key_path
+    }
+    if ((Get-P3AgentCanonicalSHA256 $boundAgent) -cne (Get-P3AgentCanonicalSHA256 $AgentManifest)) {
+        throw 'prerequisite agent canonical trust differs'
+    }
+    return $AgentManifest
+}
+
+function Assert-P3PrerequisiteExternalFiles([object]$Trust) {
+    Import-P3PrerequisiteRuntime
+    foreach ($pair in @(
+            @('known_hosts_path','known_hosts_sha256','known-hosts'),
+            @('git_ssh_agent_path','git_ssh_agent_sha256','Git ssh-agent'),
+            @('git_ssh_add_path','git_ssh_add_sha256','Git ssh-add'),
+            @('git_ssh_path','git_ssh_sha256','Git ssh'),
+            @('git_scp_path','git_scp_sha256','Git scp'),
+            @('public_key_path','public_key_sha256','public key'),
+            @('observer_payload_path','observer_payload_sha256','observer payload'))) {
+        $path = [string]$Trust.PSObject.Properties[[string]$pair[0]].Value
+        $expected = [string]$Trust.PSObject.Properties[[string]$pair[1]].Value
+        if ((Get-P3ExactFileSHA256 $path ([string]$pair[2])) -cne $expected) {
+            throw 'prerequisite external file identity differs'
+        }
+    }
+}
+
+function Invoke-P3PrerequisiteSshObservation(
+    [object]$Manifest,
+    [object]$Trust,
+    [object]$AgentReceipt,
+    [string]$Nonce,
+    [scriptblock]$Runner
+) {
+    Import-P3PrerequisiteRuntime
+    $null = Test-P3PrerequisiteSshTrust $Trust $Manifest
+    foreach ($pair in @(
+            @('known_hosts_path','known_hosts_sha256','known-hosts'),
+            @('git_ssh_path','git_ssh_sha256','Git ssh'),
+            @('observer_payload_path','observer_payload_sha256','observer payload'))) {
+        $path = [string]$Trust.PSObject.Properties[[string]$pair[0]].Value
+        $expected = [string]$Trust.PSObject.Properties[[string]$pair[1]].Value
+        $actual = Get-P3ExactFileSHA256 $path ([string]$pair[2])
+        if ($actual -cne $expected) { throw 'prerequisite SSH boundary identity differs' }
+    }
+    $payload = Read-P3BoundedStableBytes ([string]$Trust.observer_payload_path) 524288 'observer payload'
+    $invocation = New-P3PrerequisiteObserverInvocation -Trust ([pscustomobject]@{
+        git_ssh_path=[string]$Trust.git_ssh_path;known_hosts_path=[string]$Trust.known_hosts_path
+        ssh_host=[string]$Trust.ssh_host;ssh_user=[string]$Trust.ssh_user
+        connect_timeout_seconds=[int]$Trust.connect_timeout_seconds
+        command_timeout_seconds=[int]$Trust.command_timeout_seconds
+        maximum_output_bytes=[int]$Trust.maximum_output_bytes
+        observer_payload_sha256=[string]$Trust.observer_payload_sha256
+        observer_protocol_sha256=[string]$Trust.observer_protocol_sha256
+        expected_ipv6_policy_sha256=[string]$Trust.expected_ipv6_policy_sha256
+    }) -AgentReceipt ([pscustomobject]@{ssh_auth_sock=[string]$AgentReceipt.socket}) -Nonce $Nonce -Payload $payload
+    $result = & $Runner $invocation.executable @($invocation.arguments) ([byte[]]$invocation.stdin) `
+        ([int]$invocation.timeout_seconds) ([int]$invocation.maximum_output_bytes)
+    Assert-P3ExactProperties $result @('ExitCode','TimedOut','Oversized','StdOut','StdErr') 'prerequisite SSH result'
+    $stdout = [string]$result.StdOut
+    $stderr = [string]$result.StdErr
+    $stdoutLength = [Text.UTF8Encoding]::new($false).GetByteCount($stdout)
+    $stderrLength = [Text.UTF8Encoding]::new($false).GetByteCount($stderr)
+    if ([bool]$result.TimedOut -or [bool]$result.Oversized -or [int]$result.ExitCode -ne 0 -or
+        $stderrLength -ne 0 -or $stdoutLength -lt 2 -or $stdoutLength -gt [int]$Trust.maximum_output_bytes) {
+        throw 'prerequisite SSH observation failed'
+    }
+    try { $receipt = ConvertFrom-Json -InputObject $stdout -ErrorAction Stop }
+    catch { throw 'prerequisite SSH observation JSON differs' }
+    if ($receipt -is [Array]) { throw 'prerequisite SSH observation JSON differs' }
+    return $receipt
+}
+
+function Invoke-P3PrerequisiteNativeProcess(
+    [string]$Executable,
+    [string[]]$Arguments,
+    [byte[]]$InputBytes,
+    [int]$TimeoutSeconds,
+    [int]$MaximumBytes
+) {
+    if ($null -eq $InputBytes -or $InputBytes.Length -lt 1 -or $InputBytes.Length -gt 526337 -or
+        $TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 60 -or $MaximumBytes -lt 1024 -or $MaximumBytes -gt 65536) {
+        throw 'prerequisite child boundary differs'
+    }
+    $inputPath = [IO.Path]::GetTempFileName()
+    $outputPath = [IO.Path]::GetTempFileName()
+    $errorPath = [IO.Path]::GetTempFileName()
+    $process = $null
+    try {
+        [IO.File]::WriteAllBytes($inputPath, $InputBytes)
+        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WindowStyle Hidden `
+            -RedirectStandardInput $inputPath -RedirectStandardOutput $outputPath -RedirectStandardError $errorPath -PassThru
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $timedOut = $false
+        $oversized = $false
+        while (-not $process.HasExited) {
+            if (([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length -gt $MaximumBytes) {
+                $oversized = $true
+                $process.Kill()
+                break
+            }
+            if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                $timedOut = $true
+                $process.Kill()
+                break
+            }
+            Start-Sleep -Milliseconds 50
+            $process.Refresh()
+        }
+        $process.WaitForExit()
+        $finalLength = ([IO.FileInfo]$outputPath).Length + ([IO.FileInfo]$errorPath).Length
+        if ($finalLength -gt $MaximumBytes) { $oversized = $true }
+        return [pscustomobject][ordered]@{
+            ExitCode=[int]$process.ExitCode;TimedOut=$timedOut;Oversized=$oversized
+            StdOut=$(if($oversized){''}else{[IO.File]::ReadAllText($outputPath,[Text.UTF8Encoding]::new($false,$true))})
+            StdErr=$(if($oversized){''}else{[IO.File]::ReadAllText($errorPath,[Text.UTF8Encoding]::new($false,$true))})
+        }
+    }
+    finally {
+        if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
+        foreach ($path in @($inputPath,$outputPath,$errorPath)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+    }
+}
+
+function Invoke-P3PrerequisiteNativeHttps([object]$Entry, [scriptblock]$ClockRunner) {
+    Import-P3PrerequisiteRuntime
+    Assert-P3ExactProperties $Entry @('endpoint','authority_sha256') 'prerequisite HTTPS authority'
+    $uri = [Uri]([string]$Entry.endpoint)
+    if ($uri.Scheme -cne 'https' -or -not $uri.IsAbsoluteUri -or
+        [string]$Entry.authority_sha256 -cne (Get-P3SHA256Text ($uri.Authority.ToLowerInvariant()))) {
+        throw 'prerequisite HTTPS authority differs'
+    }
+    $handler = [Net.Http.HttpClientHandler]::new()
+    $handler.AllowAutoRedirect = $false
+    $client = [Net.Http.HttpClient]::new($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(10)
+    try {
+        $response = $client.GetAsync($uri,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        try {
+            if ([int]$response.StatusCode -ne 200) { throw 'prerequisite HTTPS status differs' }
+            if ($null -ne $response.Content.Headers.ContentLength -and [long]$response.Content.Headers.ContentLength -gt 128) {
+                throw 'prerequisite HTTPS response exceeds its bound'
+            }
+            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            try {
+                $buffer = [byte[]]::new(129)
+                $count = 0
+                while ($count -le 128) {
+                    $read = $stream.Read($buffer,$count,129-$count)
+                    if ($read -eq 0) { break }
+                    $count += $read
+                    if ($count -gt 128) { throw 'prerequisite HTTPS response exceeds its bound' }
+                }
+            } finally { $stream.Dispose() }
+            $text = [Text.UTF8Encoding]::new($false,$true).GetString($buffer,0,$count).Trim()
+            $address = $null
+            if (-not [Net.IPAddress]::TryParse($text,[ref]$address) -or
+                $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+                throw 'prerequisite HTTPS response differs'
+            }
+            return [pscustomobject][ordered]@{
+                schema='home-gateway/p3-prelive-egress-observation/v1'
+                authority_sha256=[string]$Entry.authority_sha256
+                source_cidr_sha256=Get-P3SHA256Text ($address.ToString() + '/32')
+                observed_at_utc=([DateTime](& $ClockRunner)).ToUniversalTime().ToString('o')
+            }
+        } finally { $response.Dispose() }
+    } finally { $client.Dispose(); $handler.Dispose() }
+}
+
+function Invoke-P3PrerequisiteProductionObservation(
+    [string]$PrerequisiteRoot,
+    [object]$InputObject,
+    [object]$Boundaries
+) {
+    Import-P3PrerequisiteRuntime
+    Import-P3PrerequisiteAgent
+    $required = @('AddRunner','AgentRunner','ClockRunner','DeleteRunner','HttpsRunner','ListRunner','ProcessRunner',
+        'ReceiptRemoveRunner','ReobserveRunner','SocketExistsRunner','SshRunner','StopRunner','WaitRunner')
+    Assert-P3ExactProperties $Boundaries $required 'prerequisite production boundaries'
+    Assert-P3ExactProperties $InputObject @('manifest','ssh_trust','agent_manifest','nonce','expected_plan_sha256','confirmation_challenge') 'prerequisite production input'
+    $manifest = Test-P3PrerequisiteManifest $InputObject.manifest
+    $trust = Test-P3PrerequisiteSshTrust $InputObject.ssh_trust $manifest
+    $agentManifest = Test-P3PrerequisiteAgentTrust $trust $InputObject.agent_manifest $manifest
+    Assert-P3SHA256 ([string]$InputObject.nonce) 'observer nonce'
+    $plan = New-P3PrerequisitePlan $manifest ([string]$InputObject.nonce)
+    if ([string]$InputObject.expected_plan_sha256 -cne [string]$plan.plan_sha256 -or
+        [string]$InputObject.confirmation_challenge -cne [string]$plan.confirmation_challenge) {
+        throw 'prerequisite observation approval differs'
+    }
+    Assert-P3PrerequisiteExternalFiles $trust
+    $null = Initialize-P3PrerequisiteRoot $PrerequisiteRoot $manifest $agentManifest
+    $storedManifest = Get-P3PrerequisiteStoredAgentManifest $PrerequisiteRoot $manifest $agentManifest
+    $started = Start-P3Agent $storedManifest $Boundaries.AgentRunner $Boundaries.AddRunner $Boundaries.StopRunner
+    $protectedCombined = $null
+    $observationBatch = $null
+    try {
+        $combined = Test-P3AgentState $storedManifest $started $Boundaries.ListRunner $Boundaries.ProcessRunner
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes((ConvertTo-Json (ConvertTo-P3AgentCanonicalValue $combined) -Depth 16 -Compress))
+        $receiptPath = Join-Path $PrerequisiteRoot 'agent-receipt.json'
+        $null = Install-P3ExactRuntimeFile $bytes $receiptPath (Get-P3SHA256Bytes $bytes)
+        $reopened = Open-P3BoundedStableJson $receiptPath 65536 $script:P3CombinedAgentReceiptProperties
+        if ((Get-P3AgentCanonicalSHA256 $reopened) -cne (Get-P3AgentCanonicalSHA256 $combined)) {
+            throw 'protected prerequisite agent receipt differs'
+        }
+        $protectedCombined = $reopened
+        $sshObservationCommand = Get-Command Invoke-P3PrerequisiteSshObservation
+        $bodyBoundaries = [pscustomobject]@{
+            ClockRunner=$Boundaries.ClockRunner
+            ObserverRunner={param($m,$t,$a,$n) & $sshObservationCommand $m $t $a $n $Boundaries.SshRunner}.GetNewClosure()
+            HttpsRunner={param($entry) & $Boundaries.HttpsRunner $entry $Boundaries.ClockRunner}.GetNewClosure()
+        }
+        $bodyInput = [pscustomobject][ordered]@{
+            manifest=$manifest;ssh_trust=$trust;nonce=[string]$InputObject.nonce
+            expected_plan_sha256=[string]$InputObject.expected_plan_sha256
+            confirmation_challenge=[string]$InputObject.confirmation_challenge
+        }
+        $observationBatch = Invoke-P3PrerequisiteObserve $bodyInput $bodyBoundaries $protectedCombined
+    }
+    finally {
+        if ($null -eq $protectedCombined) {
+            Stop-P3OwnedAgentEmergency -Manifest $storedManifest -AgentReceipt $started `
+                -DeleteRunner $Boundaries.DeleteRunner -StopRunner $Boundaries.StopRunner `
+                -ProcessRunner $Boundaries.ProcessRunner -WaitRunner $Boundaries.WaitRunner `
+                -ReobserveRunner $Boundaries.ReobserveRunner -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+        } else {
+            $receiptPath = Join-Path $PrerequisiteRoot 'agent-receipt.json'
+            $storedCombined = Open-P3BoundedStableJson $receiptPath 65536 $script:P3CombinedAgentReceiptProperties
+            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $protectedCombined)) {
+                throw 'protected prerequisite agent receipt differs'
+            }
+            $storedReceipt = ConvertTo-P3AgentReceiptFromCombined $storedCombined
+            Stop-P3Agent -Manifest $storedManifest -AgentReceipt $storedReceipt `
+                -DeleteRunner $Boundaries.DeleteRunner -StopRunner $Boundaries.StopRunner `
+                -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
+                -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
+                -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
+            & $Boundaries.ReceiptRemoveRunner $receiptPath
+            if ([IO.File]::Exists($receiptPath)) { throw 'protected prerequisite agent cleanup differs' }
+        }
+    }
+    return Write-P3ProtectedPrerequisiteObservationBatch -Root $PrerequisiteRoot -Manifest $manifest `
+        -ObservationBatch $observationBatch -NonceSHA256 (Get-P3SHA256Text ([string]$InputObject.nonce))
+}
+
+function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries, [object]$AgentReceipt) {
     Import-P3PrerequisiteRuntime
     Assert-P3ExactProperties $Boundaries @('ClockRunner', 'HttpsRunner', 'ObserverRunner') 'prerequisite observe boundaries'
-    Assert-P3ExactProperties $InputObject @('manifest', 'nonce') 'prerequisite observe input'
+    Assert-P3ExactProperties $InputObject @('manifest', 'ssh_trust', 'nonce', 'expected_plan_sha256', 'confirmation_challenge') 'prerequisite observe input'
     $manifest = Test-P3PrerequisiteManifest $InputObject.manifest
+    $trust = Test-P3PrerequisiteSshTrust $InputObject.ssh_trust $manifest
     Assert-P3SHA256 ([string]$InputObject.nonce) 'observer nonce'
+    Assert-P3SHA256 ([string]$InputObject.expected_plan_sha256) 'prerequisite approval plan'
+    $approvedPlan = New-P3PrerequisitePlan $manifest ([string]$InputObject.nonce)
+    if ([string]$InputObject.expected_plan_sha256 -cne [string]$approvedPlan.plan_sha256 -or
+        [string]$InputObject.confirmation_challenge -cne [string]$approvedPlan.confirmation_challenge) {
+        throw 'prerequisite observation approval differs'
+    }
     $now = ([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
-    $server = & $Boundaries.ObserverRunner $manifest ([string]$InputObject.nonce)
+    $server = & $Boundaries.ObserverRunner $manifest $trust $AgentReceipt ([string]$InputObject.nonce)
     $serverProperties = @('schema', 'server_baseline', 'server_baseline_sha256', 'payload_sha256', 'protocol_sha256',
         'nonce_sha256', 'live_mutation_performed', 'raw_identity_exposed')
     Assert-P3ExactProperties $server $serverProperties 'server observation'
@@ -237,8 +707,9 @@ function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries)
         [string]$server.server_baseline_sha256 -cne (Get-P3ServerBaselineSHA256 $server.server_baseline) -or
         [bool]$server.live_mutation_performed -or [bool]$server.raw_identity_exposed) { throw 'server observation differs' }
     $egress = @()
-    foreach ($authority in @($manifest.egress_authority_sha256)) {
-        $item = & $Boundaries.HttpsRunner $authority
+    foreach ($entry in @($trust.egress | Sort-Object -Property authority_sha256)) {
+        $authority = [string]$entry.authority_sha256
+        $item = & $Boundaries.HttpsRunner $entry
         Assert-P3ExactProperties $item $script:P3PrerequisiteEgressProperties 'egress observation'
         if ([string]$item.schema -cne 'home-gateway/p3-prelive-egress-observation/v1' -or
             [string]$item.authority_sha256 -cne [string]$authority -or
@@ -250,6 +721,7 @@ function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries)
     return [pscustomobject][ordered]@{
         schema='home-gateway/p3-prelive-observation-batch/v1';server_baseline=$server.server_baseline
         server_baseline_sha256=[string]$server.server_baseline_sha256;egress=@($egress)
+        nonce_sha256=Get-P3SHA256Text ([string]$InputObject.nonce)
         observed_at_utc=$now.ToString('o');live_mutation_performed=$false;raw_identity_exposed=$false
     }
 }
@@ -318,6 +790,148 @@ function Get-P3PrerequisiteStoredAgentManifest([string]$Root, [object]$Prerequis
     return $stored
 }
 
+function Assert-P3PrerequisiteFileSet([string]$Root, [string[]]$ExpectedNames) {
+    $children = @(Get-ChildItem -LiteralPath $Root -Force -ErrorAction Stop)
+    foreach ($child in $children) {
+        if ($child.Name -notin $ExpectedNames -or $child.PSIsContainer -or
+            ($child.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'foreign prerequisite content is present'
+        }
+    }
+    foreach ($name in $ExpectedNames) {
+        if (-not [IO.File]::Exists((Join-Path $Root $name))) { throw 'required prerequisite file is missing' }
+    }
+}
+
+function Write-P3ProtectedPrerequisiteObservationBatch(
+    [string]$Root,
+    [object]$Manifest,
+    [object]$ObservationBatch,
+    [string]$NonceSHA256
+) {
+    Import-P3PrerequisiteRuntime
+    Assert-P3SHA256 $NonceSHA256 'protected observation nonce'
+    $resolved = Assert-P3PrerequisiteRoot $Root $Manifest
+    $baseFiles = @('.home-gateway-p3-prerequisite-owner.v1','manifest.json','agent-manifest.json')
+    Assert-P3PrerequisiteFileSet $resolved $baseFiles
+    Assert-P3ExactProperties $ObservationBatch $script:P3PrerequisiteObservationBatchProperties 'prerequisite observation batch'
+    if ([string]$ObservationBatch.schema -cne 'home-gateway/p3-prelive-observation-batch/v1' -or
+        [string]$ObservationBatch.nonce_sha256 -cne $NonceSHA256 -or
+        [bool]$ObservationBatch.live_mutation_performed -or [bool]$ObservationBatch.raw_identity_exposed -or
+        (Get-P3ServerBaselineSHA256 $ObservationBatch.server_baseline) -cne [string]$ObservationBatch.server_baseline_sha256) {
+        throw 'prerequisite observation batch differs'
+    }
+    if (@($ObservationBatch.egress).Count -ne 3) { throw 'prerequisite observation egress differs' }
+    $bytes = ConvertTo-P3CanonicalJson $ObservationBatch
+    $hash = Get-P3SHA256Bytes $bytes
+    $path = Join-Path $resolved 'observation-batch.json'
+    $null = Install-P3ExactRuntimeFile $bytes $path $hash
+    $reopened = Open-P3BoundedStableJson $path 262144 $script:P3PrerequisiteObservationBatchProperties
+    if ((Get-P3AgentCanonicalSHA256 $reopened) -cne (Get-P3AgentCanonicalSHA256 $ObservationBatch) -or
+        (Get-P3ExactFileSHA256 $path 'prerequisite observation batch') -cne $hash) {
+        throw 'protected prerequisite observation batch differs'
+    }
+    Assert-P3PrerequisiteFileSet $resolved @($baseFiles + 'observation-batch.json')
+    return $reopened
+}
+
+function Write-P3ProtectedPrerequisiteCloudObservation(
+    [string]$Root,
+    [object]$Manifest,
+    [object]$CloudObservation,
+    [DateTime]$NowUtc
+) {
+    Import-P3PrerequisiteRuntime
+    $resolved = Assert-P3PrerequisiteRoot $Root $Manifest
+    $baseFiles = @('.home-gateway-p3-prerequisite-owner.v1','manifest.json','agent-manifest.json')
+    $allowedBefore = @($baseFiles)
+    if ([IO.File]::Exists((Join-Path $resolved 'observation-batch.json'))) { $allowedBefore += 'observation-batch.json' }
+    Assert-P3PrerequisiteFileSet $resolved $allowedBefore
+    $union = Get-P3PrerequisiteCloudUnion $CloudObservation
+    $null = Assert-P3PrerequisiteFresh $CloudObservation.observed_at_utc $NowUtc 'Cloud Firewall observation'
+    foreach ($name in @('firewall_resource_sha256','droplet_resource_sha256','management_source_cidr_sha256')) {
+        if ([string]$CloudObservation.$name -cne [string]$Manifest.$name) { throw "Cloud Firewall $name differs" }
+    }
+    foreach ($name in @('inbound_union_sha256','outbound_union_sha256')) {
+        if ([string]$union.$name -cne [string]$Manifest.$name) { throw "Cloud Firewall $name differs" }
+    }
+    $bytes = ConvertTo-P3CanonicalJson $CloudObservation
+    $hash = Get-P3SHA256Bytes $bytes
+    $path = Join-Path $resolved 'cloud-observation.json'
+    $null = Install-P3ExactRuntimeFile $bytes $path $hash
+    $reopened = Open-P3BoundedStableJson $path 131072 $script:P3CloudFirewallV2Properties
+    if ((Get-P3AgentCanonicalSHA256 $reopened) -cne (Get-P3AgentCanonicalSHA256 $CloudObservation) -or
+        (Get-P3ExactFileSHA256 $path 'prerequisite Cloud observation') -cne $hash) {
+        throw 'protected prerequisite Cloud observation differs'
+    }
+    Assert-P3PrerequisiteFileSet $resolved @($allowedBefore + 'cloud-observation.json')
+    return $reopened
+}
+
+function Get-P3ProtectedPrerequisiteInputs([string]$Root, [object]$Manifest) {
+    Import-P3PrerequisiteRuntime
+    $resolved = Assert-P3PrerequisiteRoot $Root $Manifest
+    $expected = @('.home-gateway-p3-prerequisite-owner.v1','manifest.json','agent-manifest.json',
+        'observation-batch.json','cloud-observation.json')
+    Assert-P3PrerequisiteFileSet $resolved $expected
+    $batch = Open-P3BoundedStableJson (Join-Path $resolved 'observation-batch.json') 262144 $script:P3PrerequisiteObservationBatchProperties
+    $cloud = Open-P3BoundedStableJson (Join-Path $resolved 'cloud-observation.json') 131072 $script:P3CloudFirewallV2Properties
+    if ((Get-P3ServerBaselineSHA256 $batch.server_baseline) -cne [string]$batch.server_baseline_sha256) {
+        throw 'protected prerequisite observation batch differs'
+    }
+    $null = Get-P3PrerequisiteCloudUnion $cloud
+    return [pscustomobject]@{batch=$batch;cloud=$cloud}
+}
+
+function Write-P3ProtectedPrerequisiteReceipt(
+    [string]$Root,
+    [object]$Manifest,
+    [object]$Receipt,
+    [string]$ExpectedReceiptSHA256,
+    [DateTime]$NowUtc
+) {
+    Import-P3PrerequisiteRuntime
+    Assert-P3SHA256 $ExpectedReceiptSHA256 'expected prerequisite receipt'
+    $resolved = Assert-P3PrerequisiteRoot $Root $Manifest
+    $baseFiles = @('.home-gateway-p3-prerequisite-owner.v1','manifest.json','agent-manifest.json','observation-batch.json','cloud-observation.json')
+    Assert-P3PrerequisiteFileSet $resolved $baseFiles
+    $validated = Test-P3PrerequisiteReceipt $Receipt $Manifest $NowUtc
+    $bytes = ConvertTo-P3CanonicalJson $validated
+    if ((Get-P3SHA256Bytes $bytes) -cne $ExpectedReceiptSHA256) { throw 'expected prerequisite receipt hash differs' }
+    $path = Join-Path $resolved 'prerequisite-receipt.json'
+    $null = Install-P3ExactRuntimeFile $bytes $path $ExpectedReceiptSHA256
+    $reopened = Open-P3BoundedStableJson $path 131072 $script:P3PrerequisiteReceiptProperties
+    if ((Get-P3AgentCanonicalSHA256 $reopened) -cne (Get-P3AgentCanonicalSHA256 $validated) -or
+        (Get-P3ExactFileSHA256 $path 'prerequisite receipt') -cne $ExpectedReceiptSHA256) {
+        throw 'protected prerequisite receipt differs'
+    }
+    $null = Test-P3PrerequisiteReceipt $reopened $Manifest $NowUtc
+    Assert-P3PrerequisiteFileSet $resolved @($baseFiles + 'prerequisite-receipt.json')
+    return $reopened
+}
+
+function Get-P3ProtectedPrerequisiteReceipt(
+    [string]$Root,
+    [object]$Manifest,
+    [string]$ExpectedReceiptSHA256,
+    [DateTime]$NowUtc
+) {
+    Import-P3PrerequisiteRuntime
+    Assert-P3SHA256 $ExpectedReceiptSHA256 'expected prerequisite receipt'
+    $resolved = Assert-P3PrerequisiteRoot $Root $Manifest
+    $baseFiles = @('.home-gateway-p3-prerequisite-owner.v1','manifest.json','agent-manifest.json',
+        'observation-batch.json','cloud-observation.json','prerequisite-receipt.json')
+    Assert-P3PrerequisiteFileSet $resolved $baseFiles
+    $path = Join-Path $resolved 'prerequisite-receipt.json'
+    if ((Get-P3ExactFileSHA256 $path 'prerequisite receipt') -cne $ExpectedReceiptSHA256) {
+        throw 'protected prerequisite receipt hash differs'
+    }
+    $receipt = Open-P3BoundedStableJson $path 131072 $script:P3PrerequisiteReceiptProperties
+    $null = Test-P3PrerequisiteReceipt $receipt $Manifest $NowUtc
+    Assert-P3PrerequisiteFileSet $resolved $baseFiles
+    return $receipt
+}
+
 function Invoke-P3PrerequisiteAgentAction(
     [string]$SelectedAction, [string]$PrerequisiteRoot, [object]$PrerequisiteManifest,
     [object]$InputObject, [object]$Boundaries
@@ -370,21 +984,54 @@ function Invoke-P3PrerequisiteAgentAction(
 
 function Invoke-P3PrerequisiteAction([string]$SelectedAction, [object]$InputObject, [object]$Boundaries) {
     switch ($SelectedAction) {
-        'Plan' { return New-P3PrerequisitePlan $InputObject }
+        'Plan' {
+            Import-P3PrerequisiteRuntime
+            Assert-P3ExactProperties $InputObject @('manifest','nonce') 'prerequisite plan input'
+            return New-P3PrerequisitePlan $InputObject.manifest ([string]$InputObject.nonce)
+        }
         'Observe' {
+            Import-P3PrerequisiteRuntime
+            Assert-P3ExactProperties $InputObject @('manifest', 'ssh_trust', 'nonce', 'expected_plan_sha256', 'confirmation_challenge') 'prerequisite observe input'
+            $null = Test-P3PrerequisiteSshTrust $InputObject.ssh_trust $InputObject.manifest
+            $approvedPlan = New-P3PrerequisitePlan $InputObject.manifest ([string]$InputObject.nonce)
+            if ([string]$InputObject.expected_plan_sha256 -cne [string]$approvedPlan.plan_sha256 -or
+                [string]$InputObject.confirmation_challenge -cne [string]$approvedPlan.confirmation_challenge) {
+                throw 'prerequisite observation approval differs'
+            }
             $bodyBoundaries = [pscustomobject]@{
                 ClockRunner=$Boundaries.ClockRunner;HttpsRunner=$Boundaries.HttpsRunner;ObserverRunner=$Boundaries.ObserverRunner
             }
             $observeCommand = Get-Command Invoke-P3PrerequisiteObserve
             return Invoke-P3PrerequisiteOwnedObservation -StartRunner $Boundaries.StartRunner `
-                -ValidateRunner $Boundaries.ValidateRunner -ObserveRunner { param($receipt) & $observeCommand $InputObject $bodyBoundaries }.GetNewClosure() `
+                -ValidateRunner $Boundaries.ValidateRunner -ObserveRunner { param($receipt) & $observeCommand $InputObject $bodyBoundaries $receipt }.GetNewClosure() `
                 -StopRunner $Boundaries.StopRunner
         }
-        'Assemble' {
-            return New-P3PrerequisiteReceipt -Manifest $InputObject.manifest -ServerBaseline $InputObject.server_baseline `
-                -CloudObservation $InputObject.cloud_firewall -EgressObservations @($InputObject.egress) -NowUtc ([DateTime](& $Boundaries.ClockRunner))
+        'RecordCloudFirewall' {
+            Import-P3PrerequisiteRuntime
+            Assert-P3ExactProperties $InputObject @('manifest','cloud_firewall') 'prerequisite Cloud input'
+            Assert-P3ExactProperties $Boundaries @('ClockRunner','PrerequisiteRoot') 'prerequisite Cloud boundaries'
+            return Write-P3ProtectedPrerequisiteCloudObservation $Boundaries.PrerequisiteRoot $InputObject.manifest `
+                $InputObject.cloud_firewall ([DateTime](& $Boundaries.ClockRunner))
         }
-        'Validate' { return Test-P3PrerequisiteReceipt $InputObject.receipt $InputObject.manifest ([DateTime](& $Boundaries.ClockRunner)) }
+        'Assemble' {
+            Import-P3PrerequisiteRuntime
+            Assert-P3ExactProperties $InputObject @('manifest','expected_receipt_sha256') 'prerequisite assemble input'
+            Assert-P3ExactProperties $Boundaries @('ClockRunner','PrerequisiteRoot') 'prerequisite assemble boundaries'
+            $now = [DateTime](& $Boundaries.ClockRunner)
+            $protected = Get-P3ProtectedPrerequisiteInputs $Boundaries.PrerequisiteRoot $InputObject.manifest
+            $receipt = New-P3PrerequisiteReceipt -Manifest $InputObject.manifest -ServerBaseline $protected.batch.server_baseline `
+                -CloudObservation $protected.cloud -EgressObservations @($protected.batch.egress) `
+                -NonceSHA256 ([string]$protected.batch.nonce_sha256) -NowUtc $now
+            return Write-P3ProtectedPrerequisiteReceipt $Boundaries.PrerequisiteRoot $InputObject.manifest $receipt `
+                ([string]$InputObject.expected_receipt_sha256) $now
+        }
+        'Validate' {
+            Import-P3PrerequisiteRuntime
+            Assert-P3ExactProperties $InputObject @('manifest','expected_receipt_sha256') 'prerequisite validate input'
+            Assert-P3ExactProperties $Boundaries @('ClockRunner','PrerequisiteRoot') 'prerequisite validate boundaries'
+            return Get-P3ProtectedPrerequisiteReceipt $Boundaries.PrerequisiteRoot $InputObject.manifest `
+                ([string]$InputObject.expected_receipt_sha256) ([DateTime](& $Boundaries.ClockRunner))
+        }
         { $_ -in @('AgentPlan', 'AgentStart', 'AgentValidate', 'AgentStop') } {
             if ($null -eq $Boundaries -or $Boundaries.PSObject.Properties.Name -notcontains 'PrerequisiteRoot' -or
                 $Boundaries.PSObject.Properties.Name -notcontains 'PrerequisiteManifest') { throw 'prerequisite protected agent boundary differs' }
@@ -399,7 +1046,33 @@ function Invoke-P3PrerequisiteAction([string]$SelectedAction, [object]$InputObje
 if (-not [string]::IsNullOrEmpty($Action)) {
     $inputObject = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd()) -ErrorAction Stop
     switch ($Action) {
-        'Plan' { New-P3PrerequisitePlan $inputObject | ConvertTo-Json -Depth 20 -Compress }
+        'Plan' {
+            Assert-P3ExactProperties $inputObject @('manifest','nonce') 'prerequisite plan input'
+            New-P3PrerequisitePlan $inputObject.manifest ([string]$inputObject.nonce) | ConvertTo-Json -Depth 20 -Compress
+        }
+        'Observe' {
+            $candidateAgentManifest = $inputObject.agent_manifest
+            $productionBoundaries = [pscustomobject]@{
+                AgentRunner={param($Executable)& $Executable -s}
+                AddRunner={param($KeyPath)& $candidateAgentManifest.git_ssh_add_path $KeyPath}.GetNewClosure()
+                StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
+                ListRunner={param($Executable)& $Executable -l -E sha256}
+                ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}
+                DeleteRunner={& $candidateAgentManifest.git_ssh_add_path -D}.GetNewClosure()
+                WaitRunner={param($ProcessId)Wait-P3BoundedAgentExit -ProcessId $ProcessId `
+                    -ObserveRunner {param($OwnedProcessId)@(Get-Process -Id $OwnedProcessId -ErrorAction SilentlyContinue)} `
+                    -SleepRunner {param($Milliseconds)Start-Sleep -Milliseconds $Milliseconds} -ClockRunner {[DateTime]::UtcNow}}
+                ReobserveRunner={param($ProcessId)@(Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)}
+                SocketExistsRunner={param($Path)[IO.File]::Exists($Path)}
+                ReceiptRemoveRunner={param($Path)[IO.File]::Delete($Path)}
+                SshRunner={param($Executable,$Arguments,$InputBytes,$TimeoutSeconds,$MaximumBytes)
+                    Invoke-P3PrerequisiteNativeProcess $Executable $Arguments $InputBytes $TimeoutSeconds $MaximumBytes}
+                HttpsRunner={param($Entry,$ClockRunner)Invoke-P3PrerequisiteNativeHttps $Entry $ClockRunner}
+                ClockRunner={[DateTime]::UtcNow}
+            }
+            Invoke-P3PrerequisiteProductionObservation -PrerequisiteRoot $PrerequisiteRoot `
+                -InputObject $inputObject -Boundaries $productionBoundaries | ConvertTo-Json -Depth 30 -Compress
+        }
         { $_ -in @('AgentPlan', 'AgentStart', 'AgentValidate', 'AgentStop') } {
             Assert-P3ExactProperties $inputObject @('action_input','prerequisite_manifest') 'prerequisite agent action input'
             $actionInput = $inputObject.action_input
@@ -420,14 +1093,22 @@ if (-not [string]::IsNullOrEmpty($Action)) {
             }
             Invoke-P3PrerequisiteAction $Action $actionInput $agentBoundaries | ConvertTo-Json -Depth 20 -Compress
         }
+        'RecordCloudFirewall' {
+            Invoke-P3PrerequisiteAction RecordCloudFirewall $inputObject ([pscustomobject]@{
+                ClockRunner={[DateTime]::UtcNow};PrerequisiteRoot=$PrerequisiteRoot
+            }) | ConvertTo-Json -Depth 30 -Compress
+        }
         'Assemble' {
-            New-P3PrerequisiteReceipt -Manifest $inputObject.manifest -ServerBaseline $inputObject.server_baseline `
-                -CloudObservation $inputObject.cloud_firewall -EgressObservations @($inputObject.egress) -NowUtc ([DateTime]::UtcNow) |
-                ConvertTo-Json -Depth 20 -Compress
+            if ([string]$inputObject.expected_receipt_sha256 -cne $ExpectedReceiptSHA256) { throw 'expected prerequisite receipt differs' }
+            Invoke-P3PrerequisiteAction Assemble $inputObject ([pscustomobject]@{
+                ClockRunner={[DateTime]::UtcNow};PrerequisiteRoot=$PrerequisiteRoot
+            }) | ConvertTo-Json -Depth 30 -Compress
         }
         'Validate' {
-            Test-P3PrerequisiteReceipt -Receipt $inputObject.receipt -Manifest $inputObject.manifest -NowUtc ([DateTime]::UtcNow) |
-                ConvertTo-Json -Depth 20 -Compress
+            if ([string]$inputObject.expected_receipt_sha256 -cne $ExpectedReceiptSHA256) { throw 'expected prerequisite receipt differs' }
+            Invoke-P3PrerequisiteAction Validate $inputObject ([pscustomobject]@{
+                ClockRunner={[DateTime]::UtcNow};PrerequisiteRoot=$PrerequisiteRoot
+            }) | ConvertTo-Json -Depth 30 -Compress
         }
         default { throw 'prerequisite action requires the approved injected execution boundary' }
     }

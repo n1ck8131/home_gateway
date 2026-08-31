@@ -10,18 +10,27 @@ Describe 'P3 pre-live prerequisite boundary' {
         function New-PrerequisiteFixture {
             $now = [DateTime]::Parse('2026-08-31T12:00:00Z').ToUniversalTime()
             $baseline = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\fixtures\p3\server-baseline-v2.json') -Raw | ConvertFrom-Json
-            $authorities = @(('7' * 64), ('8' * 64), ('9' * 64))
+            $endpoints = @('https://one.example/ip','https://two.example/ip','https://three.example/ip')
+            $authorities = @($endpoints | ForEach-Object { Get-P3SHA256Text (([Uri]$_).Authority.ToLowerInvariant()) })
+            $allIpv4 = Get-P3SHA256Text 'all_ipv4'
             $cloud = [pscustomobject][ordered]@{
                 schema='home-gateway/p3-prelive-cloud-firewall-observation/v2'
                 firewall_resource_sha256=('1' * 64);droplet_resource_sha256=('2' * 64)
-                droplet_association_count=1;management_source_cidr_sha256=('3' * 64)
-                tcp_22_management_source_count=1;udp_38556_all_ipv4_count=1;udp_ipv6_count=0
-                extra_inbound_rule_count=0;inbound_union_sha256=('4' * 64)
-                outbound_union_sha256=('5' * 64);outbound_icmp_all_count=2
-                outbound_tcp_all_count=2;outbound_udp_all_count=2;extra_outbound_rule_count=0
+                associations=@([pscustomobject][ordered]@{firewall_resource_sha256=('1'*64);droplet_resource_sha256=('2'*64)})
+                management_source_cidr_sha256=('3' * 64)
+                inbound_rules=@(
+                    [pscustomobject][ordered]@{protocol='tcp';port=22;source_class='management_ipv4';source_sha256=('3'*64)},
+                    [pscustomobject][ordered]@{protocol='udp';port=38556;source_class='all_ipv4';source_sha256=$allIpv4}
+                )
+                outbound_rules=@(
+                    foreach($protocol in @('icmp','tcp','udp')){foreach($destination in @('all_ipv4','all_ipv6')){
+                        [pscustomobject][ordered]@{protocol=$protocol;destination_class=$destination}
+                    }}
+                )
                 observed_at_utc=$now.ToString('o');owner_observed=$true;server_confirmed=$false
                 live_mutation_performed=$false
             }
+            $cloudUnion = Get-P3PrerequisiteCloudUnion $cloud
             $egress = foreach ($index in 0..2) {
                 [pscustomobject][ordered]@{
                     schema='home-gateway/p3-prelive-egress-observation/v1'
@@ -29,15 +38,35 @@ Describe 'P3 pre-live prerequisite boundary' {
                     observed_at_utc=$now.AddSeconds($index).ToString('o')
                 }
             }
+            $trust = [pscustomobject][ordered]@{
+                schema='home-gateway/p3-prelive-prerequisite-ssh-trust/v1'
+                ssh_host='example.invalid';ssh_user='homegateway';known_hosts_path='C:\synthetic\known_hosts'
+                known_hosts_sha256=('1' * 64);host_key_fingerprint_sha256=('2' * 64)
+                git_ssh_agent_path='C:\synthetic\ssh-agent.exe';git_ssh_agent_sha256=('3' * 64)
+                git_ssh_add_path='C:\synthetic\ssh-add.exe';git_ssh_add_sha256=('4' * 64)
+                git_ssh_path='C:\synthetic\ssh.exe';git_ssh_sha256=('5' * 64)
+                git_scp_path='C:\synthetic\scp.exe';git_scp_sha256=('6' * 64)
+                public_key_path='C:\synthetic\operator.pub';public_key_sha256=('0' * 64);public_key_fingerprint_sha256=('7' * 64)
+                private_key_path='C:\synthetic\operator'
+                observer_payload_path='C:\synthetic\p3-amnezia-peer-guard.py'
+                observer_payload_sha256=[string]$baseline.payload_sha256
+                observer_protocol_sha256=[string]$baseline.protocol_sha256
+                expected_ipv6_policy_sha256=[string]$baseline.ipv6_policy_sha256
+                egress=@(for($i=0;$i -lt 3;$i++){[pscustomobject][ordered]@{endpoint=$endpoints[$i];authority_sha256=$authorities[$i]}})
+                connect_timeout_seconds=10;command_timeout_seconds=30;maximum_output_bytes=65536
+                no_write_scope=$true
+            }
             $manifest = [pscustomobject][ordered]@{
                 schema='home-gateway/p3-prelive-prerequisite-manifest/v1'
                 manifest_sha256=('a' * 64);payload_sha256=[string]$baseline.payload_sha256
-                protocol_sha256=[string]$baseline.protocol_sha256;ssh_trust_sha256=('b' * 64)
+                protocol_sha256=[string]$baseline.protocol_sha256
+                ssh_trust=$trust
+                ssh_trust_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $trust)
                 management_source_cidr_sha256=('3' * 64);egress_authority_sha256=$authorities
                 firewall_resource_sha256=('1' * 64);droplet_resource_sha256=('2' * 64)
-                inbound_union_sha256=('4' * 64);outbound_union_sha256=('5' * 64)
+                inbound_union_sha256=$cloudUnion.inbound_union_sha256;outbound_union_sha256=$cloudUnion.outbound_union_sha256
             }
-            return [pscustomobject]@{ Now=$now;Baseline=$baseline;Cloud=$cloud;Egress=@($egress);Manifest=$manifest }
+            return [pscustomobject]@{ Now=$now;Baseline=$baseline;Cloud=$cloud;Egress=@($egress);Manifest=$manifest;SshTrust=$trust }
         }
 
         function New-PrerequisiteAgentFixture([string]$Root, [object]$PrerequisiteManifest) {
@@ -60,12 +89,46 @@ Describe 'P3 pre-live prerequisite boundary' {
             }
             return [pscustomobject]@{ Manifest=$agentManifest;Fingerprint=$fingerprint;Root=(Join-Path $Root 'protected') }
         }
+
+        function New-ProductionPrerequisiteFixture([string]$Root) {
+            $f = New-PrerequisiteFixture
+            $agent = New-PrerequisiteAgentFixture (Join-Path $Root 'agent') $f.Manifest
+            $knownHosts = Join-Path $Root 'known_hosts'
+            $observerPayload = Join-Path $Root 'observer.py'
+            [IO.Directory]::CreateDirectory($Root) | Out-Null
+            [IO.File]::WriteAllText($knownHosts, 'synthetic pinned ED25519 host', [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($observerPayload, 'synthetic observer payload', [Text.UTF8Encoding]::new($false))
+            $f.Baseline.payload_sha256 = (Get-FileHash $observerPayload).Hash.ToLowerInvariant()
+            $endpoints = @('https://one.example/ip','https://two.example/ip','https://three.example/ip')
+            $authorities = @($endpoints | ForEach-Object { Get-P3SHA256Text (([Uri]$_).Authority.ToLowerInvariant()) })
+            $trust = [pscustomobject][ordered]@{
+                schema='home-gateway/p3-prelive-prerequisite-ssh-trust/v1'
+                ssh_host='example.invalid';ssh_user='homegateway';known_hosts_path=$knownHosts
+                known_hosts_sha256=(Get-FileHash $knownHosts).Hash.ToLowerInvariant();host_key_fingerprint_sha256=('2' * 64)
+                git_ssh_agent_path=$agent.Manifest.git_ssh_agent_path;git_ssh_agent_sha256=$agent.Manifest.git_ssh_agent_sha256
+                git_ssh_add_path=$agent.Manifest.git_ssh_add_path;git_ssh_add_sha256=$agent.Manifest.git_ssh_add_sha256
+                git_ssh_path=$agent.Manifest.git_ssh_path;git_ssh_sha256=$agent.Manifest.git_ssh_sha256
+                git_scp_path=$agent.Manifest.git_scp_path;git_scp_sha256=$agent.Manifest.git_scp_sha256
+                public_key_path=$agent.Manifest.public_key_path;public_key_sha256=(Get-FileHash $agent.Manifest.public_key_path).Hash.ToLowerInvariant()
+                public_key_fingerprint_sha256=$agent.Manifest.public_key_fingerprint_sha256
+                private_key_path=$agent.Manifest.private_key_path;observer_payload_path=$observerPayload
+                observer_payload_sha256=$f.Baseline.payload_sha256;observer_protocol_sha256=$f.Manifest.protocol_sha256
+                expected_ipv6_policy_sha256=$f.Baseline.ipv6_policy_sha256
+                egress=@(for($i=0;$i -lt 3;$i++){[pscustomobject][ordered]@{endpoint=$endpoints[$i];authority_sha256=$authorities[$i]}})
+                connect_timeout_seconds=10;command_timeout_seconds=30;maximum_output_bytes=65536;no_write_scope=$true
+            }
+            $f.Manifest.payload_sha256=$trust.observer_payload_sha256
+            $f.Manifest.egress_authority_sha256=$authorities
+            $f.Manifest.ssh_trust=$trust
+            $f.Manifest.ssh_trust_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $trust)
+            return [pscustomobject]@{Fixture=$f;Agent=$agent;Trust=$trust}
+        }
     }
 
     It 'assembles and validates one exact fresh prerequisite receipt' {
         $f = New-PrerequisiteFixture
         $receipt = New-P3PrerequisiteReceipt -Manifest $f.Manifest -ServerBaseline $f.Baseline `
-            -CloudObservation $f.Cloud -EgressObservations $f.Egress -NowUtc $f.Now.AddSeconds(5)
+            -CloudObservation $f.Cloud -EgressObservations $f.Egress -NonceSHA256 (Get-P3SHA256Text ('c' * 64)) -NowUtc $f.Now.AddSeconds(5)
         $receipt.schema | Should -BeExactly 'home-gateway/p3-prelive-prerequisite-receipt/v1'
         $receipt.server_baseline_sha256 | Should -BeExactly (Get-P3ServerBaselineSHA256 $f.Baseline)
         $receipt.management_source_cidr_sha256 | Should -BeExactly ('3' * 64)
@@ -78,8 +141,18 @@ Describe 'P3 pre-live prerequisite boundary' {
         $f = New-PrerequisiteFixture
         $f.Egress[1].source_cidr_sha256 = $f.Cloud.droplet_resource_sha256
         { New-P3PrerequisiteReceipt -Manifest $f.Manifest -ServerBaseline $f.Baseline `
-                -CloudObservation $f.Cloud -EgressObservations $f.Egress -NowUtc $f.Now.AddSeconds(5) } |
+                -CloudObservation $f.Cloud -EgressObservations $f.Egress -NonceSHA256 (Get-P3SHA256Text ('c' * 64)) -NowUtc $f.Now.AddSeconds(5) } |
             Should -Throw '*management source*'
+    }
+
+    It 'recomputes semantic Cloud unions and rejects an added caller rule' {
+        $f = New-PrerequisiteFixture
+        $f.Cloud.inbound_rules += [pscustomobject][ordered]@{
+            protocol='tcp';port=443;source_class='all_ipv4';source_sha256=(Get-P3SHA256Text 'all_ipv4')
+        }
+        { New-P3PrerequisiteReceipt -Manifest $f.Manifest -ServerBaseline $f.Baseline `
+                -CloudObservation $f.Cloud -EgressObservations $f.Egress -NonceSHA256 (Get-P3SHA256Text ('c' * 64)) -NowUtc $f.Now.AddSeconds(5) } |
+            Should -Throw '*Cloud Firewall inbound*'
     }
 
     It 'always tears down the prerequisite agent and makes stop failure terminal' {
@@ -98,25 +171,26 @@ Describe 'P3 pre-live prerequisite boundary' {
 
     It 'routes Plan and Observe through the fixed injected action switch' {
         $f = New-PrerequisiteFixture
-        $plan = Invoke-P3PrerequisiteAction -SelectedAction Plan -InputObject $f.Manifest -Boundaries ([pscustomobject]@{})
+        $plan = Invoke-P3PrerequisiteAction -SelectedAction Plan -InputObject ([pscustomobject]@{manifest=$f.Manifest;nonce=('c' * 64)}) -Boundaries ([pscustomobject]@{})
         $plan.confirmation_challenge | Should -Match '^P3-PRELIVE-PREREQUISITE-[0-9A-F]{16}$'
         $baselineSHA256 = Get-P3ServerBaselineSHA256 $f.Baseline
         $nonceSHA256 = Get-P3SHA256Text ('c' * 64)
         $calls = [Collections.Generic.List[string]]::new()
         $observed = Invoke-P3PrerequisiteAction -SelectedAction Observe -InputObject ([pscustomobject]@{
-            manifest=$f.Manifest;nonce=('c' * 64)
+            manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c' * 64);expected_plan_sha256=$plan.plan_sha256
+            confirmation_challenge=$plan.confirmation_challenge
         }) -Boundaries ([pscustomobject]@{
             StartRunner={ $calls.Add('start'); [pscustomobject]@{owned=$true} }.GetNewClosure()
             ValidateRunner={ param($receipt) $calls.Add('validate'); $receipt }.GetNewClosure()
             StopRunner={ param($receipt) $calls.Add('stop') }.GetNewClosure()
-            ObserverRunner={ param($manifest,$nonce) $calls.Add('observer'); [pscustomobject]@{
+            ObserverRunner={ param($manifest,$trust,$agentReceipt,$nonce) $calls.Add('observer'); [pscustomobject]@{
                 schema='home-gateway/p3-prelive-server-observation/v1';server_baseline=$f.Baseline
                 server_baseline_sha256=$baselineSHA256;payload_sha256=$f.Manifest.payload_sha256
                 protocol_sha256=$f.Manifest.protocol_sha256;nonce_sha256=$nonceSHA256
                 live_mutation_performed=$false;raw_identity_exposed=$false
             } }.GetNewClosure()
-            HttpsRunner={ param($authority) $calls.Add('https'); [pscustomobject][ordered]@{
-                schema='home-gateway/p3-prelive-egress-observation/v1';authority_sha256=$authority
+            HttpsRunner={ param($entry) $calls.Add('https'); [pscustomobject][ordered]@{
+                schema='home-gateway/p3-prelive-egress-observation/v1';authority_sha256=$entry.authority_sha256
                 source_cidr_sha256=$f.Manifest.management_source_cidr_sha256;observed_at_utc=$f.Now.ToString('o')
             } }.GetNewClosure()
             ClockRunner={ $f.Now.AddSeconds(5) }.GetNewClosure()
@@ -157,19 +231,147 @@ Describe 'P3 pre-live prerequisite boundary' {
     It 'tears down failed Observe actions and blocks on stop failure' {
         $f = New-PrerequisiteFixture
         $calls = [Collections.Generic.List[string]]::new()
-        $observeInput = [pscustomobject]@{manifest=$f.Manifest;nonce=('c' * 64)}
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $observeInput = [pscustomobject]@{
+            manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c' * 64);expected_plan_sha256=$plan.plan_sha256
+            confirmation_challenge=$plan.confirmation_challenge
+        }
         $boundaries = [pscustomobject]@{
             StartRunner={ $calls.Add('start'); [pscustomobject]@{owned=$true} }.GetNewClosure()
             ValidateRunner={param($receipt) $calls.Add('validate');$receipt}.GetNewClosure()
             StopRunner={param($receipt) $calls.Add('stop')}.GetNewClosure()
-            ObserverRunner={param($manifest,$nonce) throw 'synthetic observe failure'}
-            HttpsRunner={param($authority) throw 'not reached'};ClockRunner={$f.Now}.GetNewClosure()
+            ObserverRunner={param($manifest,$trust,$agentReceipt,$nonce) throw 'synthetic observe failure'}
+            HttpsRunner={param($entry) throw 'not reached'};ClockRunner={$f.Now}.GetNewClosure()
         }
         { Invoke-P3PrerequisiteAction Observe $observeInput $boundaries } | Should -Throw '*synthetic observe failure*'
         $calls | Should -BeExactly @('start','validate','stop')
 
-        $boundaries.ObserverRunner = {param($manifest,$nonce) throw 'body is not material'}
+        $boundaries.ObserverRunner = {param($manifest,$trust,$agentReceipt,$nonce) throw 'body is not material'}
         $boundaries.StopRunner = {param($receipt) throw 'synthetic stop failure'}
         { Invoke-P3PrerequisiteAction Observe $observeInput $boundaries } | Should -Throw '*stop failure*'
+    }
+
+    It 'rejects an Observe approval mismatch before any owned or network boundary' {
+        $f = New-PrerequisiteFixture
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $calls = [Collections.Generic.List[string]]::new()
+        $observeApprovalInput = [pscustomobject]@{
+            manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c' * 64);expected_plan_sha256=('0' * 64)
+            confirmation_challenge=$plan.confirmation_challenge
+        }
+        $boundaries = [pscustomobject]@{
+            StartRunner={ $calls.Add('start') }.GetNewClosure()
+            ValidateRunner={ $calls.Add('validate') }.GetNewClosure()
+            StopRunner={ $calls.Add('stop') }.GetNewClosure()
+            ObserverRunner={ $calls.Add('ssh') }.GetNewClosure()
+            HttpsRunner={ $calls.Add('https') }.GetNewClosure()
+            ClockRunner={ $f.Now }.GetNewClosure()
+        }
+        { Invoke-P3PrerequisiteAction Observe $observeApprovalInput $boundaries } | Should -Throw '*approval*'
+        $calls.Count | Should -Be 0
+    }
+
+    It 'builds the exact no-write SSH invocation and attested stdin frame' {
+        $f = New-PrerequisiteFixture
+        $trust = [pscustomobject]@{
+            git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts'
+            ssh_host='example.invalid';ssh_user='homegateway';connect_timeout_seconds=10
+            command_timeout_seconds=30;maximum_output_bytes=65536
+            observer_payload_sha256=(Get-P3SHA256Text 'synthetic-observer')
+            observer_protocol_sha256=$f.Manifest.protocol_sha256
+            expected_ipv6_policy_sha256=('d' * 64)
+        }
+        $agent = [pscustomobject]@{ ssh_auth_sock='C:\synthetic\agent.sock' }
+        $invocation = New-P3PrerequisiteObserverInvocation -Trust $trust -AgentReceipt $agent -Nonce ('c' * 64) `
+            -Payload ([Text.UTF8Encoding]::new($false).GetBytes('synthetic-observer'))
+        $invocation.arguments | Should -Contain 'BatchMode=yes'
+        $invocation.arguments | Should -Contain 'IdentitiesOnly=yes'
+        $invocation.arguments | Should -Contain 'StrictHostKeyChecking=yes'
+        $invocation.arguments | Should -Contain 'PasswordAuthentication=no'
+        $invocation.arguments | Should -Contain 'KbdInteractiveAuthentication=no'
+        $invocation.arguments | Should -Contain 'ClearAllForwardings=yes'
+        $invocation.arguments | Should -Contain '-T'
+        $invocation.arguments[-2] | Should -BeExactly 'homegateway@example.invalid'
+        $invocation.arguments[-1] | Should -Match '^sudo -n /usr/bin/python3 -c '
+        $invocation.stdin.Length | Should -BeGreaterThan 18
+        $invocation.timeout_seconds | Should -Be 30
+        $invocation.maximum_output_bytes | Should -Be 65536
+    }
+
+    It 'executes the production owned Observe switch and always removes its exact agent' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'production-observe')
+        $f = $p.Fixture
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64)
+        $calls = [Collections.Generic.List[string]]::new()
+        $baselineSHA256 = Get-P3ServerBaselineSHA256 $f.Baseline
+        $serverReceipt = [pscustomobject]@{
+            schema='home-gateway/p3-prelive-server-observation/v1';server_baseline=$f.Baseline
+            server_baseline_sha256=$baselineSHA256;payload_sha256=$f.Manifest.payload_sha256
+            protocol_sha256=$f.Manifest.protocol_sha256;nonce_sha256=Get-P3SHA256Text ('c' * 64)
+            live_mutation_performed=$false;raw_identity_exposed=$false
+        }
+        $boundaries = [pscustomobject]@{
+            AgentRunner={param($exe)$calls.Add('start');"SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4343; export SSH_AGENT_PID;"}.GetNewClosure()
+            AddRunner={param($path)$calls.Add('add')}.GetNewClosure()
+            ListRunner={param($exe)"256 $($p.Agent.Fingerprint) p3 (ED25519)"}.GetNewClosure()
+            ProcessRunner={param($pid)[pscustomobject]@{Id=$pid;Path=$p.Agent.Manifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow}}.GetNewClosure()
+            DeleteRunner={$calls.Add('delete')}.GetNewClosure();StopRunner={param($pid)$calls.Add('stop')}.GetNewClosure()
+            WaitRunner={param($pid)$calls.Add('wait')}.GetNewClosure();ReobserveRunner={param($pid)$calls.Add('reobserve');@()}.GetNewClosure()
+            SocketExistsRunner={param($path)$false};ReceiptRemoveRunner={param($path)$calls.Add('receipt-remove');[IO.File]::Delete($path)}.GetNewClosure()
+            SshRunner={param($exe,$args,$stdin,$timeout,$maximum)$calls.Add('ssh');[pscustomobject]@{ExitCode=0;TimedOut=$false;Oversized=$false;StdOut=($serverReceipt|ConvertTo-Json -Depth 30 -Compress);StdErr=''}}.GetNewClosure()
+            HttpsRunner={param($entry,$clock)$calls.Add('https');[pscustomobject][ordered]@{schema='home-gateway/p3-prelive-egress-observation/v1';authority_sha256=$entry.authority_sha256;source_cidr_sha256=$f.Manifest.management_source_cidr_sha256;observed_at_utc=$f.Now.ToString('o')}}.GetNewClosure()
+            ClockRunner={$f.Now.AddSeconds(5)}.GetNewClosure()
+        }
+        $result = Invoke-P3PrerequisiteProductionObservation -PrerequisiteRoot $p.Agent.Root `
+            -InputObject ([pscustomobject]@{manifest=$f.Manifest;ssh_trust=$p.Trust;agent_manifest=$p.Agent.Manifest;nonce=('c'*64);expected_plan_sha256=$plan.plan_sha256;confirmation_challenge=$plan.confirmation_challenge}) `
+            -Boundaries $boundaries
+        $result.server_baseline_sha256 | Should -BeExactly $baselineSHA256
+        $calls | Should -Contain 'ssh'
+        @($calls | Where-Object {$_ -eq 'https'}).Count | Should -Be 3
+        $calls[-1] | Should -BeExactly 'receipt-remove'
+        (Test-Path (Join-Path $p.Agent.Root 'observation-batch.json')) | Should -BeTrue
+        $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+        $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'persists, reopens, validates, and consumes the protected nonce-bound receipt once' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'protected-receipt')
+        $f = $p.Fixture
+        $null = Initialize-P3PrerequisiteRoot $p.Agent.Root $f.Manifest $p.Agent.Manifest
+        $batch = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-prelive-observation-batch/v1';server_baseline=$f.Baseline
+            server_baseline_sha256=Get-P3ServerBaselineSHA256 $f.Baseline;egress=$f.Egress
+            nonce_sha256=Get-P3SHA256Text ('c' * 64);observed_at_utc=$f.Now.AddSeconds(5).ToString('o')
+            live_mutation_performed=$false;raw_identity_exposed=$false
+        }
+        $null = Write-P3ProtectedPrerequisiteObservationBatch $p.Agent.Root $f.Manifest $batch $batch.nonce_sha256
+        $null = Invoke-P3PrerequisiteAction RecordCloudFirewall ([pscustomobject]@{
+            manifest=$f.Manifest;cloud_firewall=$f.Cloud
+        }) ([pscustomobject]@{ClockRunner={$f.Now.AddSeconds(5)}.GetNewClosure();PrerequisiteRoot=$p.Agent.Root})
+        $candidate = New-P3PrerequisiteReceipt -Manifest $f.Manifest -ServerBaseline $f.Baseline `
+            -CloudObservation $f.Cloud -EgressObservations $f.Egress -NonceSHA256 (Get-P3SHA256Text ('c' * 64)) -NowUtc $f.Now.AddSeconds(5)
+        $expected = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $candidate)
+        $assembled = Invoke-P3PrerequisiteAction Assemble ([pscustomobject]@{
+            manifest=$f.Manifest;expected_receipt_sha256=$expected
+        }) ([pscustomobject]@{ClockRunner={$f.Now.AddSeconds(5)}.GetNewClosure();PrerequisiteRoot=$p.Agent.Root})
+        $assembled.nonce_sha256 | Should -BeExactly (Get-P3SHA256Text ('c' * 64))
+        (Test-Path (Join-Path $p.Agent.Root 'prerequisite-receipt.json')) | Should -BeTrue
+        $validateBoundaries = [pscustomobject]@{ClockRunner={$f.Now.AddMinutes(1)}.GetNewClosure();PrerequisiteRoot=$p.Agent.Root}
+        $validated = Invoke-P3PrerequisiteAction Validate ([pscustomobject]@{
+            manifest=$f.Manifest;expected_receipt_sha256=$expected
+        }) $validateBoundaries
+        (Get-P3AgentCanonicalSHA256 $validated) | Should -BeExactly (Get-P3AgentCanonicalSHA256 $assembled)
+        (Get-P3AgentCanonicalSHA256 (Invoke-P3PrerequisiteAction Validate ([pscustomobject]@{
+            manifest=$f.Manifest;expected_receipt_sha256=$expected
+        }) $validateBoundaries)) | Should -BeExactly (Get-P3AgentCanonicalSHA256 $assembled)
+    }
+
+    It 'rejects Assemble when no protected Observe batch and Cloud input exist' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'synthetic-bypass')
+        $null = Initialize-P3PrerequisiteRoot $p.Agent.Root $p.Fixture.Manifest $p.Agent.Manifest
+        { Invoke-P3PrerequisiteAction Assemble ([pscustomobject]@{
+                manifest=$p.Fixture.Manifest;expected_receipt_sha256=('1' * 64)
+            }) ([pscustomobject]@{ClockRunner={[DateTime]::Parse('2026-08-31T12:00:00Z').ToUniversalTime()};PrerequisiteRoot=$p.Agent.Root}) } |
+            Should -Throw '*required prerequisite file*'
     }
 }

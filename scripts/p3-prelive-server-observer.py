@@ -132,15 +132,26 @@ def server_baseline_sha256(baseline: dict[str, Any]) -> str:
     return _sha(validate_server_baseline(baseline))
 
 
-def encode_attested_frame(payload: bytes, nonce: str) -> bytes:
+def encode_attested_frame(
+    payload: bytes,
+    nonce: str,
+    protocol_sha256: str,
+    expected_ipv6_policy_sha256: str,
+) -> bytes:
     if not isinstance(payload, bytes) or not payload or len(payload) > MAX_FRAME_BYTES:
         raise ValueError("observer payload length differs")
     if not _is_sha256(nonce):
         raise ValueError("observer nonce differs")
+    if not _is_sha256(protocol_sha256):
+        raise ValueError("observer protocol differs")
+    if not _is_sha256(expected_ipv6_policy_sha256):
+        raise ValueError("observer IPv6 policy differs")
     header = {
+        "expected_ipv6_policy_sha256": expected_ipv6_policy_sha256,
         "length": len(payload),
         "nonce": nonce,
         "payload_sha256": _sha(payload),
+        "protocol_sha256": protocol_sha256,
         "schema": "home-gateway/p3-prelive-observer-frame/v1",
     }
     return (
@@ -150,8 +161,13 @@ def encode_attested_frame(payload: bytes, nonce: str) -> bytes:
     )
 
 
-def read_attested_frame(stream: BinaryIO, expected_nonce: str) -> bytes:
-    raw = stream.read(MAX_FRAME_BYTES + 4096)
+def read_attested_frame(
+    stream: BinaryIO,
+    expected_nonce: str,
+    expected_protocol_sha256: str,
+    expected_ipv6_policy_sha256: str,
+) -> bytes:
+    raw = stream.read(MAX_FRAME_BYTES + 2049)
     if len(raw) > MAX_FRAME_BYTES + 2048 or b"\n" not in raw:
         raise TypeError("observer frame length differs")
     header_raw, payload = raw.split(b"\n", 1)
@@ -160,9 +176,11 @@ def read_attested_frame(stream: BinaryIO, expected_nonce: str) -> bytes:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("observer frame header differs") from exc
     if not isinstance(header, dict) or set(header) != {
+        "expected_ipv6_policy_sha256",
         "length",
         "nonce",
         "payload_sha256",
+        "protocol_sha256",
         "schema",
     }:
         raise ValueError("observer frame header differs")
@@ -170,6 +188,10 @@ def read_attested_frame(stream: BinaryIO, expected_nonce: str) -> bytes:
         raise ValueError("observer frame schema differs")
     if header["nonce"] != expected_nonce:
         raise ValueError("observer frame nonce differs")
+    if header["protocol_sha256"] != expected_protocol_sha256:
+        raise ValueError("observer frame protocol differs")
+    if header["expected_ipv6_policy_sha256"] != expected_ipv6_policy_sha256:
+        raise ValueError("observer frame IPv6 policy differs")
     if not isinstance(header["length"], int) or isinstance(header["length"], bool):
         raise TypeError("observer frame length differs")
     if len(payload) < header["length"]:
@@ -239,8 +261,15 @@ def read_only_command_contract(container_id: str) -> list[list[str]]:
 def _self_test() -> None:
     payload = b"observer"
     nonce = "1" * 64
+    protocol = "2" * 64
+    ipv6 = "3" * 64
     assert (
-        read_attested_frame(io.BytesIO(encode_attested_frame(payload, nonce)), nonce)
+        read_attested_frame(
+            io.BytesIO(encode_attested_frame(payload, nonce, protocol, ipv6)),
+            nonce,
+            protocol,
+            ipv6,
+        )
         == payload
     )
 

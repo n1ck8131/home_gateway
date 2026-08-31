@@ -1366,7 +1366,10 @@ def run_emergency_rollback(
     validate_request("emergency-rollback", request)
     candidate = request["candidate_fingerprint_sha256"]
     file_context = {name: request[name] for name in ROLLBACK_PLAN_KEYS}
-    resumed = filesystem({"action": "resume", **file_context})
+    try:
+        resumed = filesystem({"action": "resume", **file_context})
+    except Exception as exc:
+        raise RuntimeError("ROLLBACK_UNPROVEN: recovery discovery failed") from exc
     if (
         not isinstance(resumed, dict)
         or set(resumed) != {"recovery_state"}
@@ -1375,25 +1378,31 @@ def run_emergency_rollback(
         raise RuntimeError("ROLLBACK_UNPROVEN: recovery discovery differs")
     if resumed["recovery_state"]:
         recovery_state = resumed["recovery_state"]
-        recovered = filesystem(
-            {"action": "recover", **file_context, "recovery_state": recovery_state}
-        )
-        if (
-            recovered.get("recovered") is not True
-            or set(recovered) != {"recovered", "recovery_syncconf_path"}
-            or recovered["recovery_syncconf_path"] != request["syncconf_path"]
-        ):
-            raise RuntimeError("ROLLBACK_UNPROVEN: interrupted recovery differs")
-        syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
-        restored = filesystem({"action": "verify-recovery", **file_context})
-        _require_rollback_observation(
-            restored, rollback_expected_observation(request, phase="pre"), "recovery"
-        )
-        cleaned = filesystem(
-            {"action": "cleanup", **file_context, "recovery_state": recovery_state}
-        )
-        if cleaned != {"cleaned": True}:
-            raise RuntimeError("ROLLBACK_UNPROVEN: recovery cleanup differs")
+        try:
+            recovered = filesystem(
+                {"action": "recover", **file_context, "recovery_state": recovery_state}
+            )
+            if (
+                not isinstance(recovered, dict)
+                or recovered.get("recovered") is not True
+                or set(recovered) != {"recovered", "recovery_syncconf_path"}
+                or recovered["recovery_syncconf_path"] != request["syncconf_path"]
+            ):
+                raise RuntimeError("interrupted recovery differs")
+            syncconf(pathlib.Path(recovered["recovery_syncconf_path"]))
+            restored = filesystem({"action": "verify-recovery", **file_context})
+            _require_rollback_observation(
+                restored,
+                rollback_expected_observation(request, phase="pre"),
+                "recovery",
+            )
+            cleaned = filesystem(
+                {"action": "cleanup", **file_context, "recovery_state": recovery_state}
+            )
+            if cleaned != {"cleaned": True}:
+                raise RuntimeError("recovery cleanup differs")
+        except Exception as exc:
+            raise RuntimeError("ROLLBACK_UNPROVEN: interrupted recovery failed") from exc
         raise RuntimeError("RECOVERED_INTERRUPTED: retry requires a new approval")
     inspected = filesystem({"action": "inspect", **file_context})
     _require_rollback_observation(

@@ -837,6 +837,49 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
         self.assertEqual(calls, ["resume", "recover", "verify-recovery", "cleanup"])
         self.assertEqual(syncs, [str(pathlib.Path(guard.CONTAINER_CONFIG_PATH))])
 
+    def test_resumed_recovery_failures_are_unproven_and_never_start_fresh_mutation(self):
+        for failure in ("recover", "sync", "verify", "cleanup"):
+            calls = []
+
+            def filesystem(action):
+                calls.append(action["action"])
+                if action["action"] == "resume":
+                    return {"recovery_state": "d" * 64}
+                if action["action"] == "recover":
+                    if failure == "recover":
+                        raise RuntimeError("synthetic recover detail")
+                    return {"recovered": True, "recovery_syncconf_path": action["syncconf_path"]}
+                if action["action"] == "verify-recovery":
+                    observed = guard.rollback_expected_observation(action, phase="pre")
+                    if failure == "verify":
+                        observed["runtime_identity_sha256"] = "0" * 64
+                    return observed
+                if action["action"] == "cleanup":
+                    return {"cleaned": failure != "cleanup"}
+                raise AssertionError(action)
+
+            def syncconf(path):
+                if failure == "sync":
+                    raise RuntimeError("synthetic sync detail")
+
+            with self.subTest(failure=failure), self.assertRaisesRegex(
+                RuntimeError, "ROLLBACK_UNPROVEN"
+            ):
+                guard.run_emergency_rollback(self.rollback_request(), filesystem, syncconf)
+            self.assertNotIn("inspect", calls)
+
+    def test_malformed_durable_manifest_is_unproven_and_retained(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = FakeContainerRollbackFilesystem(pathlib.Path(directory))
+            action = self.adapter_action(first)
+            token = first({"action": "begin", **action})["recovery_state"]
+            manifest = first._recovery_paths(token)["manifest"]
+            manifest.write_bytes(b"{")
+            restarted = FakeContainerRollbackFilesystem(pathlib.Path(directory))
+            with self.assertRaisesRegex(RuntimeError, "ROLLBACK_UNPROVEN"):
+                guard.run_emergency_rollback(action, restarted, lambda path: None)
+            self.assertTrue(manifest.exists())
+
     def test_container_rollback_staging_and_writer_are_nonce_bound(self):
         config_stage, clients_stage = guard.container_staging_paths("d" * 64)
         self.assertEqual(
@@ -984,6 +1027,29 @@ class ClientObserveAndRollbackTests(unittest.TestCase):
             ["resume", "inspect", "begin", "remove", "recover", "verify-recovery", "cleanup"],
         )
         self.assertEqual(len(sync_calls), 2)
+
+    def test_recovery_sync_failure_is_unproven_and_preserves_cleanup_material(self):
+        calls = []
+
+        def filesystem(action):
+            calls.append(action["action"])
+            if action["action"] == "resume":
+                return {"recovery_state": ""}
+            if action["action"] == "inspect":
+                return guard.rollback_expected_observation(action, phase="pre")
+            if action["action"] == "begin":
+                return {"recovery_state": "durable-token"}
+            if action["action"] == "remove":
+                return {"removed": True}
+            if action["action"] == "recover":
+                return {"recovered": True, "recovery_syncconf_path": action["syncconf_path"]}
+            raise AssertionError(action)
+
+        with self.assertRaisesRegex(RuntimeError, "ROLLBACK_UNPROVEN"):
+            guard.run_emergency_rollback(
+                self.rollback_request(), filesystem, lambda path: (_ for _ in ()).throw(RuntimeError("sync"))
+            )
+        self.assertNotIn("cleanup", calls)
 
     def test_emergency_rollback_recovers_when_the_first_mutation_fails(self):
         calls = []

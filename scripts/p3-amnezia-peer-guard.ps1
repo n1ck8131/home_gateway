@@ -113,6 +113,15 @@ function Get-P3GuardUtc([object]$Value, [string]$Label) {
     catch { throw "$Label timestamp differs" }
 }
 
+function Test-P3GuardExactEgressReceipt([object]$Receipt, [object[]]$ExpectedEgress, [string]$ExpectedSource, [DateTime]$NowUtc) {
+    $savedAction = $Action
+    try {
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        return Test-P3ExactEgressReceipt -Receipt $Receipt -ExpectedAuthoritySHA256 @($ExpectedEgress.authority_sha256) `
+            -ExpectedManagementSourceCIDRSHA256 $ExpectedSource -NowUtc $NowUtc
+    } finally { $Action = $savedAction }
+}
+
 function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
     $clock = $NowUtc.ToUniversalTime()
     foreach ($name in @(
@@ -155,30 +164,8 @@ function Test-P3PreliveInputs([object]$Context, [DateTime]$NowUtc) {
     $localAge = ($clock - (Get-P3GuardUtc $Context.LocalBaseline.observed_at_utc 'local baseline')).TotalSeconds
     if ($localAge -lt 0 -or $localAge -gt 300) { throw 'local baseline receipt is stale' }
     if ($Context.PSObject.Properties.Name -notcontains 'EgressReceipt') { throw 'egress receipt schema differs' }
-    Assert-P3GuardExactProperties -Value $Context.EgressReceipt -Expected $script:P3GuardEgressReceiptProperties -Label 'egress receipt'
-    if ([string]$Context.EgressReceipt.schema -cne 'home-gateway/p3-prelive-egress-receipt/v1' -or
-        [string]$Context.EgressReceipt.management_source_cidr_sha256 -cne [string]$Context.Trust.management_source_cidr_sha256 -or
-        [bool]$Context.EgressReceipt.live_mutation_performed) { throw 'egress receipt differs' }
-    $egressAge = ($clock - (Get-P3GuardUtc $Context.EgressReceipt.observed_at_utc 'egress receipt')).TotalSeconds
-    if ($egressAge -lt -1 -or $egressAge -gt 120) { throw 'egress receipt is stale' }
-    $observations = @($Context.EgressReceipt.observations)
-    if ($observations.Count -ne 3) { throw 'egress observation count differs' }
-    $expectedByAuthority = @{}
-    foreach ($item in $egress) { $expectedByAuthority[[string]$item.authority_sha256] = [string]$item.source_cidr_sha256 }
-    $observedAuthorities = @()
-    foreach ($observation in $observations) {
-        Assert-P3GuardExactProperties -Value $observation -Expected $script:P3GuardEgressObservationProperties -Label 'egress observation'
-        $authority = [string]$observation.authority_sha256
-        $source = [string]$observation.source_cidr_sha256
-        Assert-P3GuardSHA256 -Value $authority -Label 'egress observation authority'
-        Assert-P3GuardSHA256 -Value $source -Label 'egress observation source'
-        if (-not $expectedByAuthority.ContainsKey($authority) -or $expectedByAuthority[$authority] -cne $source -or
-            $source -cne [string]$Context.Trust.management_source_cidr_sha256) { throw 'egress observation identity differs' }
-        $observationAge = ($clock - (Get-P3GuardUtc $observation.observed_at_utc 'egress observation')).TotalSeconds
-        if ($observationAge -lt -1 -or $observationAge -gt 120) { throw 'egress observation is stale' }
-        $observedAuthorities += $authority
-    }
-    if (@($observedAuthorities | Select-Object -Unique).Count -ne 3) { throw 'egress observation authority set differs' }
+    $null = Test-P3GuardExactEgressReceipt -Receipt $Context.EgressReceipt -ExpectedEgress $egress `
+        -ExpectedSource ([string]$Context.Trust.management_source_cidr_sha256) -NowUtc $clock
     return [pscustomobject][ordered]@{
         schema = 'home-gateway/p3-prelive-input-validation/v1'
         manifest_sha256 = [string]$Context.ManifestSHA256

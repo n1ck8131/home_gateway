@@ -499,13 +499,61 @@ function New-P3EgressReceipt(
         if ($age -lt -1 -or $age -gt 120) { throw 'egress observation is stale' }
         $observations += [pscustomobject][ordered]@{ authority_sha256 = $authority; source_cidr_sha256 = [string]$item.source_cidr_sha256; observed_at_utc = $observed.ToString('o') }
     }
-    return [pscustomobject][ordered]@{
+    $receipt = [pscustomobject][ordered]@{
         schema = 'home-gateway/p3-prelive-egress-receipt/v1'
         management_source_cidr_sha256 = $ExpectedManagementSourceCIDRSHA256
         observations = @($observations)
         observed_at_utc = $NowUtc.ToUniversalTime().ToString('o')
         live_mutation_performed = $false
     }
+    return Test-P3ExactEgressReceipt -Receipt $receipt -ExpectedAuthoritySHA256 $expected `
+        -ExpectedManagementSourceCIDRSHA256 $ExpectedManagementSourceCIDRSHA256 -NowUtc $NowUtc
+}
+
+function Get-P3EgressUtc([object]$Value, [string]$Label) {
+    if ($Value -is [DateTime]) {
+        $date = [DateTime]$Value
+        if ($date.Kind -eq [DateTimeKind]::Unspecified) { $date = [DateTime]::SpecifyKind($date, [DateTimeKind]::Utc) }
+        return $date.ToUniversalTime()
+    }
+    try {
+        return [DateTime]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+    } catch { throw "$Label timestamp differs" }
+}
+
+function Test-P3ExactEgressReceipt(
+    [object]$Receipt,
+    [string[]]$ExpectedAuthoritySHA256,
+    [string]$ExpectedManagementSourceCIDRSHA256,
+    [DateTime]$NowUtc
+) {
+    Assert-P3ExactProperties -Value $Receipt -ExpectedProperties $script:P3EgressReceiptProperties -Label 'egress receipt'
+    Assert-P3SHA256 -Value $ExpectedManagementSourceCIDRSHA256 -Label 'expected egress source'
+    $expected = @($ExpectedAuthoritySHA256)
+    if ($expected.Count -ne 3 -or @($expected | Select-Object -Unique).Count -ne 3) { throw 'egress authority set differs' }
+    foreach ($authority in $expected) { Assert-P3SHA256 -Value $authority -Label 'egress authority' }
+    if ([string]$Receipt.schema -cne 'home-gateway/p3-prelive-egress-receipt/v1' -or
+        [string]$Receipt.management_source_cidr_sha256 -cne $ExpectedManagementSourceCIDRSHA256 -or
+        [bool]$Receipt.live_mutation_performed) { throw 'egress receipt differs' }
+    $clock = $NowUtc.ToUniversalTime()
+    $receiptAge = ($clock - (Get-P3EgressUtc -Value $Receipt.observed_at_utc -Label 'egress receipt')).TotalSeconds
+    if ($receiptAge -lt -1 -or $receiptAge -gt 120) { throw 'egress receipt is stale' }
+    $observations = @($Receipt.observations)
+    if ($observations.Count -ne 3) { throw 'egress observation count differs' }
+    $observedAuthorities = @()
+    foreach ($observation in $observations) {
+        Assert-P3ExactProperties -Value $observation -ExpectedProperties $script:P3EgressObservationProperties -Label 'egress observation'
+        $authority = [string]$observation.authority_sha256
+        $source = [string]$observation.source_cidr_sha256
+        Assert-P3SHA256 -Value $authority -Label 'egress observation authority'
+        Assert-P3SHA256 -Value $source -Label 'egress observation source'
+        if ($authority -notin $expected -or $source -cne $ExpectedManagementSourceCIDRSHA256) { throw 'egress observation identity differs' }
+        $age = ($clock - (Get-P3EgressUtc -Value $observation.observed_at_utc -Label 'egress observation')).TotalSeconds
+        if ($age -lt -1 -or $age -gt 120) { throw 'egress observation is stale' }
+        $observedAuthorities += $authority
+    }
+    if (@($observedAuthorities | Select-Object -Unique).Count -ne 3) { throw 'egress observation authority set differs' }
+    return $Receipt
 }
 
 function Get-P3AdapterClass([string]$InterfaceDescription) {

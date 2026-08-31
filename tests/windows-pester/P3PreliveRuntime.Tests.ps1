@@ -116,6 +116,33 @@ Describe 'P3 protected pre-live runtime' {
                 ClockRunner = { $Fixture.NowUtc.AddSeconds(30) }.GetNewClosure()
             }
         }
+
+        function New-OwnedRemoteBoundaries(
+            [object]$Fixture,
+            [scriptblock]$SshRunner,
+            [scriptblock]$ScpRunner,
+            [scriptblock]$StopRunner
+        ) {
+            $list = { "256 $($Fixture.Fingerprint) p3 (ED25519)" }.GetNewClosure()
+            $process = { param($ProcessId) [pscustomobject]@{Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow} }.GetNewClosure()
+            $script:OwnedClockNow = $Fixture.NowUtc.AddSeconds(30)
+            $clock = { $script:OwnedClockCalls++; $script:OwnedClockNow }
+            return [pscustomobject]@{
+                AgentRunner={ $script:OwnedAgentStarts++; "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" }
+                AddRunner={param($KeyPath)};ListRunner=$list;ProcessRunner=$process;DeleteRunner={}
+                StopRunner=$StopRunner;WaitRunner={param($ProcessId)$script:OwnedWaits++}
+                ReobserveRunner={param($ProcessId)$script:OwnedReobservedPid=$ProcessId;@()};SocketExistsRunner={param($Path)$false}
+                ReceiptRemoveRunner={param($Path)[IO.File]::Delete($Path)};ClockRunner=$clock
+                SshRunner=$SshRunner;ScpRunner=$ScpRunner
+            }
+        }
+
+        function Set-ProtectedEgressReceipt([string]$Root, [scriptblock]$Change) {
+            $path = Join-Path $Root 'egress-receipt.json'
+            $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            & $Change $receipt
+            [IO.File]::WriteAllBytes($path, (ConvertTo-P3CanonicalJson -Value $receipt))
+        }
     }
 
     BeforeEach {
@@ -258,6 +285,24 @@ Describe 'P3 protected pre-live runtime' {
         { New-P3EgressReceipt -ExpectedAuthoritySHA256 $authorities -ExpectedManagementSourceCIDRSHA256 ('2' * 64) `
             -NowUtc ([DateTime]::UtcNow) -HttpsRunner { param($authoritySHA256) [pscustomobject]@{ authority_sha256=$authoritySHA256;source_cidr_sha256=('f'*64);observed_at_utc=[DateTime]::UtcNow.ToString('o') } } } |
             Should -Throw '*source*'
+    }
+
+    It 'uses one exact shared validator for persisted egress evidence' {
+        $clock = [DateTime]::Parse('2026-08-31T12:00:00Z').ToUniversalTime()
+        $authorities = @(('7' * 64), ('8' * 64), ('9' * 64))
+        $receipt = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-prelive-egress-receipt/v1';management_source_cidr_sha256=('2'*64)
+            observations=@(
+                [pscustomobject]@{authority_sha256=$authorities[0];source_cidr_sha256=('2'*64);observed_at_utc=$clock.AddSeconds(-3).ToString('o')},
+                [pscustomobject]@{authority_sha256=$authorities[1];source_cidr_sha256=('2'*64);observed_at_utc=$clock.AddSeconds(-2).ToString('o')},
+                [pscustomobject]@{authority_sha256=$authorities[2];source_cidr_sha256=('2'*64);observed_at_utc=$clock.AddSeconds(-1).ToString('o')}
+            );observed_at_utc=$clock.AddSeconds(-1).ToString('o');live_mutation_performed=$false
+        }
+        (Test-P3ExactEgressReceipt -Receipt $receipt -ExpectedAuthoritySHA256 $authorities `
+            -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc $clock).observations.Count | Should -Be 3
+        $receipt.observations[1].source_cidr_sha256 = ('a' * 64)
+        { Test-P3ExactEgressReceipt -Receipt $receipt -ExpectedAuthoritySHA256 $authorities `
+            -ExpectedManagementSourceCIDRSHA256 ('2' * 64) -NowUtc $clock } | Should -Throw '*egress*'
     }
 
     It 'rejects a runtime ACL whose owner differs even when allow rules match' {
@@ -561,6 +606,8 @@ Describe 'P3 protected pre-live runtime' {
         $boundaries = [pscustomobject]@{
             SshRunner={ $script:MutationRunnerCalls++; throw 'must not run' }
             ScpRunner={ $script:MutationRunnerCalls++; throw 'must not run' }
+            ClockRunner={ $fixture.NowUtc.AddSeconds(30) }.GetNewClosure()
+            ReceiptRemoveRunner={ $script:MutationRunnerCalls++ }
         }
         { Invoke-P3RemoteAction -SelectedAction 'RemoteInstall' -RuntimeRoot $fixture.Root `
             -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 ('0' * 64) -Confirmation '' `
@@ -610,11 +657,97 @@ Describe 'P3 protected pre-live runtime' {
                 if($Mode -ceq 'classify'){return ($exactState|ConvertTo-Json -Compress)}
                 return '{"schema":"home-gateway/p3-remote-helper-remove-receipt/v1","removed":true,"target_state":"absent","temporary_leftover_count":0}'
             }.GetNewClosure()
+            ClockRunner={ $fixture.NowUtc.AddSeconds(30) }.GetNewClosure()
+            ReceiptRemoveRunner={ $script:MutationRunnerCalls++ }
         }
         { Invoke-P3RemoteAction -SelectedAction 'RemoteRemove' -RuntimeRoot $fixture.Root `
             -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 $plan.remove_plan_sha256 `
             -Confirmation $plan.confirmation_challenge -InputObject ([pscustomobject]@{context=$context;install_receipt=$forged;remove_plan=$plan}) `
             -Boundaries $boundaries } | Should -Throw '*protected*receipt*'
         $script:MutationRunnerCalls | Should -Be 0
+    }
+
+    It 'runs all protected remote actions in one owned agent session per action' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+        $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
+        [IO.File]::Delete((Join-Path $fixture.Root 'remote-install-receipt.json'))
+        $script:OwnedAgentStarts=0;$script:OwnedStops=0;$script:OwnedWaits=0;$script:OwnedClockCalls=0;$script:RemoteInstalled=$false
+        $payloadHash = (Open-P3BoundedStableJson -Path (Join-Path $fixture.Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties).local_payload_sha256
+        $ssh = {
+            param($Executable,$Arguments,$Mode,$Request)
+            if($Mode -ceq 'classify'){
+                $state=if($script:RemoteInstalled){'exact'}else{'absent'}
+                return ([ordered]@{state=$state;regular=$script:RemoteInstalled;owner_match=$script:RemoteInstalled;group_match=$script:RemoteInstalled;mode_match=$script:RemoteInstalled;payload_sha256=if($script:RemoteInstalled){$payloadHash}else{'0'*64};temporary_leftover_count=0}|ConvertTo-Json -Compress)
+            }
+            if($Mode -ceq 'install'){$script:RemoteInstalled=$true;return ([ordered]@{schema='home-gateway/p3-remote-helper-install-receipt/v1';target_state='exact';payload_sha256=$payloadHash;owner_match=$true;group_match=$true;mode_match=$true;installed_by_gate=$true;preinstall_state='absent';temporary_leftover_count=0}|ConvertTo-Json -Compress)}
+            if($Mode -ceq 'cleanup'){return ([ordered]@{state='exact';regular=$true;owner_match=$true;group_match=$true;mode_match=$true;payload_sha256=$payloadHash;temporary_leftover_count=0}|ConvertTo-Json -Compress)}
+            if($Mode -ceq 'remove'){$script:RemoteInstalled=$false;return '{"schema":"home-gateway/p3-remote-helper-remove-receipt/v1","removed":true,"target_state":"absent","temporary_leftover_count":0}'}
+            throw 'unexpected remote mode'
+        }.GetNewClosure()
+        $boundaries = New-OwnedRemoteBoundaries -Fixture $fixture -SshRunner $ssh `
+            -ScpRunner { [pscustomobject]@{exit_code=0} } -StopRunner {param($ProcessId)$script:OwnedStops++}
+
+        $installPlan = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstallPlan' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' -InputObject $null -Boundaries $boundaries
+        $installReceipt = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstall' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 $installPlan.plan_sha256 `
+            -Confirmation $installPlan.confirmation_challenge -InputObject ([pscustomobject]@{plan=$installPlan}) -Boundaries $boundaries
+        $removePlan = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteRemovePlan' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' `
+            -InputObject ([pscustomobject]@{install_receipt=$installReceipt}) -Boundaries $boundaries
+        $removed = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteRemove' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 $removePlan.remove_plan_sha256 `
+            -Confirmation $removePlan.confirmation_challenge -InputObject ([pscustomobject]@{install_receipt=$installReceipt;remove_plan=$removePlan}) -Boundaries $boundaries
+
+        $removed.removed | Should -BeTrue
+        $script:OwnedAgentStarts | Should -Be 4
+        $script:OwnedStops | Should -Be 4
+        $script:OwnedWaits | Should -Be 4
+        $script:OwnedClockCalls | Should -Be 4
+        Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $fixture.Root 'remote-install-receipt.json') | Should -BeFalse
+    }
+
+    It 'rejects stale future schema and source-mutated remote egress before SSH or SCP' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+        $cases = @(
+            @{Change={param($r)$r.observed_at_utc=[DateTime]::Parse('2000-01-01T00:00:00Z').ToString('o')};Expected='*egress*'},
+            @{Change={param($r)$r.observations[0].observed_at_utc=[DateTime]::Parse('2099-01-01T00:00:00Z').ToString('o')};Expected='*egress*'},
+            @{Change={param($r)$r|Add-Member -NotePropertyName extra -NotePropertyValue $true};Expected='*schema*'},
+            @{Change={param($r)$r.observations[1].source_cidr_sha256=('a'*64)};Expected='*egress*'}
+        )
+        foreach($case in $cases){
+            $root=Join-Path $TestDrive ('egress-'+[guid]::NewGuid().ToString('N'));$fixtureRoot=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $null=New-Item -ItemType Directory -Path $fixtureRoot;$trust=New-TrustFixture -Root $fixtureRoot
+            $fixture=Initialize-OwnedBatchRuntime -Root $root -Trust $trust;Set-ProtectedEgressReceipt -Root $fixture.Root -Change $case.Change
+            $script:OwnedClockCalls=0;$script:OwnedAgentStarts=0;$script:OwnedStops=0;$script:OwnedWaits=0;$script:MutationRunnerCalls=0
+            $boundaries=New-OwnedRemoteBoundaries -Fixture $fixture -SshRunner {$script:MutationRunnerCalls++;throw 'SSH must not run'} `
+                -ScpRunner {$script:MutationRunnerCalls++;throw 'SCP must not run'} -StopRunner {param($ProcessId)$script:OwnedStops++}
+            {Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstallPlan' -RuntimeRoot $fixture.Root `
+                -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' -InputObject $null -Boundaries $boundaries}|
+                Should -Throw $case.Expected
+            $script:MutationRunnerCalls|Should -Be 0;$script:OwnedClockCalls|Should -Be 1;$script:OwnedStops|Should -Be 1;$script:OwnedWaits|Should -Be 1
+        }
+    }
+
+    It 'cleans the owned remote agent on validation body cancellation and cleanup failure' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+        foreach($kind in @('validation','body','cancellation','cleanup')){
+            $root=Join-Path $TestDrive ("remote-$kind-"+[guid]::NewGuid().ToString('N'));$fixtureRoot=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $null=New-Item -ItemType Directory -Path $fixtureRoot;$trust=New-TrustFixture -Root $fixtureRoot;$fixture=Initialize-OwnedBatchRuntime -Root $root -Trust $trust
+            $script:OwnedClockCalls=0;$script:OwnedAgentStarts=0;$script:OwnedStops=0;$script:OwnedWaits=0;$script:MutationRunnerCalls=0
+            $ssh=if($kind -ceq 'cancellation'){{throw [OperationCanceledException]::new('synthetic remote cancellation')}}else{{throw 'synthetic remote body failure'}}
+            $stop=if($kind -ceq 'cleanup'){{param($ProcessId)$script:OwnedStops++;throw 'synthetic remote stop failure'}}else{{param($ProcessId)$script:OwnedStops++}}
+            $boundaries=New-OwnedRemoteBoundaries -Fixture $fixture -SshRunner $ssh -ScpRunner {throw 'SCP must not run'} -StopRunner $stop
+            if($kind -ceq 'validation'){$boundaries.ListRunner={throw 'synthetic remote validation failure'}}
+            $expectedFailure=if($kind -ceq 'cleanup'){'*stop failure*'}else{'*synthetic remote*'}
+            {Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstallPlan' -RuntimeRoot $fixture.Root `
+                -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' -InputObject $null -Boundaries $boundaries}|
+                Should -Throw $expectedFailure
+            $script:OwnedStops|Should -Be 1;$script:OwnedWaits|Should -Be 1
+            if($kind -ceq 'cleanup'){Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json')|Should -BeTrue}
+            else{Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json')|Should -BeFalse}
+            $env:SSH_AUTH_SOCK|Should -BeNullOrEmpty;$env:SSH_AGENT_PID|Should -BeNullOrEmpty
+        }
     }
 }

@@ -678,23 +678,29 @@ function Invoke-P3OwnedGuardAction(
     $agentReceipt = Start-P3Agent -Manifest $agentManifest -AgentRunner $Boundaries.AgentRunner `
         -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
     $combined = $null
+    $protectedCombined = $null
     try {
         $combined = Test-P3AgentState -Manifest $agentManifest -AgentReceipt $agentReceipt `
             -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner
         Write-P3ProtectedAgentReceipt -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256 -Receipt $combined
+        $reopenedCombined = Get-P3ProtectedAgentReceipt -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256
+        if ((Get-P3AgentCanonicalSHA256 $reopenedCombined) -cne (Get-P3AgentCanonicalSHA256 $combined)) {
+            throw 'protected agent receipt differs'
+        }
+        $protectedCombined = $reopenedCombined
         $context = Get-P3PreliveContext -RuntimeRoot $ownedRoot -ExpectedManifestSHA256 $ownedManifestSHA256
         return Invoke-P3ApprovedGuardBody -SelectedAction $SelectedAction -Context $context -InputObject $InputObject `
             -ExpectedBodyPlanSHA256 $ExpectedBodyPlanSHA256 -BodyConfirmation $BodyConfirmation -Boundaries $Boundaries
     }
     finally {
-        if ($null -eq $combined) {
+        if ($null -eq $protectedCombined) {
             Stop-P3OwnedAgentEmergency -Manifest $agentManifest -AgentReceipt $agentReceipt -DeleteRunner $Boundaries.DeleteRunner `
                 -StopRunner $Boundaries.StopRunner -ProcessRunner $Boundaries.ProcessRunner `
                 -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
                 -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
         } else {
             $storedCombined = Get-P3ProtectedAgentReceipt -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256
-            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $combined)) {
+            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $protectedCombined)) {
                 throw 'protected agent receipt differs'
             }
             $storedReceipt = ConvertTo-P3AgentReceiptFromCombined -CombinedReceipt $storedCombined

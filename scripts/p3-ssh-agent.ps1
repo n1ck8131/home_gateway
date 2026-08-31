@@ -204,14 +204,39 @@ function Assert-P3AgentReceipt([object]$Manifest, [object]$AgentReceipt) {
     return $toolchain
 }
 
+function ConvertTo-P3AgentReceiptUtcInstant([object]$Value) {
+    if ($Value -is [DateTime]) {
+        $instant = [DateTime]$Value
+        if ($instant.Kind -ne [DateTimeKind]::Utc) { throw 'agent receipt start must be UTC' }
+        return $instant.ToUniversalTime()
+    }
+    $text = [string]$Value
+    if ($text -cnotmatch 'Z$') { throw 'agent receipt start must be UTC' }
+    try {
+        $instant = [DateTime]::Parse($text, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    } catch { throw 'agent receipt start must be UTC' }
+    if ($instant.Kind -ne [DateTimeKind]::Utc) { throw 'agent receipt start must be UTC' }
+    return $instant.ToUniversalTime()
+}
+
+function ConvertTo-P3AgentObservedUtcInstant([object]$Value) {
+    if ($Value -isnot [DateTime]) { throw 'agent process start time differs' }
+    $instant = [DateTime]$Value
+    if ($instant.Kind -eq [DateTimeKind]::Unspecified) {
+        $instant = [DateTime]::SpecifyKind($instant, [DateTimeKind]::Local)
+    }
+    return $instant.ToUniversalTime()
+}
+
 function Assert-P3AgentObservedProcess([object]$Toolchain, [object]$AgentReceipt, [object[]]$Processes) {
     if ($processes.Count -ne 1 -or [int]$processes[0].Id -ne [int]$AgentReceipt.agent_pid -or
         -not [string]::Equals([string]$processes[0].Path, $Toolchain.git_ssh_agent_path, [StringComparison]::OrdinalIgnoreCase) -or
         $processes[0].PSObject.Properties.Name -notcontains 'StartTime') {
         throw 'agent process identity differs'
     }
-    $started = [DateTime]::Parse([string]$AgentReceipt.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-    $delta = ([DateTime]$processes[0].StartTime - $started).Duration().TotalSeconds
+    $started = ConvertTo-P3AgentReceiptUtcInstant -Value $AgentReceipt.started_at_utc
+    $observed = ConvertTo-P3AgentObservedUtcInstant -Value $processes[0].StartTime
+    $delta = ($observed - $started).Duration().TotalSeconds
     if ($delta -gt 10) { throw 'agent process creation window differs' }
     return $processes[0]
 }
@@ -308,9 +333,8 @@ function Stop-P3OwnedAgentEmergency(
     [scriptblock]$SocketExistsRunner
 ) {
     $toolchain = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
-    try {
-        $null = [DateTime]::Parse([string]$AgentReceipt.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-    } catch { throw 'owned agent start binding differs' }
+    try { $null = ConvertTo-P3AgentReceiptUtcInstant -Value $AgentReceipt.started_at_utc }
+    catch { throw 'owned agent start binding differs' }
     $failures = @()
     $identityMismatch = $false
     try { $processes = @(& $ProcessRunner ([int]$AgentReceipt.agent_pid)) }

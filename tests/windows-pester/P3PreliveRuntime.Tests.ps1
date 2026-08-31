@@ -515,6 +515,50 @@ Describe 'P3 protected pre-live runtime' {
         }
     }
 
+    It 'emergency cleans guard and remote agents when protected receipt persistence fails' {
+        foreach ($owner in @('guard', 'remote')) {
+            $root = Join-Path $TestDrive ("persist-$owner-" + [guid]::NewGuid().ToString('N'))
+            $fixtureRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $fixtureRoot
+            $trust = New-TrustFixture -Root $fixtureRoot
+            $fixture = Initialize-OwnedBatchRuntime -Root $root -Trust $trust
+            [IO.File]::WriteAllText((Join-Path $fixture.Root 'agent-receipt.json'), '{}', [Text.UTF8Encoding]::new($false))
+            $script:OwnedAgentStarts=0;$script:OwnedClockCalls=0;$script:OwnedStops=0;$script:OwnedDeletes=0
+            $script:OwnedWaits=0;$script:OwnedReobservedPid=0;$script:OwnedBodyCalls=0
+            $caught = $null
+            if ($owner -ceq 'guard') {
+                . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+                $boundaries = New-OwnedBatchBoundaries -Fixture $fixture `
+                    -JsonRunner { $script:OwnedBodyCalls++; throw 'body must not run' } `
+                    -StopRunner { param($ProcessId) $script:OwnedStops++ }
+                $boundaries.DeleteRunner = { $script:OwnedDeletes++ }
+                try {
+                    $null = Invoke-P3OwnedGuardAction -SelectedAction 'Reconcile' -RuntimeRoot $fixture.Root `
+                        -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+                        -BodyConfirmation '' -Boundaries $boundaries
+                } catch { $caught = $_ }
+            } else {
+                . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+                $boundaries = New-OwnedRemoteBoundaries -Fixture $fixture `
+                    -SshRunner { $script:OwnedBodyCalls++; throw 'body must not run' } -ScpRunner { throw 'SCP must not run' } `
+                    -StopRunner { param($ProcessId) $script:OwnedStops++ }
+                $boundaries.DeleteRunner = { $script:OwnedDeletes++ }
+                try {
+                    $null = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstallPlan' -RuntimeRoot $fixture.Root `
+                        -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' `
+                        -InputObject $null -Boundaries $boundaries
+                } catch { $caught = $_ }
+            }
+            $env:SSH_AUTH_SOCK=$null;$env:SSH_AGENT_PID=$null
+            $caught | Should -Not -BeNullOrEmpty
+            $script:OwnedBodyCalls | Should -Be 0
+            $script:OwnedDeletes | Should -Be 1
+            $script:OwnedStops | Should -Be 1
+            $script:OwnedWaits | Should -Be 1
+            $script:OwnedReobservedPid | Should -Be 4242
+        }
+    }
+
     It 'never stops a reused PID after validated guard or remote process identity drifts' {
         foreach ($owner in @('guard', 'remote')) {
             foreach ($drift in @('path', 'start')) {

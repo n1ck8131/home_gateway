@@ -216,4 +216,48 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
             -ClockRunner { $script:WaitNow } } | Should -Throw '*timed out*'
         $script:WaitSleepCalls | Should -Be 1
     }
+
+    It 'normalizes native local and unspecified process start times for validation and cleanup' {
+        $receiptUtc = [DateTime]::SpecifyKind([DateTime]::Parse('2026-08-31T12:00:00'), [DateTimeKind]::Utc)
+        [TimeZoneInfo]::Local.GetUtcOffset($receiptUtc).TotalMinutes | Should -Not -Be 0
+        $localStart = $receiptUtc.ToLocalTime()
+        $unspecifiedStart = [DateTime]::SpecifyKind($localStart, [DateTimeKind]::Unspecified)
+        $script:AgentReceipt.started_at_utc = $receiptUtc.ToString('o')
+        $processState = [pscustomobject]@{ Calls=0;Local=$localStart;Unspecified=$unspecifiedStart;Path=$script:Paths.'ssh-agent.exe' }
+        $processRunner = {
+            param($ProcessId)
+            $processState.Calls++
+            $start = if ($processState.Calls -eq 1) { $processState.Local } else { $processState.Unspecified }
+            [pscustomobject]@{ Id=$ProcessId;Path=$processState.Path;StartTime=$start }
+        }.GetNewClosure()
+
+        $validated = Test-P3AgentState -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
+            -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } -ProcessRunner $processRunner
+        $env:SSH_AUTH_SOCK = $script:AgentReceipt.socket; $env:SSH_AGENT_PID = [string]$script:AgentReceipt.agent_pid
+        $stop = Stop-P3Agent -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
+            -DeleteRunner { } -StopRunner { param($ProcessId) } -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } `
+            -ProcessRunner $processRunner -WaitRunner { param($ProcessId) } -ReobserveRunner { param($ProcessId) @() } `
+            -SocketExistsRunner { param($Path) $false }
+
+        $validated.expected_key_match | Should -BeTrue
+        $stop.stopped | Should -BeTrue
+        $processState.Calls | Should -Be 2
+    }
+
+    It 'rejects non-UTC receipt timestamps and true process start drift' {
+        $receiptUtc = [DateTime]::SpecifyKind([DateTime]::Parse('2026-08-31T12:00:00'), [DateTimeKind]::Utc)
+        $localStart = $receiptUtc.ToLocalTime()
+        $script:AgentReceipt.started_at_utc = '2026-08-31T14:00:00.0000000+02:00'
+        { Test-P3AgentState -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
+            -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } `
+            -ProcessRunner { [pscustomobject]@{ Id=4242;Path=$script:Paths.'ssh-agent.exe';StartTime=$localStart } } } |
+            Should -Throw '*UTC*'
+
+        $script:AgentReceipt.started_at_utc = $receiptUtc.ToString('o')
+        $drifted = [DateTime]::SpecifyKind($localStart.AddSeconds(11), [DateTimeKind]::Unspecified)
+        { Test-P3AgentState -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
+            -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } `
+            -ProcessRunner { [pscustomobject]@{ Id=4242;Path=$script:Paths.'ssh-agent.exe';StartTime=$drifted } } } |
+            Should -Throw '*creation window*'
+    }
 }

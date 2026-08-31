@@ -444,6 +444,32 @@ Describe 'P3 protected pre-live runtime' {
             -BodyConfirmation '' -Boundaries $boundaries } | Should -Throw '*stop failure*'
     }
 
+    It 'tears down the newly owned agent when initial key or process validation fails' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
+        foreach ($failureKind in @('list', 'process')) {
+            $root = Join-Path $TestDrive ("initial-$failureKind-" + [guid]::NewGuid().ToString('N'))
+            $fixtureRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $fixtureRoot
+            $trust = New-TrustFixture -Root $fixtureRoot
+            $fixture = Initialize-OwnedBatchRuntime -Root $root -Trust $trust
+            $script:OwnedStops = 0; $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0
+            $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'body must not run' } `
+                -StopRunner { param($ProcessId) $script:OwnedStops++ }
+            if ($failureKind -ceq 'list') { $boundaries.ListRunner = { throw 'synthetic initial list failure' } }
+            else { $boundaries.ProcessRunner = { throw 'synthetic initial process failure' } }
+
+            { Invoke-P3OwnedGuardAction -SelectedAction 'ValidateOnly' -RuntimeRoot $fixture.Root `
+                -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
+                -BodyConfirmation '' -Boundaries $boundaries } | Should -Throw '*synthetic initial*'
+
+            $script:OwnedStops | Should -Be 1
+            $script:OwnedWaits | Should -Be 1
+            $script:OwnedReobservedPid | Should -Be 4242
+            $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+            $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+        }
+    }
+
     It 'rejects a self-consistent foreign AgentStart action before any runner' {
         . (Join-Path $PSScriptRoot '..\..\scripts\p3-ssh-agent.ps1')
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
@@ -476,6 +502,43 @@ Describe 'P3 protected pre-live runtime' {
             -InputObject ([pscustomobject]@{manifest=$protected;receipt=$foreignReceipt}) -Boundaries $boundaries } |
             Should -Throw '*receipt*protected*'
         $script:MutationRunnerCalls | Should -Be 0
+    }
+
+    It 'rejects an alternate AgentStop receipt before every mutation runner' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-ssh-agent.ps1')
+        $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
+        $manifest = Get-P3ProtectedAgentManifest -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
+        $stored = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-ssh-agent-combined-receipt/v2';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4242
+            socket='/tmp/ssh-synthetic/agent.4242';agent_executable_path=$manifest.git_ssh_agent_path
+            agent_executable_sha256=$manifest.git_ssh_agent_sha256;expected_fingerprint_sha256=$manifest.public_key_fingerprint_sha256
+            started_at_utc='2026-08-31T12:00:00.1234500Z';loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;toolchain_match=$true
+        }
+        Write-P3ProtectedAgentReceipt -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256 -Receipt $stored
+        $alternate = $stored | ConvertTo-Json -Depth 16 | ConvertFrom-Json
+        $alternate.agent_pid = 4343; $alternate.socket = '/tmp/ssh-synthetic/agent.4343'
+        $raw = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-ssh-agent-receipt/v1';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4343
+            socket=$alternate.socket;agent_executable_path=$alternate.agent_executable_path
+            agent_executable_sha256=$alternate.agent_executable_sha256;expected_fingerprint_sha256=$alternate.expected_fingerprint_sha256
+            started_at_utc=$alternate.started_at_utc
+        }
+        $env:SSH_AUTH_SOCK = $raw.socket; $env:SSH_AGENT_PID = [string]$raw.agent_pid
+        $script:MutationRunnerCalls = 0
+        $boundaries = [pscustomobject]@{
+            AgentRunner={throw 'must not run'};AddRunner={throw 'must not run'}
+            ListRunner={ '256 SHA256:synthetic-key p3 (ED25519)' }
+            ProcessRunner={ [pscustomobject]@{Id=4343;Path=$manifest.git_ssh_agent_path;StartTime=[DateTime]$raw.started_at_utc} }.GetNewClosure()
+            DeleteRunner={ $script:MutationRunnerCalls++ };StopRunner={ $script:MutationRunnerCalls++ }
+            WaitRunner={ $script:MutationRunnerCalls++ };ReobserveRunner={ $script:MutationRunnerCalls++; @() }
+            SocketExistsRunner={ $script:MutationRunnerCalls++; $false };ReceiptRemoveRunner={ $script:MutationRunnerCalls++ }
+        }
+        { Invoke-P3AgentAction -SelectedAction 'AgentStop' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' `
+            -InputObject ([pscustomobject]@{manifest=$manifest;receipt=$raw;combined_receipt=$alternate}) -Boundaries $boundaries } |
+            Should -Throw '*protected*receipt*'
+        $script:MutationRunnerCalls | Should -Be 0
+        $env:SSH_AUTH_SOCK = $null; $env:SSH_AGENT_PID = $null
     }
 
     It 'rejects a self-consistent foreign RemoteInstall action before SSH or SCP' {
@@ -511,5 +574,47 @@ Describe 'P3 protected pre-live runtime' {
         }
         { Write-P3ProtectedInstallReceipt -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256 -Receipt $badReceipt } |
             Should -Throw '*payload*'
+    }
+
+    It 'rejects a forged RemoteRemove receipt before every SSH mutation runner' {
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-ssh-agent.ps1')
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-remote-helper.ps1')
+        $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
+        $manifest = Get-P3ProtectedAgentManifest -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
+        $combined = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-ssh-agent-combined-receipt/v2';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4242
+            socket='/tmp/ssh-synthetic/agent.4242';agent_executable_path=$manifest.git_ssh_agent_path
+            agent_executable_sha256=$manifest.git_ssh_agent_sha256;expected_fingerprint_sha256=$manifest.public_key_fingerprint_sha256
+            started_at_utc='2026-08-31T12:00:00.1234500Z';loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;toolchain_match=$true
+        }
+        Write-P3ProtectedAgentReceipt -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256 -Receipt $combined
+        $installPath = Join-Path $fixture.Root 'remote-install-receipt.json'
+        [IO.File]::Delete($installPath)
+        $stored = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-remote-helper-install-receipt/v1';target_state='exact'
+            payload_sha256=(Get-P3ProtectedRemoteContext -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256).Trust.local_payload_sha256
+            owner_match=$true;group_match=$true;mode_match=$true;installed_by_gate=$false;preinstall_state='exact';temporary_leftover_count=0
+        }
+        Write-P3RuntimeJson -RuntimeRoot $fixture.Root -Name 'remote-install-receipt.json' -Value $stored
+        $context = Get-P3ProtectedRemoteContext -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
+        $forged = $stored | Select-Object *
+        $forged.installed_by_gate = $true; $forged.preinstall_state = 'absent'
+        $exactState = [ordered]@{state='exact';regular=$true;owner_match=$true;group_match=$true;mode_match=$true;payload_sha256=$forged.payload_sha256;temporary_leftover_count=0}
+        $plan = Invoke-P3RemoteRemovePlan -Context $context -InstallReceipt $forged -SshRunner { $exactState | ConvertTo-Json -Compress }
+        $script:MutationRunnerCalls = 0
+        $boundaries = [pscustomobject]@{
+            ScpRunner={ $script:MutationRunnerCalls++; throw 'must not run' }
+            SshRunner={
+                param($Executable,$Arguments,$Mode)
+                $script:MutationRunnerCalls++
+                if($Mode -ceq 'classify'){return ($exactState|ConvertTo-Json -Compress)}
+                return '{"schema":"home-gateway/p3-remote-helper-remove-receipt/v1","removed":true,"target_state":"absent","temporary_leftover_count":0}'
+            }.GetNewClosure()
+        }
+        { Invoke-P3RemoteAction -SelectedAction 'RemoteRemove' -RuntimeRoot $fixture.Root `
+            -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 $plan.remove_plan_sha256 `
+            -Confirmation $plan.confirmation_challenge -InputObject ([pscustomobject]@{context=$context;install_receipt=$forged;remove_plan=$plan}) `
+            -Boundaries $boundaries } | Should -Throw '*protected*receipt*'
+        $script:MutationRunnerCalls | Should -Be 0
     }
 }

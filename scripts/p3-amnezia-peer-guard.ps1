@@ -700,8 +700,8 @@ function Invoke-P3OwnedGuardAction(
             -ExpectedBodyPlanSHA256 $ExpectedBodyPlanSHA256 -BodyConfirmation $BodyConfirmation -Boundaries $Boundaries
     }
     finally {
-        Stop-P3Agent -Manifest $agentManifest -AgentReceipt $agentReceipt -DeleteRunner $Boundaries.DeleteRunner `
-            -StopRunner $Boundaries.StopRunner -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
+        Stop-P3OwnedAgentEmergency -Manifest $agentManifest -AgentReceipt $agentReceipt -DeleteRunner $Boundaries.DeleteRunner `
+            -StopRunner $Boundaries.StopRunner `
             -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
             -SocketExistsRunner $Boundaries.SocketExistsRunner | Out-Null
         if ($null -ne $combined) {

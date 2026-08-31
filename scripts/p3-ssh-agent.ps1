@@ -263,6 +263,64 @@ function Stop-P3Agent(
     return [pscustomobject]@{ schema = 'home-gateway/p3-ssh-agent-stop-receipt/v1'; stopped = $true; removed_key_count = 1 }
 }
 
+function Stop-P3OwnedAgentEmergency(
+    [object]$Manifest,
+    [object]$AgentReceipt,
+    [scriptblock]$DeleteRunner,
+    [scriptblock]$StopRunner,
+    [scriptblock]$WaitRunner,
+    [scriptblock]$ReobserveRunner,
+    [scriptblock]$SocketExistsRunner
+) {
+    $null = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
+    try {
+        $null = [DateTime]::Parse([string]$AgentReceipt.started_at_utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    } catch { throw 'owned agent start binding differs' }
+    $failures = @()
+    $socketMatches = [string]$env:SSH_AUTH_SOCK -ceq [string]$AgentReceipt.socket
+    $pidMatches = [string]$env:SSH_AGENT_PID -ceq [string]$AgentReceipt.agent_pid
+    if ($socketMatches -and $pidMatches) {
+        try { $null = & $DeleteRunner } catch { $failures += 'key delete failure' }
+    } else { $failures += 'environment' }
+    try { $null = & $StopRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process stop failure' }
+    try { $null = & $WaitRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process wait failure' }
+    try {
+        if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { $failures += 'process reobserve failure' }
+    } catch { $failures += 'process reobserve failure' }
+    try {
+        if ([bool](& $SocketExistsRunner ([string]$AgentReceipt.socket))) { $failures += 'socket reobserve failure' }
+    } catch { $failures += 'socket reobserve failure' }
+    if ($socketMatches -and [string]$env:SSH_AUTH_SOCK -ceq [string]$AgentReceipt.socket) { $env:SSH_AUTH_SOCK = $null }
+    if ($pidMatches -and [string]$env:SSH_AGENT_PID -ceq [string]$AgentReceipt.agent_pid) { $env:SSH_AGENT_PID = $null }
+    if ($failures.Count -ne 0) { throw "owned agent emergency cleanup failed: $($failures -join ',')" }
+    return [pscustomobject]@{ schema = 'home-gateway/p3-ssh-agent-stop-receipt/v1'; stopped = $true; removed_key_count = 1 }
+}
+
+function ConvertTo-P3AgentReceiptFromCombined([object]$CombinedReceipt) {
+    $expected = @(
+        'agent_executable_path', 'agent_executable_sha256', 'agent_pid', 'agent_pid_match',
+        'expected_fingerprint_sha256', 'expected_key_match', 'loaded_key_count', 'manifest_sha256',
+        'schema', 'socket', 'started_at_utc', 'toolchain_match'
+    )
+    if ($null -eq $CombinedReceipt -or $CombinedReceipt -is [Array] -or
+        @(Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject @($CombinedReceipt.PSObject.Properties.Name | Sort-Object)).Count -ne 0 -or
+        [string]$CombinedReceipt.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v2' -or
+        [int]$CombinedReceipt.loaded_key_count -ne 1 -or -not [bool]$CombinedReceipt.expected_key_match -or
+        -not [bool]$CombinedReceipt.agent_pid_match -or -not [bool]$CombinedReceipt.toolchain_match) {
+        throw 'protected agent receipt differs'
+    }
+    return [pscustomobject][ordered]@{
+        schema = 'home-gateway/p3-ssh-agent-receipt/v1'
+        manifest_sha256 = [string]$CombinedReceipt.manifest_sha256
+        agent_pid = [int]$CombinedReceipt.agent_pid
+        socket = [string]$CombinedReceipt.socket
+        agent_executable_path = [string]$CombinedReceipt.agent_executable_path
+        agent_executable_sha256 = [string]$CombinedReceipt.agent_executable_sha256
+        expected_fingerprint_sha256 = [string]$CombinedReceipt.expected_fingerprint_sha256
+        started_at_utc = $CombinedReceipt.started_at_utc
+    }
+}
+
 function Write-P3ProtectedAgentReceipt([string]$Root, [string]$ManifestSHA256, [object]$Receipt) {
     $savedAction = $Action
     try {
@@ -292,6 +350,19 @@ function Get-P3ProtectedAgentManifest([string]$Root, [string]$ManifestSHA256) {
             public_key_path = [string]$trust.public_key_path; private_key_path = [string]$trust.private_key_path
             public_key_fingerprint_sha256 = [string]$manifest.public_key_fingerprint_sha256
         }
+    } finally { $Action = $savedAction }
+}
+
+function Get-P3ProtectedAgentReceipt([string]$Root, [string]$ManifestSHA256) {
+    $savedAction = $Action
+    try {
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
+        $stored = Open-P3BoundedStableJson -Path (Join-Path $Root 'agent-receipt.json') -MaximumBytes 65536 `
+            -ExpectedProperties $script:P3CombinedAgentReceiptProperties
+        if ([string]$stored.manifest_sha256 -cne $ManifestSHA256) { throw 'protected agent receipt differs' }
+        $null = ConvertTo-P3AgentReceiptFromCombined -CombinedReceipt $stored
+        return $stored
     } finally { $Action = $savedAction }
 }
 
@@ -349,13 +420,21 @@ function Invoke-P3AgentAction(
                 [string]$InputObject.combined_receipt.manifest_sha256 -cne $ExpectedManifestSHA256) {
                 throw 'caller agent receipt differs from protected runtime'
             }
-            $stop = Stop-P3Agent -Manifest $protected -AgentReceipt $InputObject.receipt `
+            $storedCombined = Get-P3ProtectedAgentReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256
+            if ((Get-P3AgentCanonicalSHA256 $storedCombined) -cne (Get-P3AgentCanonicalSHA256 $InputObject.combined_receipt)) {
+                throw 'protected agent receipt differs'
+            }
+            $storedReceipt = ConvertTo-P3AgentReceiptFromCombined -CombinedReceipt $storedCombined
+            if ((Get-P3AgentCanonicalSHA256 $storedReceipt) -cne (Get-P3AgentCanonicalSHA256 $InputObject.receipt)) {
+                throw 'protected agent receipt differs'
+            }
+            $stop = Stop-P3Agent -Manifest $protected -AgentReceipt $storedReceipt `
                 -DeleteRunner $Boundaries.DeleteRunner -StopRunner $Boundaries.StopRunner `
                 -ListRunner $Boundaries.ListRunner -ProcessRunner $Boundaries.ProcessRunner `
                 -WaitRunner $Boundaries.WaitRunner -ReobserveRunner $Boundaries.ReobserveRunner `
                 -SocketExistsRunner $Boundaries.SocketExistsRunner
             Remove-P3ProtectedAgentState -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256 `
-                -Receipt $InputObject.combined_receipt -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
+                -Receipt $storedCombined -ReceiptRemoveRunner $Boundaries.ReceiptRemoveRunner
             return $stop
         }
     }

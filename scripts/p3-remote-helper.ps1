@@ -416,6 +416,22 @@ function Write-P3ProtectedInstallReceipt([string]$Root, [string]$ManifestSHA256,
     } finally { $Action = $savedAction }
 }
 
+function Get-P3ProtectedInstallReceipt([string]$Root, [string]$ManifestSHA256) {
+    $savedAction = $Action
+    try {
+        . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
+        $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
+        $manifest = Open-P3BoundedStableJson -Path (Join-Path $Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties
+        $stored = Open-P3BoundedStableJson -Path (Join-Path $Root 'remote-install-receipt.json') -MaximumBytes 65536 `
+            -ExpectedProperties $script:P3InstallReceiptProperties
+        if ([string]$stored.schema -cne 'home-gateway/p3-remote-helper-install-receipt/v1' -or
+            [string]$stored.payload_sha256 -cne [string]$manifest.local_payload_sha256) {
+            throw 'protected remote install receipt differs'
+        }
+        return $stored
+    } finally { $Action = $savedAction }
+}
+
 function Get-P3ProtectedRemoteContext([string]$Root, [string]$ManifestSHA256) {
     $savedAction = $Action
     try {
@@ -481,7 +497,11 @@ function Invoke-P3RemoteAction(
     if ([string]$InputObject.remove_plan.remove_plan_sha256 -cne $ExpectedPlanSHA256 -or
         $Confirmation -cne [string]$InputObject.remove_plan.confirmation_challenge -or
         $Confirmation -cnotmatch '^P3-REMOTE-REMOVE-[0-9A-F]{16}$') { throw 'remote remove approval differs' }
-    return Invoke-P3RemoteRemove -Context $protected -InstallReceipt $InputObject.install_receipt `
+    $storedInstall = Get-P3ProtectedInstallReceipt -Root $RuntimeRoot -ManifestSHA256 $ExpectedManifestSHA256
+    if ((Get-P3RemoteCanonicalSHA256 $storedInstall) -cne (Get-P3RemoteCanonicalSHA256 $InputObject.install_receipt)) {
+        throw 'protected remote install receipt differs'
+    }
+    return Invoke-P3RemoteRemove -Context $protected -InstallReceipt $storedInstall `
         -RemovePlan $InputObject.remove_plan -SshRunner $Boundaries.SshRunner
 }
 

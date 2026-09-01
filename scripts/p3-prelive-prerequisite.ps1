@@ -374,7 +374,7 @@ function New-P3PrerequisiteObserverInvocation(
 ) {
     Import-P3PrerequisiteRuntime
     Assert-P3ExactProperties $Trust @(
-        'git_ssh_path','known_hosts_path','ssh_host','ssh_user','connect_timeout_seconds',
+        'git_ssh_path','known_hosts_path','public_key_path','ssh_host','ssh_user','connect_timeout_seconds',
         'command_timeout_seconds','maximum_output_bytes','observer_payload_sha256',
         'observer_protocol_sha256','expected_ipv6_policy_sha256'
     ) 'prerequisite observer trust'
@@ -386,6 +386,7 @@ function New-P3PrerequisiteObserverInvocation(
     if ([string]$Trust.ssh_user -cne 'homegateway' -or [string]::IsNullOrWhiteSpace([string]$Trust.ssh_host) -or
         [string]::IsNullOrWhiteSpace([string]$Trust.git_ssh_path) -or
         [string]::IsNullOrWhiteSpace([string]$Trust.known_hosts_path) -or
+        [string]::IsNullOrWhiteSpace([string]$Trust.public_key_path) -or
         [string]::IsNullOrWhiteSpace([string]$AgentReceipt.ssh_auth_sock) -or
         -not (Test-P3ExactJsonInteger $Trust.connect_timeout_seconds) -or [int]$Trust.connect_timeout_seconds -ne 10 -or
         -not (Test-P3ExactJsonInteger $Trust.command_timeout_seconds) -or [int]$Trust.command_timeout_seconds -lt 1 -or [int]$Trust.command_timeout_seconds -gt 60 -or
@@ -433,7 +434,8 @@ sys.stdout.write(json.dumps(receipt,sort_keys=True,separators=(',',':')))
     $remoteCommand = 'sudo -n /usr/bin/python3 -c "import base64;exec(base64.b64decode(''' + $loaderEncoded + '''))"'
     $arguments = @(
         '-F','/dev/null','-o','GlobalKnownHostsFile=/dev/null',
-        '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o',("IdentityAgent=" + [string]$AgentReceipt.ssh_auth_sock),
+        '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-i',[string]$Trust.public_key_path,
+        '-o',("IdentityAgent=" + [string]$AgentReceipt.ssh_auth_sock),
         '-o',("UserKnownHostsFile=" + [string]$Trust.known_hosts_path),'-o','StrictHostKeyChecking=yes',
         '-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-o','ClearAllForwardings=yes',
         '-o','RequestTTY=no','-o',("ConnectTimeout=" + [string]$Trust.connect_timeout_seconds),'-T',
@@ -484,6 +486,7 @@ function Assert-P3PrerequisiteExternalFiles([object]$Trust) {
             @('git_ssh_agent_path','git_ssh_agent_sha256','Git ssh-agent'),
             @('git_ssh_add_path','git_ssh_add_sha256','Git ssh-add'),
             @('git_ssh_path','git_ssh_sha256','Git ssh'),
+            @('public_key_path','public_key_sha256','public key'),
             @('git_scp_path','git_scp_sha256','Git scp'),
             @('public_key_path','public_key_sha256','public key'),
             @('observer_payload_path','observer_payload_sha256','observer payload'))) {
@@ -518,6 +521,7 @@ function Invoke-P3PrerequisiteSshObservation(
     $payload = Read-P3BoundedStableBytes ([string]$Trust.observer_payload_path) 524288 'observer payload'
     $invocation = New-P3PrerequisiteObserverInvocation -Trust ([pscustomobject]@{
         git_ssh_path=[string]$Trust.git_ssh_path;known_hosts_path=[string]$Trust.known_hosts_path
+        public_key_path=[string]$Trust.public_key_path
         ssh_host=[string]$Trust.ssh_host;ssh_user=[string]$Trust.ssh_user
         connect_timeout_seconds=[int]$Trust.connect_timeout_seconds
         command_timeout_seconds=[int]$Trust.command_timeout_seconds

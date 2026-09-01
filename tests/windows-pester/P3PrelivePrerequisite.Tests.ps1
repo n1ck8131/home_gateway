@@ -341,6 +341,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $f = New-PrerequisiteFixture
         $trust = [pscustomobject]@{
             git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts'
+            public_key_path='C:\synthetic\home_gateway.pub'
             ssh_host='192.0.2.10';ssh_user='homegateway';connect_timeout_seconds=10
             command_timeout_seconds=30;maximum_output_bytes=65536
             observer_payload_sha256=(Get-P3SHA256Text 'synthetic-observer')
@@ -366,6 +367,23 @@ Describe 'P3 pre-live prerequisite boundary' {
         $invocation.stdin.Length | Should -BeGreaterThan 18
         $invocation.timeout_seconds | Should -Be 30
         $invocation.maximum_output_bytes | Should -Be 65536
+    }
+
+    It 'binds the dedicated public key selector when IdentitiesOnly is enabled' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'identity-selector')
+        $script:CapturedObserverArguments = $null
+        {
+            Invoke-P3PrerequisiteSshObservation -Manifest $p.Fixture.Manifest -Trust $p.Trust `
+                -AgentReceipt ([pscustomobject]@{socket='C:\synthetic\agent.sock'}) -Nonce ('c' * 64) `
+                -Runner {
+                    param($Executable,$Arguments,$InputBytes,$TimeoutSeconds,$MaximumBytes)
+                    $script:CapturedObserverArguments = @($Arguments)
+                    [pscustomobject]@{ExitCode=1;TimedOut=$false;Oversized=$false;StdOut='';StdErr='blocked'}
+                }
+        } | Should -Throw '*observation failed*'
+        $identityIndex = [Array]::IndexOf([object[]]$script:CapturedObserverArguments, '-i')
+        $identityIndex | Should -BeGreaterOrEqual 0
+        $script:CapturedObserverArguments[$identityIndex + 1] | Should -BeExactly $p.Trust.public_key_path
     }
 
     It 'rejects a self-consistent foreign known-host pin before the SSH runner' {
@@ -396,7 +414,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $capture=Join-Path $TestDrive 'capture-argv.ps1'
         [IO.File]::WriteAllText($capture,'[Console]::Out.Write(($args | ConvertTo-Json -Compress))',[Text.UTF8Encoding]::new($false))
         $f=New-PrerequisiteFixture
-        $trust=[pscustomobject]@{git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts';ssh_host='192.0.2.10';ssh_user='homegateway'
+        $trust=[pscustomobject]@{git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts';public_key_path='C:\synthetic\home_gateway.pub';ssh_host='192.0.2.10';ssh_user='homegateway'
             connect_timeout_seconds=10;command_timeout_seconds=30;maximum_output_bytes=65536;observer_payload_sha256=(Get-P3SHA256Text 'payload')
             observer_protocol_sha256=$f.Manifest.protocol_sha256;expected_ipv6_policy_sha256=('d'*64)}
         $invocation=New-P3PrerequisiteObserverInvocation $trust ([pscustomobject]@{ssh_auth_sock='C:\synthetic\agent.sock'}) ('c'*64) ([Text.Encoding]::UTF8.GetBytes('payload'))

@@ -679,6 +679,7 @@ function Invoke-P3PrerequisiteNativeHttps([object]$Entry, [scriptblock]$ClockRun
         [string]$Entry.authority_sha256 -cne (Get-P3SHA256Text ($uri.Authority.ToLowerInvariant()))) {
         throw 'prerequisite HTTPS authority differs'
     }
+    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
     $handler = [Net.Http.HttpClientHandler]::new()
     $handler.AllowAutoRedirect = $false
     $client = [Net.Http.HttpClient]::new($handler)

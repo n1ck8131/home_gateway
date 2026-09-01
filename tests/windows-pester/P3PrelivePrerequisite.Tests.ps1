@@ -258,6 +258,27 @@ Describe 'P3 pre-live prerequisite boundary' {
         $open.Dispose()
     }
 
+    It 'reaches the native HTTPS request boundary in a clean Windows PowerShell 5.1 process' {
+        $powershell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+        $escapedPrerequisite = $script:Driver.Replace("'", "''")
+        $escapedRuntime = $script:Runtime.Replace("'", "''")
+        $probe = @"
+`$ProgressPreference = 'SilentlyContinue'
+. '$escapedRuntime'
+. '$escapedPrerequisite' -Action ''
+`$entry = [pscustomobject]@{endpoint='https://127.0.0.1:1';authority_sha256='6183157cf8d46ed10e589f38012b96016a87ab04c372569655ac328c34e5a441'}
+try { Invoke-P3PrerequisiteNativeHttps `$entry {[DateTime]::UtcNow} | Out-Null }
+catch {
+    if (`$_.Exception.Message -match 'Unable to find type.*HttpClientHandler') { exit 41 }
+    exit 0
+}
+exit 0
+"@
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+        & $powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded
+        $LASTEXITCODE | Should -Be 0
+    }
+
     It 'owns prerequisite AgentPlan Start Validate Stop under its protected root' {
         $f = New-PrerequisiteFixture
         $agent = New-PrerequisiteAgentFixture (Join-Path $TestDrive 'agent-action') $f.Manifest

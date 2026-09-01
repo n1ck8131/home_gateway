@@ -407,6 +407,21 @@ exit 0
         $script:CapturedObserverArguments[$identityIndex + 1] | Should -BeExactly $p.Trust.public_key_path
     }
 
+    It 'rejects a changed public key immediately before the SSH runner' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'changed-public-key')
+        [IO.File]::WriteAllText([string]$p.Trust.public_key_path, 'changed synthetic public key', [Text.UTF8Encoding]::new($false))
+        $script:SshCalls = 0
+        {
+            Invoke-P3PrerequisiteSshObservation -Manifest $p.Fixture.Manifest -Trust $p.Trust `
+                -AgentReceipt ([pscustomobject]@{socket='C:\synthetic\agent.sock'}) -Nonce ('c' * 64) `
+                -Runner {
+                    $script:SshCalls++
+                    [pscustomobject]@{ExitCode=1;TimedOut=$false;Oversized=$false;StdOut='';StdErr='blocked'}
+                }
+        } | Should -Throw '*SSH boundary identity*'
+        $script:SshCalls | Should -Be 0
+    }
+
     It 'rejects a self-consistent foreign known-host pin before the SSH runner' {
         $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'foreign-known-host')
         $knownHosts = [string]$p.Trust.known_hosts_path

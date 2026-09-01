@@ -486,7 +486,6 @@ function Assert-P3PrerequisiteExternalFiles([object]$Trust) {
             @('git_ssh_agent_path','git_ssh_agent_sha256','Git ssh-agent'),
             @('git_ssh_add_path','git_ssh_add_sha256','Git ssh-add'),
             @('git_ssh_path','git_ssh_sha256','Git ssh'),
-            @('public_key_path','public_key_sha256','public key'),
             @('git_scp_path','git_scp_sha256','Git scp'),
             @('public_key_path','public_key_sha256','public key'),
             @('observer_payload_path','observer_payload_sha256','observer payload'))) {
@@ -511,6 +510,7 @@ function Invoke-P3PrerequisiteSshObservation(
     foreach ($pair in @(
             @('known_hosts_path','known_hosts_sha256','known-hosts'),
             @('git_ssh_path','git_ssh_sha256','Git ssh'),
+            @('public_key_path','public_key_sha256','public key'),
             @('observer_payload_path','observer_payload_sha256','observer payload'))) {
         $path = [string]$Trust.PSObject.Properties[[string]$pair[0]].Value
         $expected = [string]$Trust.PSObject.Properties[[string]$pair[1]].Value

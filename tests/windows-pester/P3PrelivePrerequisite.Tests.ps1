@@ -265,7 +265,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $processPids = [Collections.Generic.List[int]]::new(); $stoppedPids = [Collections.Generic.List[int]]::new(); $waitPids = [Collections.Generic.List[int]]::new(); $reobservePids = [Collections.Generic.List[int]]::new()
         $boundaries = [pscustomobject]@{
             PrerequisiteRoot=$agent.Root;PrerequisiteManifest=$f.Manifest
-            AgentRunner={ New-P3PrerequisiteTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-prerequisite/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') }
+            AgentRunner={ New-P3PrerequisiteTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-prerequisite/agent.77; export SSH_AUTH_SOCK;', 'echo Agent pid 77;') }
             AddRunner={ param($path) };StopRunner={ param($ProcessId) $stoppedPids.Add($ProcessId); $script:Stopped++ }.GetNewClosure()
             ListRunner={ "256 $($agent.Fingerprint) p3 (ED25519)" }.GetNewClosure()
             ProcessRunner={ param($ProcessId) $processPids.Add($ProcessId); [pscustomobject]@{Id=$ProcessId;Path=$agent.Manifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow} }.GetNewClosure()
@@ -435,7 +435,7 @@ Describe 'P3 pre-live prerequisite boundary' {
             live_mutation_performed=$false;raw_identity_exposed=$false
         }
         $boundaries = [pscustomobject]@{
-            AgentRunner={param($exe)$calls.Add('start');[pscustomobject]@{schema='home-gateway/p3-windows-agent-launch/v1';output=@('SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;');started_at_utc=[DateTime]::UtcNow.ToString('o');windows_process_id=26484}}.GetNewClosure()
+            AgentRunner={param($exe)$calls.Add('start');[pscustomobject]@{schema='home-gateway/p3-windows-agent-launch/v1';output=@('SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;', 'echo Agent pid 77;');started_at_utc=[DateTime]::UtcNow.ToString('o');windows_process_id=26484}}.GetNewClosure()
             AddRunner={param($path)$calls.Add('add')}.GetNewClosure()
             ListRunner={param($exe)"256 $($p.Agent.Fingerprint) p3 (ED25519)"}.GetNewClosure()
             ProcessRunner={param($pid)[pscustomobject]@{Id=$pid;Path=$p.Agent.Manifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow}}.GetNewClosure()
@@ -464,7 +464,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $plan = New-P3PrerequisitePlan $f.Manifest ('c' * 64) $p.Agent.Root
         $calls = [Collections.Generic.List[string]]::new()
         $boundaries = [pscustomobject]@{
-            AgentRunner={param($exe)$calls.Add('start');[pscustomobject]@{schema='home-gateway/p3-windows-agent-launch/v1';output=@('SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;');started_at_utc=[DateTime]::UtcNow.ToString('o');windows_process_id=26484}}.GetNewClosure()
+            AgentRunner={param($exe)$calls.Add('start');[pscustomobject]@{schema='home-gateway/p3-windows-agent-launch/v1';output=@('SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;', 'echo Agent pid 77;');started_at_utc=[DateTime]::UtcNow.ToString('o');windows_process_id=26484}}.GetNewClosure()
             AddRunner={param($path)$calls.Add('add')}.GetNewClosure()
             ListRunner={param($exe)"256 $($p.Agent.Fingerprint) p3 (ED25519)"}.GetNewClosure()
             ProcessRunner={param($ProcessId)[pscustomobject]@{Id=$ProcessId;Path=$p.Agent.Manifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow}}.GetNewClosure()

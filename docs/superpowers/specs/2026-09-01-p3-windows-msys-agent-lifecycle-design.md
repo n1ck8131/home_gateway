@@ -19,8 +19,10 @@ owned Windows process identifier.
 
 The lifecycle has two different identifiers:
 
-- `agent_pid`: the positive integer parsed from emitted `SSH_AGENT_PID`; it is
-  used only for `SSH_AGENT_PID`, environment comparison, and audit evidence.
+- `agent_pid`: the positive integer parsed from the foreground record
+  `echo Agent pid N;`; it is exported locally as `SSH_AGENT_PID` and used only
+  for environment comparison and audit evidence. Forked assignment output and
+  ambiguous PID forms are terminal.
 - `windows_process_id`: the positive Windows `Process.Id` returned by the
   controller-owned process launch; it is the only identifier accepted by
   `Get-Process`, `Stop-Process`, wait, and re-observation boundaries.

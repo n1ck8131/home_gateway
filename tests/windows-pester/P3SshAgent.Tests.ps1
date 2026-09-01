@@ -89,6 +89,39 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         { Resolve-P3GitOpenSshToolchain -Manifest $script:Manifest } | Should -Throw '*hash*'
     }
 
+    It 'accepts exact LF and CRLF foreground records with at most one terminal newline' {
+        $socket = 'SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;'
+        $foregroundPid = 'echo Agent pid 77;'
+        foreach ($output in @("$socket`n$foregroundPid", "$socket`r`n$foregroundPid`r`n")) {
+            $parsed = ConvertFrom-P3AgentOutput -Output $output
+            $parsed.socket | Should -BeExactly '/tmp/ssh-synthetic/agent.77'
+            $parsed.agent_pid | Should -Be 77
+        }
+    }
+
+    It 'rejects assignment ambiguous duplicate missing malformed unknown blank lone-CR and overflow foreground records' {
+        $socket = 'SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;'
+        $foregroundPid = 'echo Agent pid 77;'
+        $cases = @(
+            @($socket, 'SSH_AGENT_PID=77; export SSH_AGENT_PID;'),
+            @($socket, $foregroundPid, 'SSH_AGENT_PID=77; export SSH_AGENT_PID;'),
+            @($socket, $foregroundPid, $foregroundPid),
+            @($socket),
+            @($socket, 'echo Agent pid 0;'),
+            @($socket, 'echo Agent pid 77'),
+            @('unknown', $socket, $foregroundPid),
+            @($socket, $foregroundPid, 'unknown'),
+            @($socket, ' SSH_AGENT_PID=77; export SSH_AGENT_PID;'),
+            @($socket, 'echo Agent pid 2147483648;')
+        )
+
+        foreach ($records in $cases) {
+            { ConvertFrom-P3AgentOutput -Output ($records -join "`n") } | Should -Throw '*malformed*'
+        }
+        { ConvertFrom-P3AgentOutput -Output "$socket`n`n$foregroundPid" } | Should -Throw '*malformed*'
+        { ConvertFrom-P3AgentOutput -Output "$socket`r$foregroundPid" } | Should -Throw '*malformed*'
+    }
+
     It 'accepts exactly one expected key and the receipt-bound process' {
         $receipt = Test-P3AgentState -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
             -ListRunner { '256 SHA256:synthetic-key p3 (ED25519)' } `
@@ -148,7 +181,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
             -AgentRunner {
                 New-TestAgentLaunch -Output @(
                     'SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;'
-                    'SSH_AGENT_PID=4242; export SSH_AGENT_PID;'
+                    'echo Agent pid 4242;'
                 )
             } `
             -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) } } `
@@ -167,7 +200,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
             schema = 'home-gateway/p3-windows-agent-launch/v1'
             output = @(
                 'SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;'
-                'SSH_AGENT_PID=77; export SSH_AGENT_PID;'
+                'echo Agent pid 77;'
             )
             started_at_utc = [DateTime]::UtcNow.AddSeconds(-1).ToString('o')
             windows_process_id = 26484
@@ -186,9 +219,26 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
     It 'cleans up the Windows PID when structured launch output is malformed' {
         $script:StoppedPids = @()
         { Start-P3Agent -Manifest $script:Manifest -AgentRunner {
-            [pscustomobject]@{ schema = 'home-gateway/p3-windows-agent-launch/v1'; output = @('unexpected', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;'); started_at_utc = [DateTime]::UtcNow.ToString('o'); windows_process_id = 26484 }
+            [pscustomobject]@{ schema = 'home-gateway/p3-windows-agent-launch/v1'; output = @('unexpected', 'echo Agent pid 77;'); started_at_utc = [DateTime]::UtcNow.ToString('o'); windows_process_id = 26484 }
         } -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = 26484; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow } } -AddRunner { throw 'must not add' } -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*malformed*'
         $script:StoppedPids | Should -Be @(26484)
+        $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'rejects an extra foreground agent record end to end before adding a key' {
+        $script:Added = 0
+        $script:StoppedPids = @()
+        { Start-P3Agent -Manifest $script:Manifest -AgentRunner {
+            New-TestAgentLaunch -Output @(
+                'SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;'
+                'echo Agent pid 77;'
+                'unexpected third record'
+            )
+        } -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow } } `
+            -AddRunner { $script:Added++ } -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*malformed*'
+        $script:Added | Should -Be 0
+        $script:StoppedPids | Should -Be @(26484)
+        $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
         $env:SSH_AGENT_PID | Should -BeNullOrEmpty
     }
 
@@ -196,7 +246,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $cases = @(@{ Processes = @() }, @{ Processes = @([pscustomobject]@{ Id = 26484; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow }, [pscustomobject]@{ Id = 26485; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow }) }, @{ Processes = @([pscustomobject]@{ Id = 77; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow }) }, @{ Processes = @([pscustomobject]@{ Id = 26484; Path = $script:Paths.'ssh.exe'; StartTime = [DateTime]::UtcNow }) }, @{ Processes = @([pscustomobject]@{ Id = 26484; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-11) }) })
         foreach ($case in $cases) {
             $script:Added = 0; $script:StoppedPids = @()
-            { Start-P3Agent -Manifest $script:Manifest -AgentRunner { [pscustomobject]@{ schema = 'home-gateway/p3-windows-agent-launch/v1'; output = @('SSH_AUTH_SOCK=/tmp/a; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;'); started_at_utc = [DateTime]::UtcNow.ToString('o'); windows_process_id = 26484 } } -ProcessRunner { param($ProcessId) $case.Processes } -AddRunner { $script:Added++ } -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw
+            { Start-P3Agent -Manifest $script:Manifest -AgentRunner { [pscustomobject]@{ schema = 'home-gateway/p3-windows-agent-launch/v1'; output = @('SSH_AUTH_SOCK=/tmp/a; export SSH_AUTH_SOCK;', 'echo Agent pid 77;'); started_at_utc = [DateTime]::UtcNow.ToString('o'); windows_process_id = 26484 } } -ProcessRunner { param($ProcessId) $case.Processes } -AddRunner { $script:Added++ } -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw
             $script:Added | Should -Be 0; $script:StoppedPids | Should -BeNullOrEmpty
         }
     }
@@ -231,7 +281,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $script:CapturedAgentLaunch = $null
         $script:ExpectedAgentLaunch = [pscustomobject][ordered]@{
             schema = 'home-gateway/p3-windows-agent-launch/v1'
-            output = @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;')
+            output = @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'echo Agent pid 77;')
             started_at_utc = '2026-09-01T12:00:00.0000000Z'
             windows_process_id = 26484
         }
@@ -284,7 +334,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
     It 'destroys only the newly created agent when ssh-add fails' {
         $script:StoppedPids = @()
         { Start-P3Agent -Manifest $script:Manifest `
-            -AgentRunner { New-TestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=4242; export SSH_AGENT_PID;') } `
+            -AgentRunner { New-TestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;', 'echo Agent pid 4242;') } `
             -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) } } `
             -AddRunner { throw 'synthetic add failure' } `
             -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*ssh-add*'
@@ -296,7 +346,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
     It 'stops a uniquely parsed newly created PID when the full agent output is malformed' {
         $script:StoppedPids = @()
         { Start-P3Agent -Manifest $script:Manifest `
-            -AgentRunner { New-TestAgentLaunch -Output @('unexpected', 'SSH_AGENT_PID=4242; export SSH_AGENT_PID;') } `
+            -AgentRunner { New-TestAgentLaunch -Output @('unexpected', 'echo Agent pid 4242;') } `
             -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) } } `
             -AddRunner { throw 'must not add' } `
             -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*malformed*'
@@ -309,7 +359,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
             -AgentRunner {
                 New-TestAgentLaunch -Output @(
                     'unexpected'
-                    'SSH_AGENT_PID=4242; export SSH_AGENT_PID;'
+                    'echo Agent pid 4242;'
                 )
             } `
             -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) } } `
@@ -320,7 +370,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
 
     It 'treats cleanup failure as terminal and never swallows it' {
         { Start-P3Agent -Manifest $script:Manifest `
-            -AgentRunner { New-TestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=4242; export SSH_AGENT_PID;') } `
+            -AgentRunner { New-TestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;', 'echo Agent pid 4242;') } `
             -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) } } `
             -AddRunner { throw 'synthetic add failure' } `
             -StopRunner { throw 'synthetic stop failure' } } | Should -Throw '*cleanup failed*'
@@ -357,7 +407,7 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
             [pscustomobject]@{ Id = $ProcessId; Path = $script:Paths.'ssh-agent.exe'; StartTime = [DateTime]::UtcNow.AddSeconds(-2) }
         }
         $receipt = Start-P3Agent -Manifest $script:Manifest `
-            -AgentRunner { New-TestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=4242; export SSH_AGENT_PID;') } `
+            -AgentRunner { New-TestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;', 'echo Agent pid 4242;') } `
             -ProcessRunner $processRunner `
             -AddRunner { param($Path) if ($Path -cne $script:Manifest.private_key_path) { throw 'wrong key path' } } `
             -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId }

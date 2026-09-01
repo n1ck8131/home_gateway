@@ -191,7 +191,7 @@ Describe 'P3 protected pre-live runtime' {
             $list = { "256 $($Fixture.Fingerprint) p3 (ED25519)" }.GetNewClosure()
             $process = { param($ProcessId) $script:OwnedProcessPids += $ProcessId; [pscustomobject]@{ Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow } }.GetNewClosure()
             return [pscustomobject]@{
-                AgentRunner = { New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') }
+                AgentRunner = { New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'echo Agent pid 77;') }
                 AddRunner = { param($KeyPath) }; ListRunner = $list; ProcessRunner = $process
                 DeleteRunner = { }; StopRunner = { param($ProcessId) $script:OwnedStoppedPid = $ProcessId; & $StopRunner $ProcessId }.GetNewClosure()
                 WaitRunner = { param($ProcessId) $script:OwnedWaits++; $script:OwnedWaitPid = $ProcessId }
@@ -214,7 +214,7 @@ Describe 'P3 protected pre-live runtime' {
             $script:OwnedClockNow = $Fixture.NowUtc.AddSeconds(30)
             $clock = { $script:OwnedClockCalls++; $script:OwnedClockNow }
             return [pscustomobject]@{
-                AgentRunner={ $script:OwnedAgentStarts++; New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') }
+                AgentRunner={ $script:OwnedAgentStarts++; New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'echo Agent pid 77;') }
                 AddRunner={param($KeyPath)};ListRunner=$list;ProcessRunner=$process;DeleteRunner={}
                 StopRunner={param($ProcessId)$script:OwnedStoppedPid=$ProcessId; & $StopRunner $ProcessId}.GetNewClosure();WaitRunner={param($ProcessId)$script:OwnedWaits++;$script:OwnedWaitPid=$ProcessId}
                 ReobserveRunner={param($ProcessId)$script:OwnedReobservedPid=$ProcessId;@()};SocketExistsRunner={param($Path)$false}
@@ -536,7 +536,7 @@ Describe 'P3 protected pre-live runtime' {
                 public_key_path=$Trust.public_key_path; private_key_path=$Trust.private_key_path; public_key_fingerprint_sha256=$Trust.public_key_fingerprint_sha256
             }
             $start = Start-P3Agent -Manifest $agentManifest `
-                -AgentRunner { New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') } `
+                -AgentRunner { New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'echo Agent pid 77;') } `
                 -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id=$ProcessId;Path=$agentManifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow } } `
                 -AddRunner { param($KeyPath) } -StopRunner { param($ProcessId) }
             $combined = Test-P3AgentState -Manifest $agentManifest -AgentReceipt $start `

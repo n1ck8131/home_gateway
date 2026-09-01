@@ -132,12 +132,17 @@ function New-P3AgentPlan([object]$Manifest) {
 }
 
 function ConvertFrom-P3AgentOutput([string]$Output) {
-    $socketMatches = [regex]::Matches($Output, '(?m)^SSH_AUTH_SOCK=([^;\r\n]+); export SSH_AUTH_SOCK;$')
-    $pidMatches = [regex]::Matches($Output, '(?m)^SSH_AGENT_PID=([1-9][0-9]*); export SSH_AGENT_PID;$')
-    if ($socketMatches.Count -ne 1 -or $pidMatches.Count -ne 1) { throw 'ssh-agent output is malformed' }
-    $socket = $socketMatches[0].Groups[1].Value
+    if ([string]::IsNullOrEmpty($Output) -or [regex]::IsMatch($Output, "`r(?!`n)")) { throw 'ssh-agent output is malformed' }
+    $normalized = $Output.Replace("`r`n", "`n")
+    if ($normalized.EndsWith("`n")) { $normalized = $normalized.Substring(0, $normalized.Length - 1) }
+    $records = @([regex]::Split($normalized, "`n"))
+    if ($records.Count -ne 2) { throw 'ssh-agent output is malformed' }
+    $socketMatch = [regex]::Match($records[0], '\ASSH_AUTH_SOCK=([^;\r\n]+); export SSH_AUTH_SOCK;\z')
+    $pidMatch = [regex]::Match($records[1], '\Aecho Agent pid ([1-9][0-9]*);\z')
+    if (-not $socketMatch.Success -or -not $pidMatch.Success) { throw 'ssh-agent output is malformed' }
+    $socket = $socketMatch.Groups[1].Value
     $processId = 0
-    if (-not [int]::TryParse($pidMatches[0].Groups[1].Value, [ref]$processId) -or $processId -le 0) { throw 'ssh-agent PID differs' }
+    if (-not [int]::TryParse($pidMatch.Groups[1].Value, [ref]$processId) -or $processId -le 0) { throw 'ssh-agent output is malformed' }
     return [pscustomobject]@{ socket = $socket; agent_pid = $processId }
 }
 

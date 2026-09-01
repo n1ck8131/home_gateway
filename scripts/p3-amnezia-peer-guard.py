@@ -603,7 +603,10 @@ def collect_server_snapshot(
                 "--filter",
                 "name=^/amnezia-awg2$",
                 "--format",
-                "{{json .}}",
+                (
+                    '{"ID":{{json .ID}},"Image":{{json .Image}},'
+                    '"Names":{{json .Names}},"State":{{json .State}}}'
+                ),
             ],
             runner=runner,
         ),

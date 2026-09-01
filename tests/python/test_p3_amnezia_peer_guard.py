@@ -439,7 +439,10 @@ class PeerGuardProtocolTests(unittest.TestCase):
                 "--filter",
                 "name=^/amnezia-awg2$",
                 "--format",
-                "{{json .}}",
+                (
+                    '{"ID":{{json .ID}},"Image":{{json .Image}},'
+                    '"Names":{{json .Names}},"State":{{json .State}}}'
+                ),
             ): b'{"ID":"container-id","Image":"image-ref","Names":"amnezia-awg2","State":"running"}\n',
             (
                 "/usr/bin/docker",

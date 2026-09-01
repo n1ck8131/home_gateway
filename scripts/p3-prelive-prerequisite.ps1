@@ -432,7 +432,7 @@ sys.stdout.write(json.dumps(receipt,sort_keys=True,separators=(',',':')))
     $loaderEncoded = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($loader))
     $remoteCommand = 'sudo -n /usr/bin/python3 -c "import base64;exec(base64.b64decode(''' + $loaderEncoded + '''))"'
     $arguments = @(
-        '-F','NUL','-o','GlobalKnownHostsFile=NUL',
+        '-F','/dev/null','-o','GlobalKnownHostsFile=/dev/null',
         '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o',("IdentityAgent=" + [string]$AgentReceipt.ssh_auth_sock),
         '-o',("UserKnownHostsFile=" + [string]$Trust.known_hosts_path),'-o','StrictHostKeyChecking=yes',
         '-o','PasswordAuthentication=no','-o','KbdInteractiveAuthentication=no','-o','ClearAllForwardings=yes',

@@ -354,8 +354,9 @@ Describe 'P3 pre-live prerequisite boundary' {
         $invocation.arguments | Should -Contain 'IdentitiesOnly=yes'
         $invocation.arguments | Should -Contain 'StrictHostKeyChecking=yes'
         $invocation.arguments | Should -Contain '-F'
-        $invocation.arguments | Should -Contain 'NUL'
-        $invocation.arguments | Should -Contain 'GlobalKnownHostsFile=NUL'
+        $invocation.arguments | Should -Contain '/dev/null'
+        $invocation.arguments | Should -Contain 'GlobalKnownHostsFile=/dev/null'
+        $invocation.arguments | Should -Not -Contain 'NUL'
         $invocation.arguments | Should -Contain 'PasswordAuthentication=no'
         $invocation.arguments | Should -Contain 'KbdInteractiveAuthentication=no'
         $invocation.arguments | Should -Contain 'ClearAllForwardings=yes'
@@ -404,7 +405,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $actual=@($captured.StdOut|ConvertFrom-Json|ForEach-Object { $_ })
         $actual[-1]|Should -BeExactly $invocation.arguments[-1]
         $actual[-1]|Should -Match '^sudo -n /usr/bin/python3 -c '
-        $actual|Should -Contain 'GlobalKnownHostsFile=NUL'
+        $actual|Should -Contain 'GlobalKnownHostsFile=/dev/null'
     }
 
     It 'rejects oversized CLI stdin before creating a prerequisite root' {

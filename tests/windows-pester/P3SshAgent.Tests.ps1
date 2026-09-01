@@ -132,6 +132,21 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $calls | Should -Be 0
     }
 
+    It 'preserves native ssh-agent output records when starting the dedicated agent' {
+        $receipt = Start-P3Agent -Manifest $script:Manifest `
+            -AgentRunner {
+                @(
+                    'SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;'
+                    'SSH_AGENT_PID=4242; export SSH_AGENT_PID;'
+                )
+            } `
+            -AddRunner { } `
+            -StopRunner { throw 'must not stop a successfully started agent' }
+
+        $receipt.agent_pid | Should -Be 4242
+        $receipt.socket | Should -BeExactly '/tmp/ssh-synthetic/agent.4242'
+    }
+
     It 'destroys only the newly created agent when ssh-add fails' {
         $script:StoppedPids = @()
         { Start-P3Agent -Manifest $script:Manifest `
@@ -147,6 +162,20 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $script:StoppedPids = @()
         { Start-P3Agent -Manifest $script:Manifest `
             -AgentRunner { "unexpected`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" } `
+            -AddRunner { throw 'must not add' } `
+            -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*malformed*'
+        $script:StoppedPids | Should -Be @(4242)
+    }
+
+    It 'stops a uniquely parsed PID from malformed native ssh-agent output records' {
+        $script:StoppedPids = @()
+        { Start-P3Agent -Manifest $script:Manifest `
+            -AgentRunner {
+                @(
+                    'unexpected'
+                    'SSH_AGENT_PID=4242; export SSH_AGENT_PID;'
+                )
+            } `
             -AddRunner { throw 'must not add' } `
             -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } } | Should -Throw '*malformed*'
         $script:StoppedPids | Should -Be @(4242)

@@ -157,7 +157,7 @@ function Start-P3Agent([object]$Manifest, [scriptblock]$AgentRunner, [scriptbloc
     $started = $null
     $output = ''
     try {
-        $output = [string](& $AgentRunner $toolchain.git_ssh_agent_path)
+        $output = @(& $AgentRunner $toolchain.git_ssh_agent_path) -join "`n"
         $started = ConvertFrom-P3AgentOutput -Output $output
         $env:SSH_AUTH_SOCK = $started.socket
         $env:SSH_AGENT_PID = [string]$started.agent_pid

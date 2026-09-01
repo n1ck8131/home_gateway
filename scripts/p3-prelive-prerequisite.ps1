@@ -407,7 +407,7 @@ function New-P3PrerequisiteObserverInvocation(
     $stdin[$headerBytes.Length] = 10
     [Array]::Copy($Payload, 0, $stdin, $headerBytes.Length + 1, $Payload.Length)
     $loader = @'
-import hashlib,json,re,sys
+import hashlib,json,re,sys,types
 maximum=526337
 raw=sys.stdin.buffer.read(maximum+1)
 if not raw or len(raw)>maximum or raw.count(b'\n')<1: raise ValueError('observer frame length differs')
@@ -420,15 +420,24 @@ if not isinstance(header['length'],int) or isinstance(header['length'],bool) or 
 for name in ('nonce','payload_sha256','protocol_sha256','expected_ipv6_policy_sha256'):
     if not isinstance(header[name],str) or re.fullmatch('[0-9a-f]{64}',header[name]) is None: raise ValueError('observer frame identity differs')
 if hashlib.sha256(payload).hexdigest()!=header['payload_sha256']: raise ValueError('observer frame hash differs')
-scope={'__name__':'p3_transient_observer','__file__':'<memory>'}
-exec(compile(payload,'<p3-observer>','exec'),scope)
-for name in ('collect_server_snapshot','server_baseline_sha256','_sha'):
-    if name not in scope: raise ValueError('observer payload contract differs')
-scope['own_payload_sha256']=lambda: header['payload_sha256']
-baseline=scope['collect_server_snapshot']({'expected_ipv6_policy_sha256':header['expected_ipv6_policy_sha256']})
-if baseline.get('payload_sha256')!=header['payload_sha256'] or baseline.get('protocol_sha256')!=header['protocol_sha256'] or baseline.get('ipv6_non_mutation') is not True: raise ValueError('observer baseline identity differs')
-receipt={'schema':'home-gateway/p3-prelive-server-observation/v1','server_baseline':baseline,'server_baseline_sha256':scope['server_baseline_sha256'](baseline),'payload_sha256':header['payload_sha256'],'protocol_sha256':header['protocol_sha256'],'nonce_sha256':scope['_sha'](header['nonce'].encode()),'live_mutation_performed':False,'raw_identity_exposed':False}
-sys.stdout.write(json.dumps(receipt,sort_keys=True,separators=(',',':')))
+module_name='p3_transient_observer'
+if module_name in sys.modules: raise ValueError('observer module collision differs')
+module=types.ModuleType(module_name)
+module.__file__='<memory>'
+scope=module.__dict__
+sys.modules[module_name]=module
+try:
+    exec(compile(payload,'<p3-observer>','exec'),scope)
+    for name in ('collect_server_snapshot','server_baseline_sha256','_sha'):
+        if name not in scope: raise ValueError('observer payload contract differs')
+    scope['own_payload_sha256']=lambda: header['payload_sha256']
+    baseline=scope['collect_server_snapshot']({'expected_ipv6_policy_sha256':header['expected_ipv6_policy_sha256']})
+    if baseline.get('payload_sha256')!=header['payload_sha256'] or baseline.get('protocol_sha256')!=header['protocol_sha256'] or baseline.get('ipv6_non_mutation') is not True: raise ValueError('observer baseline identity differs')
+    receipt={'schema':'home-gateway/p3-prelive-server-observation/v1','server_baseline':baseline,'server_baseline_sha256':scope['server_baseline_sha256'](baseline),'payload_sha256':header['payload_sha256'],'protocol_sha256':header['protocol_sha256'],'nonce_sha256':scope['_sha'](header['nonce'].encode()),'live_mutation_performed':False,'raw_identity_exposed':False}
+    receipt_json=json.dumps(receipt,sort_keys=True,separators=(',',':'))
+finally:
+    if sys.modules.get(module_name) is module: del sys.modules[module_name]
+sys.stdout.write(receipt_json)
 '@.Trim()
     $loaderEncoded = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($loader))
     $remoteCommand = 'sudo -n /usr/bin/python3 -c "import base64;exec(base64.b64decode(''' + $loaderEncoded + '''))"'

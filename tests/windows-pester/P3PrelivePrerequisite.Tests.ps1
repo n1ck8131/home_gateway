@@ -390,6 +390,68 @@ exit 0
         $invocation.maximum_output_bytes | Should -Be 65536
     }
 
+    It 'executes a dataclass observer payload in its transient module scope' {
+        $protocol = 'e' * 64
+        $payloadText = @"
+from __future__ import annotations
+from dataclasses import dataclass
+import hashlib
+import json
+
+@dataclass(frozen=True)
+class Marker:
+    value: str
+
+def _sha(value):
+    if not isinstance(value, bytes):
+        value = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(value).hexdigest()
+
+def collect_server_snapshot(request):
+    return {
+        'payload_sha256': own_payload_sha256(),
+        'protocol_sha256': '$protocol',
+        'ipv6_non_mutation': True,
+    }
+
+def server_baseline_sha256(value):
+    return _sha(value)
+"@
+        $payload = [Text.UTF8Encoding]::new($false).GetBytes($payloadText)
+        $trust = [pscustomobject]@{
+            git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts'
+            public_key_path='C:\synthetic\home_gateway.pub'
+            ssh_host='192.0.2.10';ssh_user='homegateway';connect_timeout_seconds=10
+            command_timeout_seconds=30;maximum_output_bytes=65536
+            observer_payload_sha256=Get-P3SHA256Bytes $payload
+            observer_protocol_sha256=$protocol
+            expected_ipv6_policy_sha256=('d' * 64)
+        }
+        $invocation = New-P3PrerequisiteObserverInvocation -Trust $trust `
+            -AgentReceipt ([pscustomobject]@{ssh_auth_sock='C:\synthetic\agent.sock'}) `
+            -Nonce ('c' * 64) -Payload $payload
+        $encoded = [regex]::Match(
+            [string]$invocation.arguments[-1],
+            "base64\.b64decode\('(?<value>[A-Za-z0-9+/=]+)'\)"
+        )
+        $encoded.Success | Should -BeTrue
+        $loader = [Text.UTF8Encoding]::new($false, $true).GetString(
+            [Convert]::FromBase64String($encoded.Groups['value'].Value)
+        )
+        $python = (Get-Command python -ErrorAction Stop).Source
+        $result = Invoke-P3PrerequisiteNativeProcess $python @('-c', $loader) `
+            $invocation.stdin 10 65536
+
+        $result.ExitCode | Should -Be 0
+        $result.TimedOut | Should -BeFalse
+        $result.Oversized | Should -BeFalse
+        $result.StdErr | Should -BeExactly ''
+        $receipt = $result.StdOut | ConvertFrom-Json
+        $receipt.schema | Should -BeExactly 'home-gateway/p3-prelive-server-observation/v1'
+        $receipt.live_mutation_performed | Should -BeFalse
+        $receipt.raw_identity_exposed | Should -BeFalse
+    }
+
     It 'binds the dedicated public key selector when IdentitiesOnly is enabled' {
         $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'identity-selector')
         $script:CapturedObserverArguments = $null

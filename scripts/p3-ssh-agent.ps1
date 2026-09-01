@@ -458,7 +458,16 @@ function Stop-P3Agent(
     if ([string]$env:SSH_AUTH_SOCK -cne [string]$AgentReceipt.socket -or [string]$env:SSH_AGENT_PID -cne [string]$AgentReceipt.agent_pid) {
         throw 'agent environment differs from receipt'
     }
-    $null = Test-P3AgentState -Manifest $Manifest -AgentReceipt $AgentReceipt -ListRunner $ListRunner -ProcessRunner $ProcessRunner
+    try {
+        $null = Test-P3AgentState -Manifest $Manifest -AgentReceipt $AgentReceipt -ListRunner $ListRunner -ProcessRunner $ProcessRunner
+    }
+    catch {
+        $stateFailure = $_
+        $null = Stop-P3OwnedAgentEmergency -Manifest $Manifest -AgentReceipt $AgentReceipt `
+            -DeleteRunner $DeleteRunner -StopRunner $StopRunner -ProcessRunner $ProcessRunner `
+            -WaitRunner $WaitRunner -ReobserveRunner $ReobserveRunner -SocketExistsRunner $SocketExistsRunner
+        throw $stateFailure
+    }
     $failures = @()
     try { $null = & $DeleteRunner } catch { $failures += 'key delete failure' }
     try { $null = & $StopRunner ([int]$AgentReceipt.windows_process_id) } catch { $failures += 'process stop failure' }

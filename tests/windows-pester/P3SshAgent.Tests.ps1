@@ -426,6 +426,42 @@ Describe 'P3 dedicated Git OpenSSH agent lifecycle' {
         $script:LifecyclePids | Should -Be @(26484, 26484, 26484, 26484, 26484)
     }
 
+    It 'emergency-cleans the owned agent when normal state validation fails' {
+        $script:Deleted = 0
+        $script:StoppedPids = @()
+        $script:WaitedPids = @()
+        $script:ReobservedPids = @()
+        $script:ProcessCalls = 0
+        $env:SSH_AUTH_SOCK = $script:AgentReceipt.socket
+        $env:SSH_AGENT_PID = [string]$script:AgentReceipt.agent_pid
+        $processRunner = {
+            param($ProcessId)
+            $script:ProcessCalls++
+            [pscustomobject]@{
+                Id = $ProcessId
+                Path = $script:Paths.'ssh-agent.exe'
+                StartTime = [DateTime]::UtcNow.AddSeconds(-2)
+            }
+        }
+
+        { Stop-P3Agent -Manifest $script:Manifest -AgentReceipt $script:AgentReceipt `
+            -DeleteRunner { $script:Deleted++ } `
+            -StopRunner { param($ProcessId) $script:StoppedPids += $ProcessId } `
+            -ListRunner { throw 'synthetic state validation failure' } `
+            -ProcessRunner $processRunner `
+            -WaitRunner { param($ProcessId) $script:WaitedPids += $ProcessId } `
+            -ReobserveRunner { param($ProcessId) $script:ReobservedPids += $ProcessId; @() } `
+            -SocketExistsRunner { $false } } | Should -Throw '*synthetic state validation failure*'
+
+        $script:Deleted | Should -Be 1
+        $script:StoppedPids | Should -Be @(26484)
+        $script:WaitedPids | Should -Be @(26484)
+        $script:ReobservedPids | Should -Be @(26484)
+        $script:ProcessCalls | Should -Be 2
+        $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+        $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
     It 'rejects a changed receipt before deleting keys or stopping a process' {
         $script:AgentReceipt.socket = '/tmp/changed'
         $calls = 0

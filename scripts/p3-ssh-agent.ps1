@@ -141,45 +141,191 @@ function ConvertFrom-P3AgentOutput([string]$Output) {
     return [pscustomobject]@{ socket = $socket; agent_pid = $processId }
 }
 
-function Get-P3AgentOwnedPidCandidate([string]$Output) {
-    $matches = [regex]::Matches($Output, '(?m)^SSH_AGENT_PID=([1-9][0-9]*); export SSH_AGENT_PID;$')
-    if ($matches.Count -ne 1) { return $null }
-    $processId = 0
-    if (-not [int]::TryParse($matches[0].Groups[1].Value, [ref]$processId) -or $processId -le 0) { return $null }
-    return $processId
+function Assert-P3WindowsAgentLaunch([object]$Launch) {
+    $expected = @('output', 'schema', 'started_at_utc', 'windows_process_id')
+    if ($null -eq $Launch -or $Launch -is [Array] -or
+        @(Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject @($Launch.PSObject.Properties.Name | Sort-Object)).Count -ne 0 -or
+        [string]$Launch.schema -cne 'home-gateway/p3-windows-agent-launch/v1' -or
+        $Launch.output -is [string] -or $Launch.output -isnot [Array] -or
+        [int]$Launch.windows_process_id -le 0) {
+        throw 'Windows agent launch record differs'
+    }
+    $null = ConvertTo-P3AgentReceiptUtcInstant -Value $Launch.started_at_utc
+    return $Launch
 }
 
-function Start-P3Agent([object]$Manifest, [scriptblock]$AgentRunner, [scriptblock]$AddRunner, [scriptblock]$StopRunner) {
-    if (-not [string]::IsNullOrEmpty([string]$env:SSH_AUTH_SOCK) -or -not [string]::IsNullOrEmpty([string]$env:SSH_AGENT_PID)) {
-        throw 'pre-existing SSH agent environment is not allowed'
+function Get-P3WindowsAgentStartedAtUtc([object]$Process) {
+    if ($null -eq $Process -or $Process.PSObject.Properties.Name -notcontains 'StartTime') {
+        throw 'Windows agent process start time differs'
     }
-    $toolchain = Resolve-P3GitOpenSshToolchain -Manifest $Manifest
-    $started = $null
-    $output = ''
+    return ConvertTo-P3AgentObservedUtcInstant -Value $Process.StartTime
+}
+
+function Complete-P3OwnedWindowsAgentCleanup([object]$Process, [bool]$Started) {
+    if (-not $Started) { return }
     try {
-        $output = @(& $AgentRunner $toolchain.git_ssh_agent_path) -join "`n"
-        $started = ConvertFrom-P3AgentOutput -Output $output
-        $env:SSH_AUTH_SOCK = $started.socket
-        $env:SSH_AGENT_PID = [string]$started.agent_pid
-        try { $null = & $AddRunner ([string]$Manifest.private_key_path) }
-        catch { throw 'ssh-add failed for the dedicated key' }
+        if (-not [bool]$Process.HasExited) { $Process.Kill() }
+        if (-not [bool]$Process.WaitForExit(5000)) { throw 'Windows agent process cleanup timed out' }
+    }
+    catch { throw "Windows agent process cleanup failed: $($_.Exception.Message)" }
+}
+
+function Start-P3WindowsAgentProcess(
+    [string]$ExecutablePath,
+    [scriptblock]$ProcessRunner,
+    [int]$TimeoutSeconds = 10,
+    [int]$MaximumOutputRecords = 16,
+    [int]$MaximumOutputBytes = 65536
+) {
+    if ([string]::IsNullOrWhiteSpace($ExecutablePath) -or $ExecutablePath.Contains('"') -or -not [IO.Path]::IsPathRooted($ExecutablePath) -or
+        $TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 30 -or $MaximumOutputRecords -lt 2 -or $MaximumOutputRecords -gt 64 -or
+        $MaximumOutputBytes -lt 128 -or $MaximumOutputBytes -gt 1048576) { throw 'Windows agent launch input differs' }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [IO.Path]::GetFullPath($ExecutablePath)
+    $startInfo.Arguments = '-D -s'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $false
+    if ($null -ne $ProcessRunner) {
+        $records = @(& $ProcessRunner $startInfo $TimeoutSeconds $MaximumOutputRecords $MaximumOutputBytes)
+        if ($records.Count -ne 1) { throw 'Windows agent launch record differs' }
+        return Assert-P3WindowsAgentLaunch -Launch $records[0]
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $outputBytes = $null
+    $started = $false
+    try {
+        if (-not $process.Start()) { throw 'Windows agent process did not start' }
+        $started = $true
+        $startedAtUtc = Get-P3WindowsAgentStartedAtUtc -Process $process
+        $deadline = $startedAtUtc.AddSeconds($TimeoutSeconds)
+        $outputBytes = [IO.MemoryStream]::new()
+        $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+        $buffer = [byte[]]::new([Math]::Min(4096, $MaximumOutputBytes))
+        $bytes = 0
+        $quietDeadline = $null
+        $readTask = $process.StandardOutput.BaseStream.ReadAsync($buffer, 0, $buffer.Length)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($readTask.Wait(50)) {
+                $read = [int]$readTask.Result
+                if ($read -le 0) { break }
+                $bytes += $read
+                if ($bytes -gt $MaximumOutputBytes) { throw 'Windows agent output bounds differ' }
+                $outputBytes.Write($buffer, 0, $read)
+                $records = @(($strictUtf8.GetString($outputBytes.ToArray()) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($records.Count -gt $MaximumOutputRecords) { throw 'Windows agent output bounds differ' }
+                if ($records.Count -ge 2) { $quietDeadline = [DateTime]::UtcNow.AddMilliseconds(100) }
+                $readTask = $process.StandardOutput.BaseStream.ReadAsync($buffer, 0, $buffer.Length)
+                continue
+            }
+            if ($process.HasExited -or ($null -ne $quietDeadline -and [DateTime]::UtcNow -ge $quietDeadline)) { break }
+        }
+        $records = @(($strictUtf8.GetString($outputBytes.ToArray()) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($records.Count -lt 2) { throw 'Windows agent output timed out' }
         return [pscustomobject][ordered]@{
-            schema = 'home-gateway/p3-ssh-agent-receipt/v1'
-            manifest_sha256 = [string]$Manifest.manifest_sha256
-            agent_pid = $started.agent_pid
-            socket = $started.socket
-            agent_executable_path = $toolchain.git_ssh_agent_path
-            agent_executable_sha256 = $toolchain.git_ssh_agent_sha256
-            expected_fingerprint_sha256 = [string]$Manifest.public_key_fingerprint_sha256
-            started_at_utc = [DateTime]::UtcNow.ToString('o')
+            schema = 'home-gateway/p3-windows-agent-launch/v1'
+            output = $records
+            started_at_utc = $startedAtUtc.ToString('o')
+            windows_process_id = [int]$process.Id
         }
     }
     catch {
         $failure = $_
-        $ownedPid = if ($null -ne $started) { [int]$started.agent_pid } else { Get-P3AgentOwnedPidCandidate -Output $output }
+        Complete-P3OwnedWindowsAgentCleanup -Process $process -Started $started
+        throw
+    }
+    finally {
+        if ($null -ne $outputBytes) { $outputBytes.Dispose() }
+        $process.Dispose()
+    }
+}
+
+function ConvertTo-P3WindowsCommandLineArgument([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Contains('"') -or -not [IO.Path]::IsPathRooted($Value)) { throw 'Windows command line path differs' }
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\\"')
+    $escaped = [regex]::Replace($escaped, '(\\*)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+function Invoke-P3InteractiveAgentAdd([string]$ExecutablePath, [string]$KeyPath, [scriptblock]$ProcessRunner) {
+    if ([string]::IsNullOrWhiteSpace($ExecutablePath) -or $ExecutablePath.Contains('"') -or -not [IO.Path]::IsPathRooted($ExecutablePath)) { throw 'ssh-add executable path differs' }
+    if ([string]::IsNullOrWhiteSpace($KeyPath) -or $KeyPath.Contains('"') -or -not [IO.Path]::IsPathRooted($KeyPath)) { throw 'ssh-add key path differs' }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [IO.Path]::GetFullPath($ExecutablePath)
+    $startInfo.Arguments = ConvertTo-P3WindowsCommandLineArgument -Value $KeyPath
+    $startInfo.UseShellExecute = $true
+    $startInfo.CreateNoWindow = $false
+    $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Normal
+    $startInfo.RedirectStandardInput = $false
+    $startInfo.RedirectStandardOutput = $false
+    $startInfo.RedirectStandardError = $false
+    if ($null -ne $ProcessRunner) {
+        $result = @(& $ProcessRunner $startInfo)
+        if ($result.Count -ne 1 -or $result[0].PSObject.Properties.Name -notcontains 'exit_code' -or [int]$result[0].exit_code -ne 0) {
+            throw 'ssh-add failed for the dedicated key'
+        }
+        return
+    }
+    $process = $null
+    try {
+        $process = [Diagnostics.Process]::Start($startInfo)
+        if ($null -eq $process) { throw 'ssh-add failed for the dedicated key' }
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw 'ssh-add failed for the dedicated key' }
+    }
+    finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
+function Start-P3Agent([object]$Manifest, [scriptblock]$AgentRunner, [scriptblock]$ProcessRunner, [scriptblock]$AddRunner, [scriptblock]$StopRunner) {
+    if (-not [string]::IsNullOrEmpty([string]$env:SSH_AUTH_SOCK) -or -not [string]::IsNullOrEmpty([string]$env:SSH_AGENT_PID)) {
+        throw 'pre-existing SSH agent environment is not allowed'
+    }
+    $toolchain = Resolve-P3GitOpenSshToolchain -Manifest $Manifest
+    $launch = $null
+    $launchCandidate = $null
+    $identityValidated = $false
+    try {
+        $launchRecords = @(& $AgentRunner $toolchain.git_ssh_agent_path)
+        if ($launchRecords.Count -ne 1) { throw 'Windows agent launch record differs' }
+        $launchCandidate = $launchRecords[0]
+        $launch = Assert-P3WindowsAgentLaunch -Launch $launchCandidate
+        $identityReceipt = [pscustomobject]@{
+            windows_process_id = [int]$launch.windows_process_id
+            started_at_utc = [string]$launch.started_at_utc
+        }
+        $processes = @(& $ProcessRunner ([int]$identityReceipt.windows_process_id))
+        $null = Assert-P3AgentObservedProcess -Toolchain $toolchain -AgentReceipt $identityReceipt -Processes $processes
+        $identityValidated = $true
+        $output = @($launch.output) -join "`n"
+        $started = ConvertFrom-P3AgentOutput -Output $output
+        $rawReceipt = [pscustomobject][ordered]@{
+            schema = 'home-gateway/p3-ssh-agent-receipt/v2'
+            manifest_sha256 = [string]$Manifest.manifest_sha256
+            agent_pid = $started.agent_pid
+            windows_process_id = [int]$launch.windows_process_id
+            socket = $started.socket
+            agent_executable_path = $toolchain.git_ssh_agent_path
+            agent_executable_sha256 = $toolchain.git_ssh_agent_sha256
+            expected_fingerprint_sha256 = [string]$Manifest.public_key_fingerprint_sha256
+            started_at_utc = [string]$launch.started_at_utc
+        }
+        $env:SSH_AUTH_SOCK = $started.socket
+        $env:SSH_AGENT_PID = [string]$started.agent_pid
+        try { $null = & $AddRunner ([string]$Manifest.private_key_path) }
+        catch { throw 'ssh-add failed for the dedicated key' }
+        return $rawReceipt
+    }
+    catch {
+        $failure = $_
         $cleanupFailure = $null
-        if ($null -ne $ownedPid) {
-            try { $null = & $StopRunner $ownedPid } catch { $cleanupFailure = $_ }
+        if ($identityValidated) {
+            try { $null = & $StopRunner ([int]$launch.windows_process_id) } catch { $cleanupFailure = $_ }
         }
         $env:SSH_AUTH_SOCK = $null
         $env:SSH_AGENT_PID = $null
@@ -189,10 +335,10 @@ function Start-P3Agent([object]$Manifest, [scriptblock]$AgentRunner, [scriptbloc
 }
 
 function Assert-P3AgentReceipt([object]$Manifest, [object]$AgentReceipt) {
-    $expected = @('agent_executable_path', 'agent_executable_sha256', 'agent_pid', 'expected_fingerprint_sha256', 'manifest_sha256', 'schema', 'socket', 'started_at_utc')
+    $expected = @('agent_executable_path', 'agent_executable_sha256', 'agent_pid', 'expected_fingerprint_sha256', 'manifest_sha256', 'schema', 'socket', 'started_at_utc', 'windows_process_id')
     $actual = @($AgentReceipt.PSObject.Properties.Name | Sort-Object)
     if (@(Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject $actual).Count -ne 0) { throw 'agent receipt schema differs' }
-    if ([string]$AgentReceipt.schema -cne 'home-gateway/p3-ssh-agent-receipt/v1' -or
+    if ([string]$AgentReceipt.schema -cne 'home-gateway/p3-ssh-agent-receipt/v2' -or
         [string]$AgentReceipt.manifest_sha256 -cne [string]$Manifest.manifest_sha256 -or
         [string]$AgentReceipt.expected_fingerprint_sha256 -cne [string]$Manifest.public_key_fingerprint_sha256) {
         throw 'agent receipt binding differs'
@@ -200,7 +346,7 @@ function Assert-P3AgentReceipt([object]$Manifest, [object]$AgentReceipt) {
     $toolchain = Resolve-P3GitOpenSshToolchain -Manifest $Manifest
     if (-not [string]::Equals([string]$AgentReceipt.agent_executable_path, $toolchain.git_ssh_agent_path, [StringComparison]::OrdinalIgnoreCase) -or
         [string]$AgentReceipt.agent_executable_sha256 -cne $toolchain.git_ssh_agent_sha256 -or [int]$AgentReceipt.agent_pid -le 0 -or
-        [string]::IsNullOrWhiteSpace([string]$AgentReceipt.socket)) { throw 'agent receipt process binding differs' }
+        [int]$AgentReceipt.windows_process_id -le 0 -or [string]::IsNullOrWhiteSpace([string]$AgentReceipt.socket)) { throw 'agent receipt process binding differs' }
     return $toolchain
 }
 
@@ -229,7 +375,7 @@ function ConvertTo-P3AgentObservedUtcInstant([object]$Value) {
 }
 
 function Assert-P3AgentObservedProcess([object]$Toolchain, [object]$AgentReceipt, [object[]]$Processes) {
-    if ($processes.Count -ne 1 -or [int]$processes[0].Id -ne [int]$AgentReceipt.agent_pid -or
+    if ($processes.Count -ne 1 -or [int]$processes[0].Id -ne [int]$AgentReceipt.windows_process_id -or
         -not [string]::Equals([string]$processes[0].Path, $Toolchain.git_ssh_agent_path, [StringComparison]::OrdinalIgnoreCase) -or
         $processes[0].PSObject.Properties.Name -notcontains 'StartTime') {
         throw 'agent process identity differs'
@@ -243,7 +389,7 @@ function Assert-P3AgentObservedProcess([object]$Toolchain, [object]$AgentReceipt
 
 function Test-P3AgentState([object]$Manifest, [object]$AgentReceipt, [scriptblock]$ListRunner, [scriptblock]$ProcessRunner) {
     $toolchain = Assert-P3AgentReceipt -Manifest $Manifest -AgentReceipt $AgentReceipt
-    $processes = @(& $ProcessRunner ([int]$AgentReceipt.agent_pid))
+    $processes = @(& $ProcessRunner ([int]$AgentReceipt.windows_process_id))
     $null = Assert-P3AgentObservedProcess -Toolchain $toolchain -AgentReceipt $AgentReceipt -Processes $processes
     $lines = @(([string](& $ListRunner $toolchain.git_ssh_add_path) -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($lines.Count -ne 1) { throw 'agent must contain exactly one key' }
@@ -252,9 +398,10 @@ function Test-P3AgentState([object]$Manifest, [object]$AgentReceipt, [scriptbloc
     $fingerprintHash = Get-P3AgentSHA256Text $match.Groups[1].Value
     if ($fingerprintHash -cne [string]$Manifest.public_key_fingerprint_sha256) { throw 'agent key fingerprint differs' }
     return [pscustomobject][ordered]@{
-        schema = 'home-gateway/p3-ssh-agent-combined-receipt/v2'
+        schema = 'home-gateway/p3-ssh-agent-combined-receipt/v3'
         manifest_sha256 = [string]$Manifest.manifest_sha256
         agent_pid = [int]$AgentReceipt.agent_pid
+        windows_process_id = [int]$AgentReceipt.windows_process_id
         socket = [string]$AgentReceipt.socket
         agent_executable_path = [string]$AgentReceipt.agent_executable_path
         agent_executable_sha256 = [string]$AgentReceipt.agent_executable_sha256
@@ -263,6 +410,7 @@ function Test-P3AgentState([object]$Manifest, [object]$AgentReceipt, [scriptbloc
         loaded_key_count = 1
         expected_key_match = $true
         agent_pid_match = $true
+        windows_process_id_match = $true
         toolchain_match = $true
     }
 }
@@ -308,10 +456,10 @@ function Stop-P3Agent(
     $null = Test-P3AgentState -Manifest $Manifest -AgentReceipt $AgentReceipt -ListRunner $ListRunner -ProcessRunner $ProcessRunner
     $failures = @()
     try { $null = & $DeleteRunner } catch { $failures += 'key delete failure' }
-    try { $null = & $StopRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process stop failure' }
-    try { $null = & $WaitRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process wait failure' }
+    try { $null = & $StopRunner ([int]$AgentReceipt.windows_process_id) } catch { $failures += 'process stop failure' }
+    try { $null = & $WaitRunner ([int]$AgentReceipt.windows_process_id) } catch { $failures += 'process wait failure' }
     try {
-        if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { $failures += 'process reobserve failure' }
+        if (@(& $ReobserveRunner ([int]$AgentReceipt.windows_process_id)).Count -ne 0) { $failures += 'process reobserve failure' }
     } catch { $failures += 'process reobserve failure' }
     try {
         if ([bool](& $SocketExistsRunner ([string]$AgentReceipt.socket))) { $failures += 'socket reobserve failure' }
@@ -337,8 +485,8 @@ function Stop-P3OwnedAgentEmergency(
     catch { throw 'owned agent start binding differs' }
     $failures = @()
     $identityMismatch = $false
-    try { $processes = @(& $ProcessRunner ([int]$AgentReceipt.agent_pid)) }
-    catch { $processes = $null }
+    try { $processes = @(& $ProcessRunner ([int]$AgentReceipt.windows_process_id)) }
+    catch { $processes = $null; $identityMismatch = $true; $failures += 'process identity failure' }
     if ($null -ne $processes) {
         try { $null = Assert-P3AgentObservedProcess -Toolchain $toolchain -AgentReceipt $AgentReceipt -Processes $processes }
         catch { $identityMismatch = $true; $failures += 'process identity failure' }
@@ -349,11 +497,11 @@ function Stop-P3OwnedAgentEmergency(
         try { $null = & $DeleteRunner } catch { $failures += 'key delete failure' }
     } elseif (-not $identityMismatch) { $failures += 'environment' }
     if (-not $identityMismatch) {
-        try { $null = & $StopRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process stop failure' }
-        try { $null = & $WaitRunner ([int]$AgentReceipt.agent_pid) } catch { $failures += 'process wait failure' }
+        try { $null = & $StopRunner ([int]$AgentReceipt.windows_process_id) } catch { $failures += 'process stop failure' }
+        try { $null = & $WaitRunner ([int]$AgentReceipt.windows_process_id) } catch { $failures += 'process wait failure' }
     }
     try {
-        if (@(& $ReobserveRunner ([int]$AgentReceipt.agent_pid)).Count -ne 0) { $failures += 'process reobserve failure' }
+        if (@(& $ReobserveRunner ([int]$AgentReceipt.windows_process_id)).Count -ne 0) { $failures += 'process reobserve failure' }
     } catch { $failures += 'process reobserve failure' }
     try {
         if ([bool](& $SocketExistsRunner ([string]$AgentReceipt.socket))) { $failures += 'socket reobserve failure' }
@@ -368,19 +516,21 @@ function ConvertTo-P3AgentReceiptFromCombined([object]$CombinedReceipt) {
     $expected = @(
         'agent_executable_path', 'agent_executable_sha256', 'agent_pid', 'agent_pid_match',
         'expected_fingerprint_sha256', 'expected_key_match', 'loaded_key_count', 'manifest_sha256',
-        'schema', 'socket', 'started_at_utc', 'toolchain_match'
+        'schema', 'socket', 'started_at_utc', 'toolchain_match', 'windows_process_id', 'windows_process_id_match'
     )
     if ($null -eq $CombinedReceipt -or $CombinedReceipt -is [Array] -or
         @(Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject @($CombinedReceipt.PSObject.Properties.Name | Sort-Object)).Count -ne 0 -or
-        [string]$CombinedReceipt.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v2' -or
+        [string]$CombinedReceipt.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v3' -or
         [int]$CombinedReceipt.loaded_key_count -ne 1 -or -not [bool]$CombinedReceipt.expected_key_match -or
-        -not [bool]$CombinedReceipt.agent_pid_match -or -not [bool]$CombinedReceipt.toolchain_match) {
+        -not [bool]$CombinedReceipt.agent_pid_match -or -not [bool]$CombinedReceipt.windows_process_id_match -or
+        [int]$CombinedReceipt.windows_process_id -le 0 -or -not [bool]$CombinedReceipt.toolchain_match) {
         throw 'protected agent receipt differs'
     }
     return [pscustomobject][ordered]@{
-        schema = 'home-gateway/p3-ssh-agent-receipt/v1'
+        schema = 'home-gateway/p3-ssh-agent-receipt/v2'
         manifest_sha256 = [string]$CombinedReceipt.manifest_sha256
         agent_pid = [int]$CombinedReceipt.agent_pid
+        windows_process_id = [int]$CombinedReceipt.windows_process_id
         socket = [string]$CombinedReceipt.socket
         agent_executable_path = [string]$CombinedReceipt.agent_executable_path
         agent_executable_sha256 = [string]$CombinedReceipt.agent_executable_sha256
@@ -395,7 +545,7 @@ function Write-P3ProtectedAgentReceipt([string]$Root, [string]$ManifestSHA256, [
         . (Join-Path $PSScriptRoot 'p3-prelive-runtime.ps1')
         $null = Invoke-P3RuntimeValidate -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestSHA256
         Assert-P3ExactProperties -Value $Receipt -ExpectedProperties $script:P3CombinedAgentReceiptProperties -Label 'combined agent receipt'
-        if ([string]$Receipt.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v2' -or [string]$Receipt.manifest_sha256 -cne $ManifestSHA256) {
+        if ([string]$Receipt.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v3' -or [string]$Receipt.manifest_sha256 -cne $ManifestSHA256) {
             throw 'combined agent receipt binding differs'
         }
         Write-P3RuntimeJson -RuntimeRoot $Root -Name 'agent-receipt.json' -Value $Receipt
@@ -474,7 +624,7 @@ function Invoke-P3AgentAction(
             if ($ExpectedPlanSHA256 -cne $plan.plan_sha256 -or $Confirmation -cne $plan.confirmation_challenge -or
                 $Confirmation -cnotmatch '^P3-SSH-AGENT-[0-9A-F]{16}$') { throw 'agent approval differs' }
             return Start-P3Agent -Manifest $protected -AgentRunner $Boundaries.AgentRunner `
-                -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
+                -ProcessRunner $Boundaries.ProcessRunner -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
         }
         'AgentValidate' {
             if ([string]$InputObject.receipt.manifest_sha256 -cne $ExpectedManifestSHA256) { throw 'caller agent receipt differs from protected runtime' }
@@ -532,7 +682,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
     if ($Action -ceq 'AgentPlan') { New-P3AgentPlan -Manifest $request | ConvertTo-Json -Depth 16 -Compress }
     else {
         $boundaries = [pscustomobject]@{
-            AgentRunner={param($Executable)& $Executable -s};AddRunner={param($KeyPath)& $protected.git_ssh_add_path $KeyPath}
+            AgentRunner={param($Executable)Start-P3WindowsAgentProcess -ExecutablePath $Executable};AddRunner={param($KeyPath)Invoke-P3InteractiveAgentAdd -ExecutablePath $protected.git_ssh_add_path -KeyPath $KeyPath}
             StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
             ListRunner={param($Executable)& $Executable -l -E sha256}
             ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}

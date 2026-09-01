@@ -52,9 +52,9 @@ Describe 'P3 local pre-live reconciliation and streaming guard' {
                     live_mutation_performed = $false
                 }
                 Agent = [pscustomobject]@{
-                    schema = 'home-gateway/p3-ssh-agent-combined-receipt/v2'
-                    agent_pid = 4242; socket = '/tmp/ssh-synthetic/agent.4242'; loaded_key_count = 1
-                    expected_key_match = $true; toolchain_match = $true; manifest_sha256 = ('1' * 64)
+                    schema = 'home-gateway/p3-ssh-agent-combined-receipt/v3'
+                    agent_pid = 77; windows_process_id = 26484; socket = '/tmp/ssh-synthetic/agent.4242'; loaded_key_count = 1
+                    expected_key_match = $true; agent_pid_match = $true; windows_process_id_match = $true; toolchain_match = $true; manifest_sha256 = ('1' * 64)
                 }
                 Install = [pscustomobject]@{
                     schema = 'home-gateway/p3-remote-helper-install-receipt/v1'; target_state = 'exact'

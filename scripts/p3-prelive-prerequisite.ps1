@@ -733,7 +733,7 @@ function Invoke-P3PrerequisiteProductionObservation(
     Assert-P3PrerequisiteExternalFiles $trust
     $null = Initialize-P3PrerequisiteRoot $PrerequisiteRoot $manifest $agentManifest
     $storedManifest = Get-P3PrerequisiteStoredAgentManifest $PrerequisiteRoot $manifest $agentManifest
-    $started = Start-P3Agent $storedManifest $Boundaries.AgentRunner $Boundaries.AddRunner $Boundaries.StopRunner
+    $started = Start-P3Agent $storedManifest $Boundaries.AgentRunner $Boundaries.ProcessRunner $Boundaries.AddRunner $Boundaries.StopRunner
     $protectedCombined = $null
     $observationBatch = $null
     try {
@@ -1059,7 +1059,7 @@ function Invoke-P3PrerequisiteAgentAction(
         'AgentStart' {
             $expectedPlan = New-P3AgentPlan $storedManifest
             if ((Get-P3AgentCanonicalSHA256 $expectedPlan) -cne (Get-P3AgentCanonicalSHA256 $InputObject.plan)) { throw 'prerequisite agent plan differs' }
-            return Start-P3Agent $storedManifest $Boundaries.AgentRunner $Boundaries.AddRunner $Boundaries.StopRunner
+            return Start-P3Agent $storedManifest $Boundaries.AgentRunner $Boundaries.ProcessRunner $Boundaries.AddRunner $Boundaries.StopRunner
         }
         'AgentValidate' {
             $combined = Test-P3AgentState $storedManifest $InputObject.receipt $Boundaries.ListRunner $Boundaries.ProcessRunner
@@ -1167,8 +1167,8 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         'Observe' {
             $candidateAgentManifest = $inputObject.agent_manifest
             $productionBoundaries = [pscustomobject]@{
-                AgentRunner={param($Executable)& $Executable -s}
-                AddRunner={param($KeyPath)& $candidateAgentManifest.git_ssh_add_path $KeyPath}.GetNewClosure()
+                AgentRunner={param($Executable)Start-P3WindowsAgentProcess -ExecutablePath $Executable}
+                AddRunner={param($KeyPath)Invoke-P3InteractiveAgentAdd -ExecutablePath $candidateAgentManifest.git_ssh_add_path -KeyPath $KeyPath}.GetNewClosure()
                 StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
                 ListRunner={param($Executable)& $Executable -l -E sha256}
                 ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}
@@ -1193,7 +1193,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
             $candidateAgentManifest = if ($Action -ceq 'AgentPlan') { $actionInput } else { $actionInput.agent_manifest }
             $agentBoundaries = [pscustomobject]@{
                 PrerequisiteRoot=$PrerequisiteRoot;PrerequisiteManifest=$inputObject.prerequisite_manifest
-                AgentRunner={param($Executable)& $Executable -s};AddRunner={param($KeyPath)& $candidateAgentManifest.git_ssh_add_path $KeyPath}
+                AgentRunner={param($Executable)Start-P3WindowsAgentProcess -ExecutablePath $Executable};AddRunner={param($KeyPath)Invoke-P3InteractiveAgentAdd -ExecutablePath $candidateAgentManifest.git_ssh_add_path -KeyPath $KeyPath}
                 StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
                 ListRunner={param($Executable)& $Executable -l -E sha256}
                 ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}

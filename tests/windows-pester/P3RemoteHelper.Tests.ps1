@@ -42,11 +42,14 @@ Describe 'P3 exact remote helper lifecycle' {
                 )
             }
             Agent = [pscustomobject]@{
-                schema = 'home-gateway/p3-ssh-agent-combined-receipt/v2'
+                schema = 'home-gateway/p3-ssh-agent-combined-receipt/v3'
                 socket = '/tmp/ssh-synthetic/agent.4242'
-                agent_pid = 4242
+                agent_pid = 77
+                windows_process_id = 26484
                 loaded_key_count = 1
                 expected_key_match = $true
+                agent_pid_match = $true
+                windows_process_id_match = $true
                 toolchain_match = $true
                 manifest_sha256 = ('1' * 64)
             }

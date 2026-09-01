@@ -14,6 +14,15 @@ Describe 'P3 protected pre-live runtime' {
             finally { $sha.Dispose() }
         }
 
+        function New-P3RuntimeTestAgentLaunch([string[]]$Output) {
+            return [pscustomobject][ordered]@{
+                schema = 'home-gateway/p3-windows-agent-launch/v1'
+                output = $Output
+                started_at_utc = [DateTime]::UtcNow.ToString('o')
+                windows_process_id = 26484
+            }
+        }
+
         function New-TrustFixture {
             param([string]$Root)
             $files = @{}
@@ -180,12 +189,12 @@ Describe 'P3 protected pre-live runtime' {
 
         function New-OwnedBatchBoundaries([object]$Fixture, [scriptblock]$JsonRunner, [scriptblock]$StopRunner) {
             $list = { "256 $($Fixture.Fingerprint) p3 (ED25519)" }.GetNewClosure()
-            $process = { param($ProcessId) [pscustomobject]@{ Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow } }.GetNewClosure()
+            $process = { param($ProcessId) $script:OwnedProcessPids += $ProcessId; [pscustomobject]@{ Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow } }.GetNewClosure()
             return [pscustomobject]@{
-                AgentRunner = { "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" }
+                AgentRunner = { New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') }
                 AddRunner = { param($KeyPath) }; ListRunner = $list; ProcessRunner = $process
-                DeleteRunner = { }; StopRunner = $StopRunner
-                WaitRunner = { param($ProcessId) $script:OwnedWaits++ }
+                DeleteRunner = { }; StopRunner = { param($ProcessId) $script:OwnedStoppedPid = $ProcessId; & $StopRunner $ProcessId }.GetNewClosure()
+                WaitRunner = { param($ProcessId) $script:OwnedWaits++; $script:OwnedWaitPid = $ProcessId }
                 ReobserveRunner = { param($ProcessId) $script:OwnedReobservedPid = $ProcessId; @() }
                 SocketExistsRunner = { param($Path) $false }
                 ReceiptRemoveRunner = { param($Path) [IO.File]::Delete($Path) }
@@ -201,13 +210,13 @@ Describe 'P3 protected pre-live runtime' {
             [scriptblock]$StopRunner
         ) {
             $list = { "256 $($Fixture.Fingerprint) p3 (ED25519)" }.GetNewClosure()
-            $process = { param($ProcessId) [pscustomobject]@{Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow} }.GetNewClosure()
+            $process = { param($ProcessId) $script:OwnedProcessPids += $ProcessId; [pscustomobject]@{Id=$ProcessId;Path=$Fixture.AgentPath;StartTime=[DateTime]::UtcNow} }.GetNewClosure()
             $script:OwnedClockNow = $Fixture.NowUtc.AddSeconds(30)
             $clock = { $script:OwnedClockCalls++; $script:OwnedClockNow }
             return [pscustomobject]@{
-                AgentRunner={ $script:OwnedAgentStarts++; "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" }
+                AgentRunner={ $script:OwnedAgentStarts++; New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') }
                 AddRunner={param($KeyPath)};ListRunner=$list;ProcessRunner=$process;DeleteRunner={}
-                StopRunner=$StopRunner;WaitRunner={param($ProcessId)$script:OwnedWaits++}
+                StopRunner={param($ProcessId)$script:OwnedStoppedPid=$ProcessId; & $StopRunner $ProcessId}.GetNewClosure();WaitRunner={param($ProcessId)$script:OwnedWaits++;$script:OwnedWaitPid=$ProcessId}
                 ReobserveRunner={param($ProcessId)$script:OwnedReobservedPid=$ProcessId;@()};SocketExistsRunner={param($Path)$false}
                 ReceiptRemoveRunner={param($Path)[IO.File]::Delete($Path)};ClockRunner=$clock
                 SshRunner=$SshRunner;ScpRunner=$ScpRunner
@@ -527,11 +536,12 @@ Describe 'P3 protected pre-live runtime' {
                 public_key_path=$Trust.public_key_path; private_key_path=$Trust.private_key_path; public_key_fingerprint_sha256=$Trust.public_key_fingerprint_sha256
             }
             $start = Start-P3Agent -Manifest $agentManifest `
-                -AgentRunner { "SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.4242; export SSH_AUTH_SOCK;`nSSH_AGENT_PID=4242; export SSH_AGENT_PID;" } `
+                -AgentRunner { New-P3RuntimeTestAgentLaunch -Output @('SSH_AUTH_SOCK=/tmp/ssh-synthetic/agent.77; export SSH_AUTH_SOCK;', 'SSH_AGENT_PID=77; export SSH_AGENT_PID;') } `
+                -ProcessRunner { param($ProcessId) [pscustomobject]@{ Id=$ProcessId;Path=$agentManifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow } } `
                 -AddRunner { param($KeyPath) } -StopRunner { param($ProcessId) }
             $combined = Test-P3AgentState -Manifest $agentManifest -AgentReceipt $start `
                 -ListRunner { "256 $Fingerprint p3 (ED25519)" } `
-                -ProcessRunner { [pscustomobject]@{ Id=4242;Path=$agentManifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow } }
+                -ProcessRunner { [pscustomobject]@{ Id=26484;Path=$agentManifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow } }
             Write-P3ProtectedAgentReceipt -Root $Root -ManifestSHA256 $ManifestHash -Receipt $combined
             $remoteContext = [pscustomobject]@{
                 manifest_sha256=$ManifestHash; Agent=$combined
@@ -556,7 +566,7 @@ Describe 'P3 protected pre-live runtime' {
             return Get-P3PreliveContext -RuntimeRoot $Root -ExpectedManifestSHA256 $ManifestHash
         } $script:Root $plan.manifest_sha256 ([pscustomobject]$script:Trust) $fingerprint
         $context.ManifestSHA256 | Should -BeExactly $plan.manifest_sha256
-        $context.Agent.schema | Should -BeExactly 'home-gateway/p3-ssh-agent-combined-receipt/v2'
+        $context.Agent.schema | Should -BeExactly 'home-gateway/p3-ssh-agent-combined-receipt/v3'
         $context.Install.schema | Should -BeExactly 'home-gateway/p3-remote-helper-install-receipt/v1'
         $context.ExpectedPeerCount | Should -Be 1
         $env:SSH_AUTH_SOCK = $null; $env:SSH_AGENT_PID = $null
@@ -566,15 +576,19 @@ Describe 'P3 protected pre-live runtime' {
         . (Join-Path $PSScriptRoot '..\..\scripts\p3-amnezia-peer-guard.ps1')
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
         $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0
+        $lifecyclePids = [Collections.Generic.List[int]]::new()
         $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'JSON runner is not expected' } -StopRunner { param($ProcessId) }
+        $boundaries.ProcessRunner = { param($ProcessId) $lifecyclePids.Add($ProcessId); [pscustomobject]@{ Id=$ProcessId;Path=$fixture.AgentPath;StartTime=[DateTime]::UtcNow } }.GetNewClosure()
+        $boundaries.StopRunner = { param($ProcessId) $lifecyclePids.Add($ProcessId) }.GetNewClosure()
+        $boundaries.WaitRunner = { param($ProcessId) $script:OwnedWaits++; $lifecyclePids.Add($ProcessId) }.GetNewClosure()
+        $boundaries.ReobserveRunner = { param($ProcessId) $script:OwnedReobservedPid=$ProcessId; $lifecyclePids.Add($ProcessId); @() }.GetNewClosure()
 
         $result = Invoke-P3OwnedGuardAction -SelectedAction 'ValidateOnly' -RuntimeRoot $fixture.Root `
             -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
             -BodyConfirmation '' -Boundaries $boundaries
 
         $result.prelive_inputs_valid | Should -BeTrue
-        $script:OwnedWaits | Should -Be 1
-        $script:OwnedReobservedPid | Should -Be 4242
+        @($lifecyclePids | Select-Object -Unique) | Should -Be @(26484)
         Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
         $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
         $env:SSH_AGENT_PID | Should -BeNullOrEmpty
@@ -591,7 +605,7 @@ Describe 'P3 protected pre-live runtime' {
             $null = New-Item -ItemType Directory -Path $fixtureRoot
             $trust = New-TrustFixture -Root $fixtureRoot
             $fixture = Initialize-OwnedBatchRuntime -Root $root -Trust $trust
-            $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0
+            $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0; $script:OwnedLifecyclePids = @()
             $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner $failure -StopRunner { param($ProcessId) }
             $caught = $null
             try {
@@ -602,7 +616,7 @@ Describe 'P3 protected pre-live runtime' {
             $caught | Should -Not -BeNullOrEmpty
             $caught.Exception.Message | Should -Match 'synthetic body failure|synthetic cancellation'
             $script:OwnedWaits | Should -Be 1
-            $script:OwnedReobservedPid | Should -Be 4242
+            $script:OwnedReobservedPid | Should -Be 26484
             Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
             $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
             $env:SSH_AGENT_PID | Should -BeNullOrEmpty
@@ -627,7 +641,7 @@ Describe 'P3 protected pre-live runtime' {
             $null = New-Item -ItemType Directory -Path $fixtureRoot
             $trust = New-TrustFixture -Root $fixtureRoot
             $fixture = Initialize-OwnedBatchRuntime -Root $root -Trust $trust
-            $script:OwnedStops = 0; $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0
+            $script:OwnedStops = 0; $script:OwnedWaits = 0; $script:OwnedReobservedPid = 0; $script:OwnedLifecyclePids = @()
             $boundaries = New-OwnedBatchBoundaries -Fixture $fixture -JsonRunner { throw 'body must not run' } `
                 -StopRunner { param($ProcessId) $script:OwnedStops++ }
             if ($failureKind -ceq 'list') { $boundaries.ListRunner = { throw 'synthetic initial list failure' } }
@@ -637,9 +651,15 @@ Describe 'P3 protected pre-live runtime' {
                 -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
                 -BodyConfirmation '' -Boundaries $boundaries } | Should -Throw '*synthetic initial*'
 
-            $script:OwnedStops | Should -Be 1
-            $script:OwnedWaits | Should -Be 1
-            $script:OwnedReobservedPid | Should -Be 4242
+            if ($failureKind -ceq 'process') {
+                $script:OwnedStops | Should -Be 0
+                $script:OwnedWaits | Should -Be 0
+                $script:OwnedReobservedPid | Should -Be 0
+            } else {
+                $script:OwnedStops | Should -Be 1
+                $script:OwnedWaits | Should -Be 1
+                $script:OwnedReobservedPid | Should -Be 26484
+            }
             $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
             $env:SSH_AGENT_PID | Should -BeNullOrEmpty
         }
@@ -685,7 +705,7 @@ Describe 'P3 protected pre-live runtime' {
             $script:OwnedDeletes | Should -Be 1
             $script:OwnedStops | Should -Be 1
             $script:OwnedWaits | Should -Be 1
-            $script:OwnedReobservedPid | Should -Be 4242
+            $script:OwnedReobservedPid | Should -Be 26484
         }
     }
 
@@ -734,11 +754,11 @@ Describe 'P3 protected pre-live runtime' {
                 }
                 $env:SSH_AUTH_SOCK = $null; $env:SSH_AGENT_PID = $null
                 $caught | Should -Not -BeNullOrEmpty
-                $caught.Exception.Message | Should -Match 'agent process'
-                $processState.Calls | Should -Be 2
+                $caught.Exception.Message | Should -Match 'process identity'
+                $processState.Calls | Should -Be 3
                 $script:OwnedDeletes | Should -Be 0
                 $script:OwnedStops | Should -Be 0
-                Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeTrue
+                Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
             }
         }
     }
@@ -763,7 +783,7 @@ Describe 'P3 protected pre-live runtime' {
             -ExpectedManifestSHA256 $fixture.ManifestSHA256 -InputObject $null -ExpectedBodyPlanSHA256 '' `
             -BodyConfirmation '' -Boundaries $boundaries } | Should -Throw '*emergency cleanup failed*'
 
-        $processState.Calls | Should -Be 2
+        $processState.Calls | Should -Be 3
         $script:OwnedDeletes | Should -Be 0
         $script:OwnedStops | Should -Be 0
         $script:OwnedWaits | Should -Be 0
@@ -791,7 +811,7 @@ Describe 'P3 protected pre-live runtime' {
         $script:MutationRunnerCalls | Should -Be 0
 
         $foreignReceipt = [pscustomobject]@{
-            schema='home-gateway/p3-ssh-agent-receipt/v1';manifest_sha256=('f' * 64);agent_pid=4242
+            schema='home-gateway/p3-ssh-agent-receipt/v2';manifest_sha256=('f' * 64);agent_pid=77;windows_process_id=26484
             socket='/tmp/ssh-synthetic/agent.4242';agent_executable_path=$protected.git_ssh_agent_path
             agent_executable_sha256=$protected.git_ssh_agent_sha256;expected_fingerprint_sha256=$protected.public_key_fingerprint_sha256
             started_at_utc=[DateTime]::UtcNow.ToString('o')
@@ -808,16 +828,16 @@ Describe 'P3 protected pre-live runtime' {
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
         $manifest = Get-P3ProtectedAgentManifest -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
         $stored = [pscustomobject][ordered]@{
-            schema='home-gateway/p3-ssh-agent-combined-receipt/v2';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4242
+            schema='home-gateway/p3-ssh-agent-combined-receipt/v3';manifest_sha256=$fixture.ManifestSHA256;agent_pid=77;windows_process_id=26484
             socket='/tmp/ssh-synthetic/agent.4242';agent_executable_path=$manifest.git_ssh_agent_path
             agent_executable_sha256=$manifest.git_ssh_agent_sha256;expected_fingerprint_sha256=$manifest.public_key_fingerprint_sha256
-            started_at_utc='2026-08-31T12:00:00.1234500Z';loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;toolchain_match=$true
+            started_at_utc='2026-08-31T12:00:00.1234500Z';loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;windows_process_id_match=$true;toolchain_match=$true
         }
         Write-P3ProtectedAgentReceipt -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256 -Receipt $stored
         $alternate = $stored | ConvertTo-Json -Depth 16 | ConvertFrom-Json
         $alternate.agent_pid = 4343; $alternate.socket = '/tmp/ssh-synthetic/agent.4343'
         $raw = [pscustomobject][ordered]@{
-            schema='home-gateway/p3-ssh-agent-receipt/v1';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4343
+            schema='home-gateway/p3-ssh-agent-receipt/v2';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4343;windows_process_id=26484
             socket=$alternate.socket;agent_executable_path=$alternate.agent_executable_path
             agent_executable_sha256=$alternate.agent_executable_sha256;expected_fingerprint_sha256=$alternate.expected_fingerprint_sha256
             started_at_utc=$alternate.started_at_utc
@@ -827,7 +847,7 @@ Describe 'P3 protected pre-live runtime' {
         $boundaries = [pscustomobject]@{
             AgentRunner={throw 'must not run'};AddRunner={throw 'must not run'}
             ListRunner={ '256 SHA256:synthetic-key p3 (ED25519)' }
-            ProcessRunner={ [pscustomobject]@{Id=4343;Path=$manifest.git_ssh_agent_path;StartTime=[DateTime]$raw.started_at_utc} }.GetNewClosure()
+            ProcessRunner={ [pscustomobject]@{Id=26484;Path=$manifest.git_ssh_agent_path;StartTime=[DateTime]$raw.started_at_utc} }.GetNewClosure()
             DeleteRunner={ $script:MutationRunnerCalls++ };StopRunner={ $script:MutationRunnerCalls++ }
             WaitRunner={ $script:MutationRunnerCalls++ };ReobserveRunner={ $script:MutationRunnerCalls++; @() }
             SocketExistsRunner={ $script:MutationRunnerCalls++; $false };ReceiptRemoveRunner={ $script:MutationRunnerCalls++ }
@@ -846,10 +866,10 @@ Describe 'P3 protected pre-live runtime' {
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
         $agentManifest = Get-P3ProtectedAgentManifest -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
         $combined = [pscustomobject][ordered]@{
-            schema='home-gateway/p3-ssh-agent-combined-receipt/v2';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4242
+            schema='home-gateway/p3-ssh-agent-combined-receipt/v3';manifest_sha256=$fixture.ManifestSHA256;agent_pid=77;windows_process_id=26484
             socket='/tmp/ssh-synthetic/agent.4242';agent_executable_path=$agentManifest.git_ssh_agent_path
             agent_executable_sha256=$agentManifest.git_ssh_agent_sha256;expected_fingerprint_sha256=$agentManifest.public_key_fingerprint_sha256
-            started_at_utc=[DateTime]::UtcNow.ToString('o');loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;toolchain_match=$true
+            started_at_utc=[DateTime]::UtcNow.ToString('o');loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;windows_process_id_match=$true;toolchain_match=$true
         }
         Write-P3RuntimeJson -RuntimeRoot $fixture.Root -Name 'agent-receipt.json' -Value $combined
         $protected = Get-P3ProtectedRemoteContext -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
@@ -883,10 +903,10 @@ Describe 'P3 protected pre-live runtime' {
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
         $manifest = Get-P3ProtectedAgentManifest -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256
         $combined = [pscustomobject][ordered]@{
-            schema='home-gateway/p3-ssh-agent-combined-receipt/v2';manifest_sha256=$fixture.ManifestSHA256;agent_pid=4242
+            schema='home-gateway/p3-ssh-agent-combined-receipt/v3';manifest_sha256=$fixture.ManifestSHA256;agent_pid=77;windows_process_id=26484
             socket='/tmp/ssh-synthetic/agent.4242';agent_executable_path=$manifest.git_ssh_agent_path
             agent_executable_sha256=$manifest.git_ssh_agent_sha256;expected_fingerprint_sha256=$manifest.public_key_fingerprint_sha256
-            started_at_utc='2026-08-31T12:00:00.1234500Z';loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;toolchain_match=$true
+            started_at_utc='2026-08-31T12:00:00.1234500Z';loaded_key_count=1;expected_key_match=$true;agent_pid_match=$true;windows_process_id_match=$true;toolchain_match=$true
         }
         Write-P3ProtectedAgentReceipt -Root $fixture.Root -ManifestSHA256 $fixture.ManifestSHA256 -Receipt $combined
         $installPath = Join-Path $fixture.Root 'remote-install-receipt.json'
@@ -926,6 +946,7 @@ Describe 'P3 protected pre-live runtime' {
         $fixture = Initialize-OwnedBatchRuntime -Root $script:Root -Trust $script:Trust
         [IO.File]::Delete((Join-Path $fixture.Root 'remote-install-receipt.json'))
         $script:OwnedAgentStarts=0;$script:OwnedStops=0;$script:OwnedWaits=0;$script:OwnedClockCalls=0;$script:RemoteInstalled=$false
+        $remoteLifecyclePids = [Collections.Generic.List[int]]::new()
         $payloadHash = (Open-P3BoundedStableJson -Path (Join-Path $fixture.Root 'manifest.json') -MaximumBytes 65536 -ExpectedProperties $script:P3ManifestProperties).local_payload_sha256
         $ssh = {
             param($Executable,$Arguments,$Mode,$Request)
@@ -940,6 +961,10 @@ Describe 'P3 protected pre-live runtime' {
         }.GetNewClosure()
         $boundaries = New-OwnedRemoteBoundaries -Fixture $fixture -SshRunner $ssh `
             -ScpRunner { [pscustomobject]@{exit_code=0} } -StopRunner {param($ProcessId)$script:OwnedStops++}
+        $boundaries.ProcessRunner = { param($ProcessId) $remoteLifecyclePids.Add($ProcessId); [pscustomobject]@{Id=$ProcessId;Path=$fixture.AgentPath;StartTime=[DateTime]::UtcNow} }.GetNewClosure()
+        $boundaries.StopRunner = { param($ProcessId) $remoteLifecyclePids.Add($ProcessId); $script:OwnedStops++ }.GetNewClosure()
+        $boundaries.WaitRunner = { param($ProcessId) $remoteLifecyclePids.Add($ProcessId); $script:OwnedWaits++ }.GetNewClosure()
+        $boundaries.ReobserveRunner = { param($ProcessId) $remoteLifecyclePids.Add($ProcessId); @() }.GetNewClosure()
 
         $installPlan = Invoke-P3RemoteActionSwitch -SelectedAction 'RemoteInstallPlan' -RuntimeRoot $fixture.Root `
             -ExpectedManifestSHA256 $fixture.ManifestSHA256 -ExpectedPlanSHA256 '' -Confirmation '' -InputObject $null -Boundaries $boundaries
@@ -955,8 +980,7 @@ Describe 'P3 protected pre-live runtime' {
 
         $removed.removed | Should -BeTrue
         $script:OwnedAgentStarts | Should -Be 4
-        $script:OwnedStops | Should -Be 4
-        $script:OwnedWaits | Should -Be 4
+        @($remoteLifecyclePids | Select-Object -Unique) | Should -Be @(26484)
         $script:OwnedClockCalls | Should -Be 4
         Test-Path -LiteralPath (Join-Path $fixture.Root 'agent-receipt.json') | Should -BeFalse
         Test-Path -LiteralPath (Join-Path $fixture.Root 'remote-install-receipt.json') | Should -BeFalse

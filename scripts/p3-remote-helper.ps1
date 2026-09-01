@@ -109,9 +109,10 @@ function Test-P3RemoteContext([object]$Context) {
         $authorities += [string]$item.authority_sha256
     }
     if (@($authorities | Select-Object -Unique).Count -ne 3) { throw 'egress authorities must be distinct' }
-    if ([string]$Context.Agent.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v2' -or
-        [int]$Context.Agent.agent_pid -le 0 -or [string]::IsNullOrWhiteSpace([string]$Context.Agent.socket) -or
+    if ([string]$Context.Agent.schema -cne 'home-gateway/p3-ssh-agent-combined-receipt/v3' -or
+        [int]$Context.Agent.agent_pid -le 0 -or [int]$Context.Agent.windows_process_id -le 0 -or [string]::IsNullOrWhiteSpace([string]$Context.Agent.socket) -or
         [int]$Context.Agent.loaded_key_count -ne 1 -or -not [bool]$Context.Agent.expected_key_match -or
+        -not [bool]$Context.Agent.agent_pid_match -or -not [bool]$Context.Agent.windows_process_id_match -or
         -not [bool]$Context.Agent.toolchain_match -or [string]$Context.Agent.manifest_sha256 -cne [string]$Context.manifest_sha256) {
         throw 'validated one-key agent receipt differs'
     }
@@ -568,7 +569,7 @@ function Invoke-P3OwnedRemoteAction(
     $Action = $savedAction
     $manifest = Get-P3ProtectedAgentManifest -Root $ownedRoot -ManifestSHA256 $ownedManifestSHA256
     $receipt = Start-P3Agent -Manifest $manifest -AgentRunner $Boundaries.AgentRunner `
-        -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
+        -ProcessRunner $Boundaries.ProcessRunner -AddRunner $Boundaries.AddRunner -StopRunner $Boundaries.StopRunner
     $combined = $null
     $protectedCombined = $null
     try {
@@ -635,7 +636,7 @@ if (-not [string]::IsNullOrEmpty($Action)) {
         return [string]$output
     }
     $boundaries = [pscustomobject]@{
-        AgentRunner={param($Executable)& $Executable -s};AddRunner={param($KeyPath)& $manifest.git_ssh_add_path $KeyPath}
+        AgentRunner={param($Executable)Start-P3WindowsAgentProcess -ExecutablePath $Executable};AddRunner={param($KeyPath)Invoke-P3InteractiveAgentAdd -ExecutablePath $manifest.git_ssh_add_path -KeyPath $KeyPath}
         ListRunner={param($Executable)& $Executable -l -E sha256};ProcessRunner={param($ProcessId)Get-Process -Id $ProcessId -ErrorAction Stop|Select-Object Id,Path,StartTime}
         DeleteRunner={& $manifest.git_ssh_add_path -D};StopRunner={param($ProcessId)Stop-Process -Id $ProcessId -ErrorAction Stop}
         WaitRunner={

@@ -93,7 +93,7 @@ $script:P3EgressObservationProperties = @('authority_sha256', 'observed_at_utc',
 $script:P3CombinedAgentReceiptProperties = @(
     'agent_executable_path', 'agent_executable_sha256', 'agent_pid', 'agent_pid_match',
     'expected_fingerprint_sha256', 'expected_key_match', 'loaded_key_count', 'manifest_sha256',
-    'schema', 'socket', 'started_at_utc', 'toolchain_match'
+    'schema', 'socket', 'started_at_utc', 'toolchain_match', 'windows_process_id', 'windows_process_id_match'
 )
 $script:P3InstallReceiptProperties = @(
     'group_match', 'installed_by_gate', 'mode_match', 'owner_match', 'payload_sha256',

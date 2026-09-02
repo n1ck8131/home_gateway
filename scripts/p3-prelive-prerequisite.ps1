@@ -409,7 +409,9 @@ function New-P3PrerequisiteObserverInvocation(
     $loader = @'
 import hashlib,json,re,sys,types
 maximum=526337
-raw=sys.stdin.buffer.read(maximum+1)
+bom=b'\xef\xbb\xbf'
+raw=sys.stdin.buffer.read(maximum+len(bom)+1)
+if raw.startswith(bom): raw=raw[len(bom):]
 if not raw or len(raw)>maximum or raw.count(b'\n')<1: raise ValueError('observer frame length differs')
 header_raw,payload=raw.split(b'\n',1)
 header=json.loads(header_raw.decode('utf-8','strict'))

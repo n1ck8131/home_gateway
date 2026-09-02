@@ -452,6 +452,82 @@ def server_baseline_sha256(value):
         $receipt.raw_identity_exposed | Should -BeFalse
     }
 
+    It 'accepts exactly one transport UTF-8 BOM before the attested frame' {
+        $protocol = 'e' * 64
+        $payloadText = @"
+import hashlib
+import json
+
+def _sha(value):
+    if not isinstance(value, bytes):
+        value = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(value).hexdigest()
+
+def collect_server_snapshot(request):
+    return {
+        'payload_sha256': own_payload_sha256(),
+        'protocol_sha256': '$protocol',
+        'ipv6_non_mutation': True,
+    }
+
+def server_baseline_sha256(value):
+    return _sha(value)
+"@
+        $payload = [Text.UTF8Encoding]::new($false).GetBytes($payloadText)
+        $trust = [pscustomobject]@{
+            git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts'
+            public_key_path='C:\synthetic\home_gateway.pub'
+            ssh_host='192.0.2.10';ssh_user='homegateway';connect_timeout_seconds=10
+            command_timeout_seconds=30;maximum_output_bytes=65536
+            observer_payload_sha256=Get-P3SHA256Bytes $payload
+            observer_protocol_sha256=$protocol
+            expected_ipv6_policy_sha256=('d' * 64)
+        }
+        $invocation = New-P3PrerequisiteObserverInvocation -Trust $trust `
+            -AgentReceipt ([pscustomobject]@{ssh_auth_sock='C:\synthetic\agent.sock'}) `
+            -Nonce ('c' * 64) -Payload $payload
+        $encoded = [regex]::Match(
+            [string]$invocation.arguments[-1],
+            "base64\.b64decode\('(?<value>[A-Za-z0-9+/=]+)'\)"
+        )
+        $loader = [Text.UTF8Encoding]::new($false, $true).GetString(
+            [Convert]::FromBase64String($encoded.Groups['value'].Value)
+        )
+        $bom = [byte[]](239, 187, 191)
+        $single = [byte[]]::new($bom.Length + $invocation.stdin.Length)
+        [Array]::Copy($bom, 0, $single, 0, $bom.Length)
+        [Array]::Copy($invocation.stdin, 0, $single, $bom.Length, $invocation.stdin.Length)
+        $double = [byte[]]::new($bom.Length + $single.Length)
+        [Array]::Copy($bom, 0, $double, 0, $bom.Length)
+        [Array]::Copy($single, 0, $double, $bom.Length, $single.Length)
+        $trailing = [byte[]]::new($single.Length + 3)
+        [Array]::Copy($single, 0, $trailing, 0, $single.Length)
+        $trailing[$trailing.Length - 3] = 88
+        $trailing[$trailing.Length - 2] = 89
+        $trailing[$trailing.Length - 1] = 90
+        $python = (Get-Command python -ErrorAction Stop).Source
+        $probe = 'import base64,io,sys;sys.stdin=io.TextIOWrapper(io.BytesIO(base64.b64decode(sys.argv[1])),encoding="utf-8");exec(base64.b64decode(sys.argv[2]))'
+        $loaderBase64 = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($loader))
+        $boundedLoader = $loader.Replace('maximum=526337', ('maximum=' + ($invocation.stdin.Length + 2)))
+        $boundedLoaderBase64 = [Convert]::ToBase64String([Text.UTF8Encoding]::new($false).GetBytes($boundedLoader))
+
+        $accepted = Invoke-P3PrerequisiteNativeProcess $python `
+            @('-c', $probe, [Convert]::ToBase64String($single), $loaderBase64) ([byte[]](0)) 10 65536
+        $rejected = Invoke-P3PrerequisiteNativeProcess $python `
+            @('-c', $probe, [Convert]::ToBase64String($double), $loaderBase64) ([byte[]](0)) 10 65536
+        $trailingRejected = Invoke-P3PrerequisiteNativeProcess $python `
+            @('-c', $probe, [Convert]::ToBase64String($trailing), $boundedLoaderBase64) ([byte[]](0)) 10 65536
+
+        $accepted.ExitCode | Should -Be 0
+        $accepted.StdErr | Should -BeExactly ''
+        $acceptedReceipt = $accepted.StdOut | ConvertFrom-Json
+        $acceptedReceipt.schema | Should -BeExactly 'home-gateway/p3-prelive-server-observation/v1'
+        $rejected.ExitCode | Should -Not -Be 0
+        $rejected.StdOut | Should -BeExactly ''
+        $trailingRejected.ExitCode | Should -Not -Be 0
+        $trailingRejected.StdOut | Should -BeExactly ''
+    }
+
     It 'binds the dedicated public key selector when IdentitiesOnly is enabled' {
         $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'identity-selector')
         $script:CapturedObserverArguments = $null

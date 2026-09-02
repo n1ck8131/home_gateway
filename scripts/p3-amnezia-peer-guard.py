@@ -804,7 +804,7 @@ def collect_server_snapshot(
     nft_policy = _normalize_nft(run_nft_ruleset_command(runner=runner))
     policy_state = (
         run_checked_command(
-            ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],
+            ["/usr/bin/systemctl", "is-active", "home-gateway-docker-policy.service"],
             runner=runner,
         )
         .decode("utf-8", errors="strict")

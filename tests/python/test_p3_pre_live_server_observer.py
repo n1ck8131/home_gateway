@@ -84,6 +84,22 @@ class PreliveServerObserverTests(unittest.TestCase):
         for forbidden in (" rm ", " mv ", " cp ", "tee", "syncconf", "scp"):
             self.assertNotIn(forbidden, " " + flattened + " ")
         self.assertFalse(any(command[0] == "/usr/bin/awg" for command in commands))
+        self.assertIn(
+            [
+                "/usr/bin/systemctl",
+                "is-active",
+                "home-gateway-docker-policy.service",
+            ],
+            commands,
+        )
+        self.assertNotIn(
+            [
+                "/usr/bin/systemctl",
+                "is-active",
+                "netfilter-persistent.service",
+            ],
+            commands,
+        )
 
 
 if __name__ == "__main__":

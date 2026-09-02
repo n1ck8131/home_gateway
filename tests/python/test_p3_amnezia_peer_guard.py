@@ -542,6 +542,11 @@ class PeerGuardProtocolTests(unittest.TestCase):
                 "is-active",
                 "netfilter-persistent.service",
             ): b"active\n",
+            (
+                "/usr/bin/systemctl",
+                "is-active",
+                "home-gateway-docker-policy.service",
+            ): b"active\n",
         }
         seen = []
 
@@ -567,6 +572,22 @@ class PeerGuardProtocolTests(unittest.TestCase):
         self.assertTrue(snapshot["ipv6_non_mutation"])
         self.assertEqual(snapshot["temporary_leftover_count"], 0)
         self.assertNotIn(("/usr/bin/awg", "show", "all", "public-keys"), seen)
+        self.assertIn(
+            (
+                "/usr/bin/systemctl",
+                "is-active",
+                "home-gateway-docker-policy.service",
+            ),
+            seen,
+        )
+        self.assertNotIn(
+            (
+                "/usr/bin/systemctl",
+                "is-active",
+                "netfilter-persistent.service",
+            ),
+            seen,
+        )
         self.assertTrue(
             all(
                 "/opt/amnezia/awg/wg0.conf" != argument

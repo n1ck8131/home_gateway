@@ -254,7 +254,7 @@ def read_only_command_contract(container_id: str) -> list[list[str]]:
         ["/usr/sbin/iptables-save"],
         ["/usr/sbin/ip6tables-save"],
         ["/usr/sbin/nft", "list", "ruleset"],
-        ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],
+        ["/usr/bin/systemctl", "is-active", "home-gateway-docker-policy.service"],
     ]
 
 

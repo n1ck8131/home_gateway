@@ -417,6 +417,46 @@ class PeerGuardProtocolTests(unittest.TestCase):
                     command, runner=lambda *args, value=result: value
                 )
 
+    def test_nft_ruleset_allows_only_bounded_iptables_nft_compat_warnings(self):
+        warning = (
+            b"# Warning: table ip filter is managed by iptables-nft, do not touch!\n"
+            b"# Warning: table ip6 nat is managed by iptables-nft, do not touch!\n"
+        )
+        output = b"table ip filter { counter packets 17 bytes 99 }\n"
+
+        self.assertEqual(
+            guard.run_nft_ruleset_command(
+                runner=lambda *_args: guard.CommandResult(0, output, warning)
+            ),
+            output,
+        )
+        for stderr in (
+            warning + b"unexpected\n",
+            warning.replace(b"table ip ", b"table inet ", 1),
+            warning.replace(b"\n", b"\r\n", 1),
+            warning * 31,
+        ):
+            with (
+                self.subTest(stderr_sha256=sha(stderr)),
+                self.assertRaisesRegex(ValueError, "stderr"),
+            ):
+                guard.run_nft_ruleset_command(
+                    runner=lambda *_args, value=stderr: guard.CommandResult(
+                        0, output, value
+                    )
+                )
+
+        for result, message in (
+            (guard.CommandResult(1, output, warning), "exit"),
+            (guard.CommandResult(0, output, warning, overflowed=True), "output"),
+            (guard.CommandResult(0, output, warning, timed_out=True), "timeout"),
+        ):
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(ValueError, message),
+            ):
+                guard.run_nft_ruleset_command(runner=lambda *_args, value=result: value)
+
     def test_system_collector_uses_independent_persistent_live_metadata_and_temp_sources(
         self,
     ):
@@ -508,7 +548,12 @@ class PeerGuardProtocolTests(unittest.TestCase):
         def runner(arguments, _timeout, _maximum):
             key = tuple(arguments)
             seen.append(key)
-            return guard.CommandResult(0, outputs[key], b"")
+            stderr = (
+                b"# Warning: table ip filter is managed by iptables-nft, do not touch!\n"
+                if key == ("/usr/sbin/nft", "list", "ruleset")
+                else b""
+            )
+            return guard.CommandResult(0, outputs[key], stderr)
 
         request = reconcile_request()
         request["expected_ipv6_policy_sha256"] = guard.normalized_policy_sha256(ipv6)

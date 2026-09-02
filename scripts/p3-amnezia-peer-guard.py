@@ -41,6 +41,11 @@ ALLOWED_EXECUTABLES = {
     "/usr/bin/systemctl",
     "/usr/bin/sha256sum",
 }
+MAX_NFT_COMPAT_WARNING_BYTES = 4096
+NFT_IPTABLES_COMPAT_WARNING_RE = re.compile(
+    rb"(?:# Warning: table (?:ip|ip6) [A-Za-z0-9_.-]{1,64} "
+    rb"is managed by iptables-nft, do not touch!\n)+"
+)
 COMMON_REQUEST_KEYS = {
     "schema",
     "mode",
@@ -505,6 +510,38 @@ def run_checked_command(
     return result.stdout
 
 
+def run_nft_ruleset_command(
+    *,
+    runner: CommandRunner = _default_command_runner,
+    timeout_seconds: int = 10,
+    maximum_bytes: int = MAX_COMMAND_BYTES,
+) -> bytes:
+    def nft_runner(
+        arguments: Sequence[str], timeout: int, maximum: int
+    ) -> CommandResult:
+        result = runner(arguments, timeout, maximum)
+        if (
+            result.stderr
+            and len(result.stderr) <= MAX_NFT_COMPAT_WARNING_BYTES
+            and NFT_IPTABLES_COMPAT_WARNING_RE.fullmatch(result.stderr) is not None
+        ):
+            return CommandResult(
+                result.exit_code,
+                result.stdout,
+                b"",
+                result.overflowed,
+                result.timed_out,
+            )
+        return result
+
+    return run_checked_command(
+        ["/usr/sbin/nft", "list", "ruleset"],
+        runner=nft_runner,
+        timeout_seconds=timeout_seconds,
+        maximum_bytes=maximum_bytes,
+    )
+
+
 def _read_utf8_lines(data: bytes, label: str) -> list[str]:
     try:
         text = data.decode("utf-8", errors="strict")
@@ -764,9 +801,7 @@ def collect_server_snapshot(
     ipv6_policy = _normalize_policy(
         run_checked_command(["/usr/sbin/ip6tables-save"], runner=runner)
     )
-    nft_policy = _normalize_nft(
-        run_checked_command(["/usr/sbin/nft", "list", "ruleset"], runner=runner)
-    )
+    nft_policy = _normalize_nft(run_nft_ruleset_command(runner=runner))
     policy_state = (
         run_checked_command(
             ["/usr/bin/systemctl", "is-active", "netfilter-persistent.service"],

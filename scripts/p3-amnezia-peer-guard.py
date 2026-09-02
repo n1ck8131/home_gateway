@@ -599,6 +599,7 @@ def collect_server_snapshot(
             [
                 "/usr/bin/docker",
                 "ps",
+                "--no-trunc",
                 "-a",
                 "--filter",
                 "name=^/amnezia-awg2$",

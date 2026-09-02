@@ -435,6 +435,7 @@ class PeerGuardProtocolTests(unittest.TestCase):
             (
                 "/usr/bin/docker",
                 "ps",
+                "--no-trunc",
                 "-a",
                 "--filter",
                 "name=^/amnezia-awg2$",

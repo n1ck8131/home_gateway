@@ -34,7 +34,7 @@ The native API contract was checked against Microsoft's [NtCreateFile reference]
 
 ## Prepared read-only refresh candidate
 
-The local builder `build-phase35-refresh-candidate-v2.ps1` produced a protected five-file package under ignored `.p3-vps-run/p35-refresh-candidate-v2/`. It contains a sanitized candidate contract, prerequisite and agent plans, and a CurrentUser DPAPI-encrypted observation input. The source receipt remains unchanged; the future observation directory does not exist. The earlier v1 package is preserved but superseded because a trailing-separator compatibility correction changed the driver hash.
+The local builder `build-phase35-refresh-candidate-v2.ps1` produced a protected five-file package under ignored `.p3-vps-run/p35-refresh-candidate-v2/`. It contains a sanitized candidate contract, prerequisite and agent plans, and a CurrentUser DPAPI-encrypted observation input. At candidate creation, the source receipt was unchanged and the observation directory was absent. That state is historical: the later attempts below created the initial three-file root and consumed the one-time resume claim. The earlier v1 package is preserved but superseded because a trailing-separator compatibility correction changed the driver hash.
 
 | Identity | SHA-256 or challenge |
 | --- | --- |
@@ -69,7 +69,7 @@ The independent reviewer decrypted the V2 input only in memory and verified cano
 
 ## Remaining gates
 
-The read-only refresh has owner approval, but requires a completed interactive key unlock and fresh Cloud evidence. Previously accepted hashes are expected identities only. One pinned SSH observation and three HTTPS authorities must establish a new receipt. Stop on baseline or trust drift.
+The V2 observation budget and one-time resume claim are consumed. The SSH1/HTTPS0 resume stopped on baseline hash mismatch; V2 must not be executed again. A new exact diagnostic candidate requires its own owner approval and fresh Cloud evidence. Previously accepted hashes remain expected identities only; observed differences must be retained and reviewed before any baseline acceptance or further prerequisite refresh.
 
 Only that fresh receipt can produce the exact runtime manifest and challenge. Runtime preparation and helper installation keep their own approval gates. Phase 3.6 profiles, phase 3.7 activation, and later network/recovery work remain outside this report.
 
@@ -90,6 +90,24 @@ Execution began at `10:17:39 UTC` and started one temporary agent. The interacti
 
 The runner returned exit `23`, `failed_closed`, SSH calls `0`, HTTPS calls `0`, and agent starts `1`. Final readback confirmed zero agent, ssh-add, runner, wrapper, or console processes. The observation root contains only its three initial protected files; no agent receipt, observation batch, or prerequisite receipt exists. The 3.4 receipt hash is unchanged. Runtime and helper actions were not performed.
 
-The unused encrypted V2 candidate input and failed-attempt evidence are retained. Before resuming, inspect the exact three-file root and the zero-SSH attempt receipt; do not delete them or blindly rerun the executor, which rejects an existing observation root. Refresh Cloud evidence when interactive key entry is available. The candidate approval persists within its original scope; runtime preparation and helper installation remain separately gated.
+Historical disposition after the first, zero-SSH attempt: the encrypted V2 input and failed-attempt evidence were retained for an inspected one-time resume under the original approval. That resume has now run and stopped on baseline drift, as recorded below. This paragraph no longer authorizes a retry; the claim is consumed. Runtime preparation and helper installation remain separately gated.
 
 The next runtime-candidate builder has a static independent GO, but has not run because the required fresh prerequisite receipt does not exist. No network configuration, profile, service, firewall, Docker configuration, route, DNS, adapter, RedShield, or Cisco state was changed.
+
+## Повторный read-only запуск: остановка на baseline
+
+После сообщения владельца «Готов» выполнен один повторный запуск в пределах одобренного V2. Предыдущий результат с SSH0/HTTPS0 проверен по точному hash; сохранённый root допущен только с исходными тремя файлами, защитным ACL и совпадающими manifest/agent manifest. Независимый reviewer потребовал одноразовый durable claim, поскольку новый сбой после SSH мог оставить те же три файла. Исправленный executor создаёт отдельный каталог claim через exclusive `FILE_CREATE` до agent/network и сохраняет его при любом исходе. Финальный review: GO, открытых замечаний нет.
+
+| Артефакт | SHA-256 |
+| --- | --- |
+| `phase35-approved-refresh-runner-v2-resume1.ps1` | `a79aeb85f8974d109cb2416288d15094c5090c0b7d2547ab36558ad354e299a6` |
+| Новый Cloud observation | `642890fea8e8f53715e65cdfd2726d1cd920fbc1fba34ec8513a5e4e1666b83b` |
+| `p35-refresh-resume1-result/attempt.json` | `cff46cc4081eede897cf56c03a58d84fb5cde16d516c580b1dbd5cf35e544120` |
+
+Rules наблюдались через authenticated browser в `10:48:47.052 UTC`, привязка Droplet — в `10:49:13 UTC` 2026-09-05. Firewall, management source, единственный Droplet, две inbound rules и три outbound rows совпали с принятой конфигурацией. Cloud record сохраняет время первого наблюдения.
+
+Ввод passphrase завершился; выполнено **SSH1, HTTPS0, agent starts1**. SSH process вернул успешный ограниченный JSON-ответ без stderr, но `server_baseline_sha256` не совпал с ожидаемым `ea611479698f1970704e00b437e7f19769d2fda7927dc3bf7c09eed0d7cd54e9`. Executor остановился на строке 245 с `failed_closed`; hash сообщения `accepted server baseline drifted` равен `7e6f0656405f0dcdf6618b93c7bc8f77083eb4c52dabb016699c9b8feb8c9134`. Tool зафиксировал process exit 1. Новый baseline не сохранялся перед исключением, поэтому его hash и изменившиеся поля неизвестны; причина расхождения ещё не установлена.
+
+Teardown завершён: агент, ssh-add и принадлежащие запуску wrapper/runner отсутствуют. Исходный receipt 3.4 неизменён. В root остались три начальных файла, batch и новый receipt отсутствуют. Claim сохранён; контрольный `PreflightOnly` отклонил повтор на строке 193 до agent/network, с SSH0/HTTPS0/agent starts0. Runtime Prepare и helper не выполнялись. Фаза 3.5 остаётся открытой.
+
+Следующий шаг — отдельный точный read-only diagnostic candidate с новым nonce и одним SSH-наблюдением, которое сохраняет обезличенный baseline и различия. Принятие нового baseline и повторное выполнение refresh не разрешены автоматически после stop-on-drift.

@@ -6,6 +6,7 @@ Describe 'P3 pre-live prerequisite boundary' {
         $script:Runtime = Join-Path $PSScriptRoot '..\..\scripts\p3-prelive-runtime.ps1'
         . $script:Runtime
         . $script:Driver
+        . (Join-Path $PSScriptRoot '..\..\scripts\p3-ipv6-policy-diagnostic.ps1')
 
         function New-P3PrerequisiteTestAgentLaunch([string[]]$Output) {
             return [pscustomobject][ordered]@{
@@ -133,6 +134,30 @@ Describe 'P3 pre-live prerequisite boundary' {
             $f.Manifest.ssh_trust_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $trust)
             return [pscustomobject]@{Fixture=$f;Agent=$agent;Trust=$trust}
         }
+
+        function New-Ipv6DiagnosticData([object]$Fixture, [bool]$Eligible = $true) {
+            return [pscustomobject][ordered]@{
+                expected_ipv6_policy_sha256=[string]$Fixture.Manifest.ssh_trust.expected_ipv6_policy_sha256
+                observed_ipv6_policy_sha256=('8' * 64)
+                sample_set_sha256=('9' * 64)
+                sample_count=3
+                unique_policy_identity_count=1
+                whole_policy_relation_class='stable_mismatch'
+                docker_user_chain_class=$(if ($Eligible) {'empty'} else {'nonempty'})
+                docker_user_declaration_count=1
+                docker_user_rule_count=$(if ($Eligible) {0} else {1})
+                forward_jump_count=1
+                forward_jump_position_class='first'
+                project_owned_chain_count=0
+                project_owned_jump_count=0
+                project_owned_comment_count=0
+                policy_comment_line_count=0
+                parse_complete=$true
+                parse_failure_classes=@()
+                project_scope_nonmutation_confirmed=$true
+                rebaseline_eligible=$Eligible
+            }
+        }
     }
 
     It 'assembles and validates one exact fresh prerequisite receipt' {
@@ -213,6 +238,48 @@ Describe 'P3 pre-live prerequisite boundary' {
         $calls[-1] | Should -BeExactly 'stop'
         $observed.egress.Count | Should -Be 3
         $observed.server_baseline_sha256 | Should -BeExactly (Get-P3ServerBaselineSHA256 $f.Baseline)
+    }
+
+    It 'checks egress freshness against the current clock after slow SSH and HTTPS' {
+        $f = New-PrerequisiteFixture
+        $root = Join-Path $TestDrive 'slow-egress'
+        $plan = New-P3PrerequisitePlan $f.Manifest ('c'*64) $root
+        $clock = [pscustomobject]@{Now=$f.Now;Offset=0;HttpsCalls=0}
+        $baselineSHA = Get-P3ServerBaselineSHA256 $f.Baseline
+        $nonceSHA = Get-P3SHA256Text ('c'*64)
+        $inputValue = [pscustomobject]@{
+            manifest=$f.Manifest;ssh_trust=$f.SshTrust;nonce=('c'*64)
+            expected_plan_sha256=$plan.plan_sha256;confirmation_challenge=$plan.confirmation_challenge
+        }
+        $boundaries = [pscustomobject]@{
+            ClockRunner={ $clock.Now }.GetNewClosure()
+            ObserverRunner={
+                $clock.Now=$clock.Now.AddSeconds(20)
+                [pscustomobject]@{
+                    schema='home-gateway/p3-prelive-server-observation/v1';server_baseline=$f.Baseline
+                    server_baseline_sha256=$baselineSHA;payload_sha256=$f.Manifest.payload_sha256
+                    protocol_sha256=$f.Manifest.protocol_sha256;nonce_sha256=$nonceSHA
+                    live_mutation_performed=$false;raw_identity_exposed=$false
+                }
+            }.GetNewClosure()
+            HttpsRunner={param($entry)
+                $clock.Now=$clock.Now.AddSeconds(10);$clock.HttpsCalls++
+                [pscustomobject]@{
+                    schema='home-gateway/p3-prelive-egress-observation/v1';authority_sha256=$entry.authority_sha256
+                    source_cidr_sha256=$f.Manifest.management_source_cidr_sha256
+                    observed_at_utc=$clock.Now.AddSeconds($clock.Offset).ToString('o')
+                }
+            }.GetNewClosure()
+        }
+        $result = Invoke-P3PrerequisiteObserve $inputValue $boundaries ([pscustomobject]@{}) $root
+        $clock.HttpsCalls | Should -Be 3
+        $result.egress.Count | Should -Be 3
+        $result.observed_at_utc | Should -BeExactly $f.Now.AddSeconds(50).ToString('o')
+        foreach ($offset in @(-601,6)) {
+            $clock.Offset=$offset
+            { Invoke-P3PrerequisiteObserve $inputValue $boundaries ([pscustomobject]@{}) $root } |
+                Should -Throw '*egress observation freshness differs*'
+        }
     }
 
     It 'binds approval to one canonical prerequisite root and rejects replay before mutation' {
@@ -452,6 +519,78 @@ def server_baseline_sha256(value):
         $receipt.raw_identity_exposed | Should -BeFalse
     }
 
+    It 'executes exactly three in-memory IPv6 samples through the diagnostic loader' {
+        $protocol = 'e' * 64
+        $payloadText = @"
+import hashlib
+import json
+
+calls = 0
+
+def _sha(value):
+    if not isinstance(value, bytes):
+        value = json.dumps(value, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    return hashlib.sha256(value).hexdigest()
+
+def public_protocol_sha256():
+    return '$protocol'
+
+def run_checked_command(arguments):
+    global calls
+    if arguments != ['/usr/sbin/ip6tables-save']:
+        raise ValueError('unexpected command')
+    calls += 1
+    return b'raw-ipv6-policy'
+
+def classify_ipv6_policy_samples(samples, expected):
+    if calls != 3 or samples != [b'raw-ipv6-policy'] * 3:
+        raise ValueError('sample count differs')
+    return {
+        'expected_ipv6_policy_sha256': expected,
+        'observed_ipv6_policy_sha256': '8' * 64,
+        'sample_set_sha256': '9' * 64,
+        'sample_count': 3,
+        'unique_policy_identity_count': 1,
+        'whole_policy_relation_class': 'stable_mismatch',
+        'docker_user_chain_class': 'empty',
+        'docker_user_declaration_count': 1,
+        'docker_user_rule_count': 0,
+        'forward_jump_count': 1,
+        'forward_jump_position_class': 'first',
+        'project_owned_chain_count': 0,
+        'project_owned_jump_count': 0,
+        'project_owned_comment_count': 0,
+        'policy_comment_line_count': 0,
+        'parse_complete': True,
+        'parse_failure_classes': [],
+        'project_scope_nonmutation_confirmed': True,
+        'rebaseline_eligible': True,
+    }
+"@
+        $payload = [Text.UTF8Encoding]::new($false).GetBytes($payloadText)
+        $trust = [pscustomobject]@{
+            git_ssh_path='C:\synthetic\ssh.exe';known_hosts_path='C:\synthetic\known_hosts'
+            public_key_path='C:\synthetic\home_gateway.pub';ssh_host='192.0.2.10';ssh_user='homegateway'
+            connect_timeout_seconds=10;command_timeout_seconds=30;maximum_output_bytes=65536
+            observer_payload_sha256=Get-P3SHA256Bytes $payload;observer_protocol_sha256=$protocol
+            expected_ipv6_policy_sha256=('d' * 64)
+        }
+        $invocation = New-P3PrerequisiteIpv6DiagnosticInvocation $trust `
+            ([pscustomobject]@{ssh_auth_sock='C:\synthetic\agent.sock'}) ('c' * 64) $payload
+        $encoded = [regex]::Match([string]$invocation.arguments[-1], "base64\.b64decode\('(?<value>[A-Za-z0-9+/=]+)'\)")
+        $encoded.Success | Should -BeTrue
+        $loader = [Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($encoded.Groups['value'].Value))
+        $result = Invoke-P3PrerequisiteNativeProcess (Get-Command python -ErrorAction Stop).Source @('-c',$loader) $invocation.stdin 10 65536
+        $result.ExitCode | Should -Be 0
+        $result.StdErr | Should -BeExactly ''
+        $receipt = $result.StdOut | ConvertFrom-Json
+        $receipt.schema | Should -BeExactly 'home-gateway/p3-prelive-ipv6-remote-diagnostic/v1'
+        $receipt.diagnostic.sample_count | Should -Be 3
+        $receipt.ssh_observation_count | Should -Be 1
+        $receipt.https_observation_count | Should -Be 0
+        $result.StdOut | Should -Not -Match 'raw-ipv6-policy'
+    }
+
     It 'accepts exactly one transport UTF-8 BOM before the attested frame' {
         $protocol = 'e' * 64
         $payloadText = @"
@@ -649,6 +788,206 @@ def server_baseline_sha256(value):
         (Test-Path (Join-Path $p.Agent.Root 'observation-batch.json')) | Should -BeTrue
         $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
         $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'binds the IPv6 diagnostic plan to one SSH, three samples, zero HTTPS, and the exact root' {
+        $f = New-PrerequisiteFixture
+        $first = New-P3PrerequisiteIpv6DiagnosticPlan $f.Manifest ('c' * 64) (Join-Path $TestDrive 'diagnostic-one')
+        $second = New-P3PrerequisiteIpv6DiagnosticPlan $f.Manifest ('c' * 64) (Join-Path $TestDrive 'diagnostic-two')
+        $first.schema | Should -BeExactly 'home-gateway/p3-prelive-ipv6-diagnostic-plan/v1'
+        $first.ssh_observation_count | Should -Be 1
+        $first.ipv6_sample_count | Should -Be 3
+        $first.https_observation_count | Should -Be 0
+        $first.no_write_scope | Should -BeTrue
+        $first.live_mutation_performed | Should -BeFalse
+        $first.plan_sha256 | Should -Not -BeExactly $second.plan_sha256
+        $first.confirmation_challenge | Should -BeExactly ('P3-IPV6-DIAGNOSTIC-' + $first.plan_sha256.Substring(0,16).ToUpperInvariant())
+    }
+
+    It 'binds a rebased prerequisite plan to fresh eligible diagnostic evidence' {
+        $f = New-PrerequisiteFixture
+        $diagnosticManifest = $f.Manifest | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        $remote = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-prelive-ipv6-remote-diagnostic/v1';diagnostic=New-Ipv6DiagnosticData $f
+            payload_sha256=[string]$diagnosticManifest.payload_sha256;protocol_sha256=[string]$diagnosticManifest.protocol_sha256
+            nonce_sha256=Get-P3SHA256Text ('c'*64);ssh_observation_count=1;https_observation_count=0
+            live_mutation_performed=$false;raw_identity_exposed=$false
+        }
+        $receipt = New-P3PrerequisiteIpv6DiagnosticReceipt $diagnosticManifest $remote $f.Now
+        $receiptSHA = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $receipt)
+        $f.Manifest.ssh_trust.expected_ipv6_policy_sha256 = [string]$receipt.observed_ipv6_policy_sha256
+        $f.Manifest.ssh_trust_sha256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $f.Manifest.ssh_trust)
+        $identity = [ordered]@{}
+        foreach ($property in $f.Manifest.PSObject.Properties) {
+            if ($property.Name -cne 'manifest_sha256') { $identity[$property.Name] = $property.Value }
+        }
+        $f.Manifest.manifest_sha256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson ([pscustomobject]$identity))
+        $first = New-P3PrerequisiteIpv6RebasedPlan $f.Manifest ('d'*64) (Join-Path $TestDrive 'rebased-one') `
+            $diagnosticManifest $receipt $receiptSHA $f.Now
+        { New-P3PrerequisiteIpv6RebasedPlan $f.Manifest ('d'*64) (Join-Path $TestDrive 'rebased-one') `
+            $diagnosticManifest $receipt ('1'*64) $f.Now } | Should -Throw '*receipt hash differs*'
+        $second = New-P3PrerequisiteIpv6RebasedPlan $f.Manifest ('d'*64) (Join-Path $TestDrive 'rebased-two') `
+            $diagnosticManifest $receipt $receiptSHA $f.Now
+        $first.schema | Should -BeExactly 'home-gateway/p3-prelive-ipv6-rebased-plan/v1'
+        $first.ssh_observation_count | Should -Be 1
+        $first.https_observation_count | Should -Be 3
+        $first.no_write_scope | Should -BeTrue
+        $first.live_mutation_performed | Should -BeFalse
+        $first.plan_sha256 | Should -Not -BeExactly $second.plan_sha256
+        $first.confirmation_challenge | Should -BeExactly ('P3-PRELIVE-REBASED-' + $first.plan_sha256.Substring(0,16).ToUpperInvariant())
+        $f.Manifest.ssh_trust.expected_ipv6_policy_sha256 = '2'*64
+        $f.Manifest.ssh_trust_sha256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $f.Manifest.ssh_trust)
+        $identity = [ordered]@{}
+        foreach ($property in $f.Manifest.PSObject.Properties) {
+            if ($property.Name -cne 'manifest_sha256') { $identity[$property.Name] = $property.Value }
+        }
+        $f.Manifest.manifest_sha256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson ([pscustomobject]$identity))
+        { New-P3PrerequisiteIpv6RebasedPlan $f.Manifest ('d'*64) (Join-Path $TestDrive 'rebased-one') `
+                $diagnosticManifest $receipt $receiptSHA $f.Now } |
+            Should -Throw '*evidence differs*'
+    }
+
+    It 'launches ssh-add only through a visible PowerShell wrapper with exact paths' {
+        $captured = $null
+        Invoke-P3Ipv6VisibleSshAddWrapper `
+            -PowerShellPath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+            -WrapperPath 'C:\safe\interactive-ssh-add.ps1' `
+            -SshAddPath 'C:\Program Files\Git\usr\bin\ssh-add.exe' `
+            -KeyPath 'C:\safe\operator-key' `
+            -WorkingDirectory 'C:\safe' `
+            -ProcessRunner {param($start)$script:captured=$start;[pscustomobject]@{exit_code=0}}
+        $script:captured.UseShellExecute | Should -BeTrue
+        $script:captured.CreateNoWindow | Should -BeFalse
+        $script:captured.WindowStyle | Should -Be ([Diagnostics.ProcessWindowStyle]::Normal)
+        $script:captured.Arguments | Should -Match 'interactive-ssh-add\.ps1'
+        $script:captured.Arguments | Should -Match 'ssh-add\.exe'
+        { Invoke-P3Ipv6VisibleSshAddWrapper 'C:\Windows\powershell.exe' 'C:\safe\bad&wrapper.ps1' 'C:\safe\ssh-add.exe' 'C:\safe\key' 'C:\safe' {} } |
+            Should -Throw '*visible wrapper input differs*'
+    }
+
+    It 'revalidates rebased protected evidence at SSH after an interactive delay' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'rebase-live-diagnostic')
+        $f = $p.Fixture
+        $null = Initialize-P3PrerequisiteRoot $p.Agent.Root $f.Manifest $p.Agent.Manifest
+        $remote = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-prelive-ipv6-remote-diagnostic/v1';diagnostic=New-Ipv6DiagnosticData $f
+            payload_sha256=$f.Manifest.payload_sha256;protocol_sha256=$f.Manifest.protocol_sha256
+            nonce_sha256=Get-P3SHA256Text ('c'*64);ssh_observation_count=1;https_observation_count=0
+            live_mutation_performed=$false;raw_identity_exposed=$false
+        }
+        $receipt = New-P3PrerequisiteIpv6DiagnosticReceipt $f.Manifest $remote $f.Now
+        $stored = Write-P3ProtectedPrerequisiteIpv6DiagnosticReceipt $p.Agent.Root $f.Manifest $receipt $f.Now
+        $final = $f.Manifest | ConvertTo-Json -Depth 30 | ConvertFrom-Json
+        $final.ssh_trust.expected_ipv6_policy_sha256 = $receipt.observed_ipv6_policy_sha256
+        $final.ssh_trust_sha256 = Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson $final.ssh_trust)
+        $identity = [ordered]@{}
+        foreach ($property in $final.PSObject.Properties) {
+            if ($property.Name -cne 'manifest_sha256') { $identity[$property.Name]=$property.Value }
+        }
+        $final.manifest_sha256=Get-P3SHA256Bytes (ConvertTo-P3CanonicalJson ([pscustomobject]$identity))
+        $root=Join-Path $TestDrive 'rebase-live-final'
+        $plan=New-P3PrerequisiteIpv6RebasedPlan $final ('c'*64) $root $f.Manifest $receipt $stored.receipt_sha256 $f.Now
+        $script:rebaseGateClock=[pscustomobject]@{Value=$f.Now;Advance=$false;SshCalls=0}
+        $boundaries=[pscustomobject]@{
+            ClockRunner={$script:rebaseGateClock.Value}
+            SshRunner={$script:rebaseGateClock.SshCalls++; 'ssh-called'}
+        }
+        Mock Invoke-P3PrerequisiteProductionObservation {
+            param($PrerequisiteRoot,$InputObject,$Boundaries)
+            if($script:rebaseGateClock.Advance){$script:rebaseGateClock.Value=$script:rebaseGateClock.Value.AddMinutes(11)}
+            & $Boundaries.SshRunner 'synthetic' @() ([byte[]]@()) 30 65536
+        }
+        $inputValue=[pscustomobject]@{manifest=$final;nonce=('c'*64)}
+        $result=Invoke-P3PrerequisiteProductionRebasedObservation $root $inputValue $boundaries $p.Agent.Root `
+            $f.Manifest $stored.receipt_sha256 $plan.plan_sha256 $plan.confirmation_challenge
+        $result | Should -BeExactly 'ssh-called'
+        $script:rebaseGateClock.SshCalls | Should -Be 1
+        $script:rebaseGateClock.Advance=$true
+        { Invoke-P3PrerequisiteProductionRebasedObservation $root $inputValue $boundaries $p.Agent.Root `
+            $f.Manifest $stored.receipt_sha256 $plan.plan_sha256 $plan.confirmation_challenge } | Should -Throw '*freshness differs*'
+        $script:rebaseGateClock.SshCalls | Should -Be 1
+    }
+
+    It 'executes one production IPv6 diagnostic SSH and always removes its exact agent' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'production-ipv6-diagnostic')
+        $f = $p.Fixture
+        $plan = New-P3PrerequisiteIpv6DiagnosticPlan $f.Manifest ('c' * 64) $p.Agent.Root
+        $calls = [Collections.Generic.List[string]]::new()
+        $remoteReceipt = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-prelive-ipv6-remote-diagnostic/v1'
+            diagnostic=New-Ipv6DiagnosticData $f
+            payload_sha256=[string]$f.Manifest.payload_sha256
+            protocol_sha256=[string]$f.Manifest.protocol_sha256
+            nonce_sha256=Get-P3SHA256Text ('c' * 64)
+            ssh_observation_count=1
+            https_observation_count=0
+            live_mutation_performed=$false
+            raw_identity_exposed=$false
+        }
+        $boundaries = [pscustomobject]@{
+            AgentRunner={param($exe)$calls.Add('start');[pscustomobject]@{schema='home-gateway/p3-windows-agent-launch/v1';output=@('SSH_AUTH_SOCK=C:\synthetic\agent.sock; export SSH_AUTH_SOCK;', 'echo Agent pid 77;');started_at_utc=[DateTime]::UtcNow.ToString('o');windows_process_id=26484}}.GetNewClosure()
+            AddRunner={param($path)$calls.Add('add')}.GetNewClosure()
+            ListRunner={param($exe)"256 $($p.Agent.Fingerprint) p3 (ED25519)"}.GetNewClosure()
+            ProcessRunner={param($ProcessId)[pscustomobject]@{Id=$ProcessId;Path=$p.Agent.Manifest.git_ssh_agent_path;StartTime=[DateTime]::UtcNow}}.GetNewClosure()
+            DeleteRunner={$calls.Add('delete')}.GetNewClosure()
+            StopRunner={param($ProcessId)$calls.Add('stop')}.GetNewClosure()
+            WaitRunner={param($ProcessId)$calls.Add('wait')}.GetNewClosure()
+            ReobserveRunner={param($ProcessId)$calls.Add('reobserve');@()}.GetNewClosure()
+            SocketExistsRunner={param($path)$false}
+            ReceiptRemoveRunner={param($path)$calls.Add('receipt-remove');[IO.File]::Delete($path)}.GetNewClosure()
+            SshRunner={param($exe,$args,$stdin,$timeout,$maximum)$calls.Add('ssh');[pscustomobject]@{ExitCode=0;TimedOut=$false;Oversized=$false;StdOut=($remoteReceipt|ConvertTo-Json -Depth 30 -Compress);StdErr=''}}.GetNewClosure()
+            ClockRunner={$f.Now.AddSeconds(5)}.GetNewClosure()
+        }
+        $result = Invoke-P3PrerequisiteProductionIpv6Diagnostic -DiagnosticRoot $p.Agent.Root `
+            -InputObject ([pscustomobject]@{manifest=$f.Manifest;ssh_trust=$p.Trust;agent_manifest=$p.Agent.Manifest;nonce=('c'*64);expected_plan_sha256=$plan.plan_sha256;confirmation_challenge=$plan.confirmation_challenge}) `
+            -Boundaries $boundaries
+        @($calls | Where-Object {$_ -eq 'ssh'}).Count | Should -Be 1
+        $calls[-1] | Should -BeExactly 'receipt-remove'
+        $result.receipt_sha256 | Should -BeExactly (Get-P3ExactFileSHA256 (Join-Path $p.Agent.Root 'ipv6-diagnostic-receipt.json') 'test receipt')
+        $result.receipt.rebaseline_eligible | Should -BeTrue
+        (Test-Path (Join-Path $p.Agent.Root 'agent-receipt.json')) | Should -BeFalse
+        $env:SSH_AUTH_SOCK | Should -BeNullOrEmpty
+        $env:SSH_AGENT_PID | Should -BeNullOrEmpty
+    }
+
+    It 'rejects stale, ineligible, and hash-mismatched protected IPv6 diagnostic receipts' {
+        $p = New-ProductionPrerequisiteFixture (Join-Path $TestDrive 'protected-ipv6-diagnostic')
+        $f = $p.Fixture
+        $null = Initialize-P3PrerequisiteRoot $p.Agent.Root $f.Manifest $p.Agent.Manifest
+        $remote = [pscustomobject][ordered]@{
+            schema='home-gateway/p3-prelive-ipv6-remote-diagnostic/v1';diagnostic=New-Ipv6DiagnosticData $f
+            payload_sha256=[string]$f.Manifest.payload_sha256;protocol_sha256=[string]$f.Manifest.protocol_sha256
+            nonce_sha256=Get-P3SHA256Text ('c'*64);ssh_observation_count=1;https_observation_count=0
+            live_mutation_performed=$false;raw_identity_exposed=$false
+        }
+        $receipt = New-P3PrerequisiteIpv6DiagnosticReceipt $f.Manifest $remote $f.Now
+        $stored = Write-P3ProtectedPrerequisiteIpv6DiagnosticReceipt $p.Agent.Root $f.Manifest $receipt $f.Now
+        { Get-P3ProtectedPrerequisiteIpv6DiagnosticReceipt $p.Agent.Root $f.Manifest ('0'*64) $f.Now $true } |
+            Should -Throw '*hash differs*'
+        { Get-P3ProtectedPrerequisiteIpv6DiagnosticReceipt $p.Agent.Root $f.Manifest $stored.receipt_sha256 $f.Now.AddMinutes(11) $true } |
+            Should -Throw '*freshness differs*'
+
+        $receipt.rebaseline_eligible = $false
+        $receipt.docker_user_chain_class = 'nonempty'
+        $receipt.docker_user_rule_count = 1
+        $path = Join-Path $p.Agent.Root 'ipv6-diagnostic-receipt.json'
+        [IO.File]::Delete($path)
+        $stored = Write-P3ProtectedPrerequisiteIpv6DiagnosticReceipt $p.Agent.Root $f.Manifest $receipt $f.Now
+        { Get-P3ProtectedPrerequisiteIpv6DiagnosticReceipt $p.Agent.Root $f.Manifest $stored.receipt_sha256 $f.Now $true } |
+            Should -Throw '*not eligible*'
+    }
+
+    It 'rejects IPv6 diagnostic eligibility tampering and exposes no raw policy text' {
+        $f = New-PrerequisiteFixture
+        $diagnostic = New-Ipv6DiagnosticData $f
+        $diagnostic.rebaseline_eligible = $false
+        { Test-P3PrerequisiteIpv6DiagnosticData $diagnostic $f.Manifest.ssh_trust.expected_ipv6_policy_sha256 } |
+            Should -Throw '*eligibility differs*'
+        $diagnostic.rebaseline_eligible = $true
+        $json = ConvertTo-Json $diagnostic -Depth 10 -Compress
+        $json | Should -Not -Match '2001:'
+        $json | Should -Not -Match '\*filter'
+        $json | Should -Not -Match '\-A '
     }
 
     It 'emergency tears down the exact owned agent when its protected receipt changes before cleanup' {

@@ -37,6 +37,32 @@ def sha(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def ipv6_policy(*, docker_user="empty", forward="first", extra_lines=()):
+    chains = [
+        ":INPUT ACCEPT [0:0]",
+        ":FORWARD ACCEPT [0:0]",
+        ":OUTPUT ACCEPT [0:0]",
+    ]
+    rules = []
+    if docker_user != "missing":
+        chains.append(":DOCKER-USER - [0:0]")
+    if docker_user == "ambiguous":
+        chains.append(":DOCKER-USER - [0:0]")
+    if forward == "first":
+        rules.append("-A FORWARD -j DOCKER-USER")
+    elif forward == "not_first":
+        rules.extend(("-A FORWARD -j ACCEPT", "-A FORWARD -j DOCKER-USER"))
+    elif forward == "duplicate":
+        rules.extend(("-A FORWARD -j DOCKER-USER", "-A FORWARD -j DOCKER-USER"))
+    if docker_user == "return_only":
+        rules.append("-A DOCKER-USER -j RETURN")
+    elif docker_user == "nonempty":
+        rules.append("-A DOCKER-USER -s 2001:db8::7 -j DROP")
+    return (
+        "*filter\n" + "\n".join(chains + rules + list(extra_lines)) + "\nCOMMIT\n"
+    ).encode()
+
+
 def server_snapshot(*, peers=None, **changes):
     peers = peers or ["1" * 64]
     result = {
@@ -256,6 +282,284 @@ class CleanupCrashContainerRollbackFilesystem(FakeContainerRollbackFilesystem):
 
 
 class PeerGuardProtocolTests(unittest.TestCase):
+    def test_ipv6_policy_diagnostic_accepts_safe_stable_match_and_mismatch(self):
+        exact_keys = {
+            "expected_ipv6_policy_sha256",
+            "observed_ipv6_policy_sha256",
+            "sample_set_sha256",
+            "sample_count",
+            "unique_policy_identity_count",
+            "whole_policy_relation_class",
+            "docker_user_chain_class",
+            "docker_user_declaration_count",
+            "docker_user_rule_count",
+            "forward_jump_count",
+            "forward_jump_position_class",
+            "project_owned_chain_count",
+            "project_owned_jump_count",
+            "project_owned_comment_count",
+            "policy_comment_line_count",
+            "parse_complete",
+            "parse_failure_classes",
+            "project_scope_nonmutation_confirmed",
+            "rebaseline_eligible",
+        }
+        for docker_user, relation in (
+            ("empty", "historical_match"),
+            ("return_only", "stable_mismatch"),
+        ):
+            sample = ipv6_policy(docker_user=docker_user)
+            observed_sha256 = guard.normalized_policy_sha256(sample)
+            expected_sha256 = (
+                observed_sha256 if relation == "historical_match" else "0" * 64
+            )
+            result = guard.classify_ipv6_policy_samples(
+                [sample, sample, sample], expected_sha256
+            )
+            with self.subTest(docker_user=docker_user, relation=relation):
+                self.assertEqual(set(result), exact_keys)
+                self.assertEqual(result["expected_ipv6_policy_sha256"], expected_sha256)
+                self.assertEqual(result["observed_ipv6_policy_sha256"], observed_sha256)
+                self.assertEqual(
+                    result["sample_set_sha256"], sha([observed_sha256] * 3)
+                )
+                self.assertEqual(result["sample_count"], 3)
+                self.assertEqual(result["unique_policy_identity_count"], 1)
+                self.assertEqual(result["whole_policy_relation_class"], relation)
+                self.assertEqual(result["docker_user_chain_class"], docker_user)
+                self.assertEqual(result["docker_user_declaration_count"], 1)
+                self.assertEqual(
+                    result["docker_user_rule_count"],
+                    1 if docker_user == "return_only" else 0,
+                )
+                self.assertEqual(result["forward_jump_count"], 1)
+                self.assertEqual(result["forward_jump_position_class"], "first")
+                self.assertTrue(result["parse_complete"])
+                self.assertEqual(result["policy_comment_line_count"], 0)
+                self.assertEqual(result["parse_failure_classes"], [])
+                self.assertTrue(result["project_scope_nonmutation_confirmed"])
+                self.assertTrue(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_marks_unstable_without_a_policy_identity(self):
+        first = ipv6_policy(docker_user="empty")
+        second = ipv6_policy(docker_user="return_only")
+        first_sha256 = guard.normalized_policy_sha256(first)
+        second_sha256 = guard.normalized_policy_sha256(second)
+        result = guard.classify_ipv6_policy_samples(
+            [first, second, first], first_sha256
+        )
+        self.assertIsNone(result["observed_ipv6_policy_sha256"])
+        self.assertEqual(
+            result["sample_set_sha256"],
+            sha(sorted([first_sha256, second_sha256, first_sha256])),
+        )
+        self.assertEqual(result["unique_policy_identity_count"], 2)
+        self.assertEqual(result["whole_policy_relation_class"], "unstable")
+        self.assertEqual(result["docker_user_chain_class"], "ambiguous")
+        self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_classifies_docker_user_fail_closed(self):
+        cases = (
+            ("missing", "missing", True),
+            ("nonempty", "nonempty", True),
+            ("ambiguous", "ambiguous", False),
+        )
+        for fixture_class, expected_class, parse_complete in cases:
+            sample = ipv6_policy(
+                docker_user=fixture_class,
+                forward="absent" if fixture_class == "missing" else "first",
+            )
+            result = guard.classify_ipv6_policy_samples(
+                [sample, sample, sample], guard.normalized_policy_sha256(sample)
+            )
+            with self.subTest(fixture_class=fixture_class):
+                self.assertEqual(result["docker_user_chain_class"], expected_class)
+                self.assertEqual(
+                    result["docker_user_declaration_count"],
+                    0
+                    if fixture_class == "missing"
+                    else 2
+                    if fixture_class == "ambiguous"
+                    else 1,
+                )
+                self.assertEqual(result["parse_complete"], parse_complete)
+                self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_classifies_forward_jump_fail_closed(self):
+        cases = (
+            ("absent", 0, "absent"),
+            ("not_first", 1, "not_first"),
+            ("duplicate", 2, "first"),
+        )
+        for fixture_class, count, position in cases:
+            sample = ipv6_policy(forward=fixture_class)
+            result = guard.classify_ipv6_policy_samples(
+                [sample, sample, sample], guard.normalized_policy_sha256(sample)
+            )
+            with self.subTest(fixture_class=fixture_class):
+                self.assertEqual(result["forward_jump_count"], count)
+                self.assertEqual(result["forward_jump_position_class"], position)
+                self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_counts_each_project_owned_residue(self):
+        cases = (
+            ((":HG-P3-IN - [0:0]",), (1, 0, 0)),
+            (
+                (":HG-P3-IN - [0:0]", "-A INPUT -j HG-P3-IN"),
+                (1, 1, 0),
+            ),
+            (
+                ("-A INPUT -m comment --comment home-gateway-gate64b -j ACCEPT",),
+                (0, 0, 1),
+            ),
+        )
+        for lines, expected_counts in cases:
+            sample = ipv6_policy(extra_lines=lines)
+            result = guard.classify_ipv6_policy_samples(
+                [sample, sample, sample], guard.normalized_policy_sha256(sample)
+            )
+            with self.subTest(expected_counts=expected_counts):
+                self.assertEqual(
+                    (
+                        result["project_owned_chain_count"],
+                        result["project_owned_jump_count"],
+                        result["project_owned_comment_count"],
+                    ),
+                    expected_counts,
+                )
+                self.assertFalse(result["project_scope_nonmutation_confirmed"])
+                self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_accepts_extension_targets_and_duplicate_rules(self):
+        sample = ipv6_policy(
+            extra_lines=(
+                "-A INPUT -j ACCEPT",
+                "-A INPUT -j ACCEPT",
+                "-A OUTPUT -j MARK --set-xmark 0x1/0xffffffff",
+            )
+        )
+        result = guard.classify_ipv6_policy_samples(
+            [sample, sample, sample], guard.normalized_policy_sha256(sample)
+        )
+        self.assertTrue(result["parse_complete"])
+        self.assertEqual(result["parse_failure_classes"], [])
+        self.assertTrue(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_checks_ownership_outside_filter(self):
+        sample = ipv6_policy() + (
+            b"*mangle\n:INPUT ACCEPT [0:0]\n:HG-P3-IN - [0:0]\n"
+            b"-A INPUT -m comment --comment home-gateway-gate64b -j HG-P3-IN\nCOMMIT\n"
+        )
+        result = guard.classify_ipv6_policy_samples([sample] * 3, "0" * 64)
+        for field in (
+            "project_owned_chain_count",
+            "project_owned_jump_count",
+            "project_owned_comment_count",
+        ):
+            self.assertEqual(result[field], 1)
+        self.assertFalse(result["rebaseline_eligible"])
+        sample = (
+            ipv6_policy()
+            + b"*mangle\n:INPUT ACCEPT [0:0]\n-A UNDECLARED -j ACCEPT\nCOMMIT\n"
+        )
+        result = guard.classify_ipv6_policy_samples([sample] * 3, "0" * 64)
+        self.assertIn("undeclared_source_chain", result["parse_failure_classes"])
+        self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_requires_unconditional_forward_jump(self):
+        sample = ipv6_policy().replace(
+            b"-A FORWARD -j DOCKER-USER", b"-A FORWARD -s 2001:db8::/32 -j DOCKER-USER"
+        )
+        result = guard.classify_ipv6_policy_samples([sample] * 3, "0" * 64)
+        self.assertEqual(result["forward_jump_count"], 1)
+        self.assertEqual(result["forward_jump_position_class"], "not_first")
+        self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_parses_comments_but_blocks_incomplete_backend(self):
+        generic = b"# retained comment\n" + ipv6_policy()
+        result = guard.classify_ipv6_policy_samples(
+            [generic, generic, generic], guard.normalized_policy_sha256(generic)
+        )
+        self.assertTrue(result["parse_complete"])
+        self.assertEqual(result["policy_comment_line_count"], 1)
+        self.assertEqual(result["parse_failure_classes"], [])
+        self.assertTrue(result["rebaseline_eligible"])
+
+        warning = (
+            b"# Warning: ip6tables-legacy tables present, use "
+            b"ip6tables-legacy-save to see them\n" + ipv6_policy()
+        )
+        result = guard.classify_ipv6_policy_samples(
+            [warning, warning, warning], guard.normalized_policy_sha256(warning)
+        )
+        self.assertFalse(result["parse_complete"])
+        self.assertEqual(result["policy_comment_line_count"], 1)
+        self.assertEqual(result["parse_failure_classes"], ["incomplete_backend_view"])
+        self.assertFalse(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_identity_ignores_comments_and_runtime_counters(self):
+        first = (
+            b"# Generated by ip6tables-save on one\n"
+            b"*filter\n:INPUT ACCEPT [17:999]\n:FORWARD ACCEPT [2:44]\n"
+            b":OUTPUT ACCEPT [7:88]\n:DOCKER-USER - [0:0]\n"
+            b"[3:60] -A FORWARD -j DOCKER-USER\nCOMMIT\n"
+            b"# Completed by ip6tables-save on one\n"
+        )
+        second = (
+            b"# Generated by ip6tables-save on two\n"
+            b"*filter\n:INPUT ACCEPT [27:1999]\n:FORWARD ACCEPT [12:144]\n"
+            b":OUTPUT ACCEPT [17:188]\n:DOCKER-USER - [0:0]\n"
+            b"[13:160] -A FORWARD -j DOCKER-USER\nCOMMIT\n"
+            b"# Completed by ip6tables-save on two\n"
+        )
+        expected = guard.normalized_policy_sha256(first)
+        self.assertEqual(expected, guard.normalized_policy_sha256(second))
+        result = guard.classify_ipv6_policy_samples([first, second, first], expected)
+        self.assertEqual(result["whole_policy_relation_class"], "historical_match")
+        self.assertEqual(result["unique_policy_identity_count"], 1)
+        self.assertEqual(result["policy_comment_line_count"], 2)
+        self.assertTrue(result["rebaseline_eligible"])
+
+    def test_ipv6_policy_diagnostic_rejects_malformed_or_unparsed_policy_safely(self):
+        raw_address = b"2001:db8:ffff::99"
+        malformed = (
+            b"*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n"
+            b":OUTPUT ACCEPT [0:0]\n:DOCKER-USER - [0:0]\n"
+            b"-A FORWARD -j DOCKER-USER\n-A INPUT -s "
+            + raw_address
+            + b' --comment "unterminated\nCOMMIT\n'
+        )
+        for sample in (
+            malformed,
+            ipv6_policy(extra_lines=("unrecognized input",)),
+            ipv6_policy(extra_lines=("-A UNDECLARED -j ACCEPT",)),
+            b"*filter\n:INPUT ACCEPT [0:0]\n",
+        ):
+            result = guard.classify_ipv6_policy_samples(
+                [sample, sample, sample], "0" * 64
+            )
+            encoded = json.dumps(result, sort_keys=True)
+            with self.subTest(sample_sha256=sha(sample)):
+                self.assertFalse(result["parse_complete"])
+                self.assertTrue(result["parse_failure_classes"])
+                self.assertFalse(result["project_scope_nonmutation_confirmed"])
+                self.assertFalse(result["rebaseline_eligible"])
+                self.assertNotIn(raw_address.decode(), encoded)
+                self.assertNotIn("unrecognized input", encoded)
+
+    def test_ipv6_policy_diagnostic_requires_exactly_three_byte_samples_and_sha(self):
+        sample = ipv6_policy()
+        for samples, expected in (
+            ([sample, sample], "0" * 64),
+            ([sample, sample, "not-bytes"], "0" * 64),
+            ([sample, sample, sample], "not-a-sha"),
+        ):
+            with (
+                self.subTest(samples=len(samples), expected=expected),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                guard.classify_ipv6_policy_samples(samples, expected)
+
     def test_golden_baseline_v2_hash_is_stable(self):
         fixture = json.loads(
             (ROOT / "tests" / "fixtures" / "p3" / "server-baseline-v2.json").read_text()
@@ -464,7 +768,7 @@ class PeerGuardProtocolTests(unittest.TestCase):
         public_key = base64.b64encode(public_bytes).decode()
         fingerprint = sha(public_bytes)
         ipv4 = b"*filter\nCOMMIT\n"
-        ipv6 = b"*filter\nCOMMIT\n"
+        ipv6 = ipv6_policy()
         nft = b"table inet filter { counter packets 17 bytes 99 }\n"
         config = f"[Interface]\nPrivateKey = omitted\n[Peer]\nPublicKey = {public_key}\n".encode()
         clients = json.dumps(
@@ -588,6 +892,12 @@ class PeerGuardProtocolTests(unittest.TestCase):
             ),
             seen,
         )
+
+        original_ipv6_sha256 = snapshot["ipv6_policy_sha256"]
+        request["expected_ipv6_policy_sha256"] = "0" * 64
+        snapshot = guard.collect_server_snapshot(request, runner=runner)
+        self.assertFalse(snapshot["ipv6_non_mutation"])
+        self.assertEqual(snapshot["ipv6_policy_sha256"], original_ipv6_sha256)
         self.assertTrue(
             all(
                 "/opt/amnezia/awg/wg0.conf" != argument

@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -578,8 +579,364 @@ def _normalize_policy(data: bytes) -> bytes:
     return ("\n".join(result) + "\n").encode("utf-8")
 
 
+def _normalize_ipv6_policy(data: bytes) -> bytes:
+    try:
+        text = data.decode("utf-8", errors="strict").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise ValueError("host policy UTF-8 differs") from exc
+    if "\r" in text:
+        raise ValueError("host policy line ending differs")
+    result = []
+    for line in text.splitlines():
+        if line.startswith("#"):
+            continue
+        chain = re.fullmatch(r"(:[^ ]+ (?:ACCEPT|DROP|REJECT|-) )\[\d+:\d+\]", line)
+        if chain is not None:
+            line = chain.group(1) + "[0:0]"
+        rule = re.fullmatch(r"\[\d+:\d+\] (-A .+)", line)
+        if rule is not None:
+            line = rule.group(1)
+        elif re.match(r"^\[\d+:\d+\]", line):
+            raise ValueError("host policy counters differ")
+        result.append(line)
+    return ("\n".join(result) + "\n").encode("utf-8")
+
+
 def normalized_policy_sha256(data: bytes) -> str:
-    return _sha(_normalize_policy(data))
+    return _sha(_normalize_ipv6_policy(data))
+
+
+def _parse_ipv6_policy_sample(data: bytes) -> dict[str, Any]:
+    parse_complete = True
+    parse_failures: set[str] = set()
+    policy_comment_line_count = 0
+    tables: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    seen_table_names: set[str] = set()
+
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return {
+            "docker_user_chain_class": "ambiguous",
+            "docker_user_declaration_count": 0,
+            "docker_user_rule_count": 0,
+            "forward_jump_count": 0,
+            "forward_jump_position_class": "absent",
+            "project_owned_chain_count": 0,
+            "project_owned_jump_count": 0,
+            "project_owned_comment_count": 0,
+            "policy_comment_line_count": 0,
+            "parse_complete": False,
+            "parse_failure_classes": ["invalid_utf8"],
+        }
+
+    for line in text.splitlines():
+        if not line:
+            parse_complete = False
+            parse_failures.add("blank_line")
+            continue
+        if line.startswith("#"):
+            policy_comment_line_count += 1
+            if re.fullmatch(
+                r"# (?:Warning: (?:ip6tables-(?:legacy|nft) tables present, use "
+                r"ip6tables-(?:legacy|nft)-save to see them)|Table .+ is incompatible, "
+                r"use .+ tool\.)",
+                line,
+            ):
+                parse_complete = False
+                parse_failures.add("incomplete_backend_view")
+            continue
+        counted_rule = re.fullmatch(r"\[\d+:\d+\] (-A .+)", line)
+        if counted_rule is not None:
+            line = counted_rule.group(1)
+        if current is None:
+            if not re.fullmatch(r"\*[A-Za-z0-9_-]+", line):
+                parse_complete = False
+                parse_failures.add("unexpected_top_level_line")
+                continue
+            table_name = line[1:]
+            if table_name in seen_table_names:
+                parse_complete = False
+                parse_failures.add("duplicate_table")
+            seen_table_names.add(table_name)
+            current = {
+                "name": table_name,
+                "chains": [],
+                "chain_set": set(),
+                "rules": [],
+                "rule_set": set(),
+                "rules_started": False,
+            }
+            continue
+        if line == "COMMIT":
+            tables.append(current)
+            current = None
+            continue
+        chain_match = re.fullmatch(
+            r":([A-Za-z0-9_.:+-]+) (?:ACCEPT|DROP|REJECT|-) \[\d+:\d+\]",
+            line,
+        )
+        if chain_match is not None:
+            chain = chain_match.group(1)
+            if current["rules_started"] or chain in current["chain_set"]:
+                parse_complete = False
+                parse_failures.add(
+                    "chain_after_rule"
+                    if current["rules_started"]
+                    else "duplicate_chain"
+                )
+            current["chains"].append(chain)
+            current["chain_set"].add(chain)
+            continue
+        if not line.startswith("-A "):
+            parse_complete = False
+            parse_failures.add("unexpected_table_line")
+            continue
+        current["rules_started"] = True
+        try:
+            tokens = shlex.split(line, comments=False, posix=True)
+        except ValueError:
+            parse_complete = False
+            parse_failures.add("invalid_rule_quoting")
+            continue
+        if len(tokens) < 3 or tokens[0] != "-A":
+            parse_complete = False
+            parse_failures.add("invalid_rule_shape")
+            continue
+        rule = tuple(tokens)
+        current["rule_set"].add(rule)
+        current["rules"].append(rule)
+
+    if current is not None:
+        parse_complete = False
+        parse_failures.add("unclosed_table")
+        tables.append(current)
+
+    filter_tables = [table for table in tables if table["name"] == "filter"]
+    if len(filter_tables) != 1:
+        parse_complete = False
+        parse_failures.add("filter_table_count")
+    filter_table = filter_tables[0] if len(filter_tables) == 1 else None
+    if filter_table is None:
+        return {
+            "docker_user_chain_class": "ambiguous",
+            "docker_user_declaration_count": 0,
+            "docker_user_rule_count": 0,
+            "forward_jump_count": 0,
+            "forward_jump_position_class": "absent",
+            "project_owned_chain_count": 0,
+            "project_owned_jump_count": 0,
+            "project_owned_comment_count": 0,
+            "policy_comment_line_count": policy_comment_line_count,
+            "parse_complete": False,
+            "parse_failure_classes": sorted(parse_failures),
+        }
+
+    chains = filter_table["chains"]
+    docker_declarations = sum(chain == "DOCKER-USER" for chain in chains)
+    owned_chain_count = sum(
+        chain == "HG-P3-IN" for table in tables for chain in table["chains"]
+    )
+    docker_rules: list[tuple[str, ...]] = []
+    forward_rules: list[tuple[str, ...]] = []
+    forward_jump_count = 0
+    owned_jump_count = 0
+    owned_comment_count = 0
+
+    for table, rule in ((item, entry) for item in tables for entry in item["rules"]):
+        source_chain = rule[1]
+        if source_chain not in table["chain_set"]:
+            parse_complete = False
+            parse_failures.add("undeclared_source_chain")
+        if table is filter_table and source_chain == "DOCKER-USER":
+            docker_rules.append(rule)
+        if table is filter_table and source_chain == "FORWARD":
+            forward_rules.append(rule)
+
+        targets = []
+        comments = []
+        index = 2
+        while index < len(rule):
+            token = rule[index]
+            if token in {"-j", "--jump", "-g", "--goto"}:
+                if index + 1 >= len(rule):
+                    parse_complete = False
+                    parse_failures.add("missing_target_argument")
+                    break
+                targets.append(rule[index + 1])
+                index += 2
+                continue
+            if token == "--comment":
+                if index + 1 >= len(rule):
+                    parse_complete = False
+                    parse_failures.add("missing_comment_argument")
+                    break
+                comments.append(rule[index + 1])
+                index += 2
+                continue
+            index += 1
+        if len(targets) > 1 or len(comments) > 1:
+            parse_complete = False
+            if len(targets) > 1:
+                parse_failures.add("multiple_targets")
+            if len(comments) > 1:
+                parse_failures.add("multiple_comments")
+        if targets:
+            target = targets[0]
+            if (
+                table is filter_table
+                and source_chain == "FORWARD"
+                and target == "DOCKER-USER"
+            ):
+                forward_jump_count += 1
+            if target == "HG-P3-IN":
+                owned_jump_count += 1
+        owned_comment_count += sum(
+            comment == "home-gateway-gate64b" for comment in comments
+        )
+
+    if docker_declarations > 1:
+        docker_class = "ambiguous"
+    elif docker_declarations == 0:
+        docker_class = "missing"
+    elif not docker_rules:
+        docker_class = "empty"
+    elif len(docker_rules) == 1 and docker_rules[0] in {
+        ("-A", "DOCKER-USER", "-j", "RETURN"),
+        ("-A", "DOCKER-USER", "--jump", "RETURN"),
+    }:
+        docker_class = "return_only"
+    else:
+        docker_class = "nonempty"
+
+    if forward_jump_count == 0:
+        forward_position = "absent"
+    else:
+        unconditional = bool(forward_rules) and forward_rules[0] in {
+            ("-A", "FORWARD", "-j", "DOCKER-USER"),
+            ("-A", "FORWARD", "--jump", "DOCKER-USER"),
+        }
+        forward_position = "first" if unconditional else "not_first"
+
+    return {
+        "docker_user_chain_class": docker_class,
+        "docker_user_declaration_count": docker_declarations,
+        "docker_user_rule_count": len(docker_rules),
+        "forward_jump_count": forward_jump_count,
+        "forward_jump_position_class": forward_position,
+        "project_owned_chain_count": owned_chain_count,
+        "project_owned_jump_count": owned_jump_count,
+        "project_owned_comment_count": owned_comment_count,
+        "policy_comment_line_count": policy_comment_line_count,
+        "parse_complete": parse_complete,
+        "parse_failure_classes": sorted(parse_failures),
+    }
+
+
+def classify_ipv6_policy_samples(
+    samples: Sequence[bytes], expected_ipv6_policy_sha256: str
+) -> dict[str, Any]:
+    if len(samples) != 3:
+        raise ValueError("exactly three IPv6 policy samples are required")
+    if any(not isinstance(sample, bytes) for sample in samples):
+        raise TypeError("IPv6 policy samples must be bytes")
+    if not _is_sha256(expected_ipv6_policy_sha256):
+        raise ValueError("expected IPv6 policy identity differs")
+
+    normalized_samples = []
+    sample_hashes = []
+    parsed_samples = []
+    for sample in samples:
+        try:
+            normalized = _normalize_ipv6_policy(sample)
+        except ValueError:
+            normalized = sample
+            parsed = _parse_ipv6_policy_sample(b"")
+        else:
+            parsed = _parse_ipv6_policy_sample(sample)
+        normalized_samples.append(normalized)
+        sample_hashes.append(_sha(normalized))
+        parsed_samples.append(parsed)
+
+    unique_count = len(set(sample_hashes))
+    observed_sha256 = sample_hashes[0] if unique_count == 1 else None
+    if observed_sha256 is None:
+        relation = "unstable"
+    elif observed_sha256 == expected_ipv6_policy_sha256:
+        relation = "historical_match"
+    else:
+        relation = "stable_mismatch"
+
+    docker_classes = {parsed["docker_user_chain_class"] for parsed in parsed_samples}
+    docker_class = (
+        next(iter(docker_classes)) if len(docker_classes) == 1 else "ambiguous"
+    )
+    forward_positions = {
+        parsed["forward_jump_position_class"] for parsed in parsed_samples
+    }
+    forward_position = (
+        next(iter(forward_positions)) if len(forward_positions) == 1 else "not_first"
+    )
+    parse_complete = all(parsed["parse_complete"] for parsed in parsed_samples)
+    docker_rule_count = max(
+        parsed["docker_user_rule_count"] for parsed in parsed_samples
+    )
+    docker_declaration_count = max(
+        parsed["docker_user_declaration_count"] for parsed in parsed_samples
+    )
+    forward_jump_count = max(parsed["forward_jump_count"] for parsed in parsed_samples)
+    owned_chain_count = max(
+        parsed["project_owned_chain_count"] for parsed in parsed_samples
+    )
+    owned_jump_count = max(
+        parsed["project_owned_jump_count"] for parsed in parsed_samples
+    )
+    owned_comment_count = max(
+        parsed["project_owned_comment_count"] for parsed in parsed_samples
+    )
+    policy_comment_line_count = max(
+        parsed["policy_comment_line_count"] for parsed in parsed_samples
+    )
+    parse_failure_classes = sorted(
+        {
+            failure
+            for parsed in parsed_samples
+            for failure in parsed["parse_failure_classes"]
+        }
+    )
+    project_scope_nonmutation_confirmed = parse_complete and not any(
+        (owned_chain_count, owned_jump_count, owned_comment_count)
+    )
+    rebaseline_eligible = (
+        unique_count == 1
+        and parse_complete
+        and docker_class in {"empty", "return_only"}
+        and forward_jump_count == 1
+        and forward_position == "first"
+        and project_scope_nonmutation_confirmed
+    )
+    return {
+        "expected_ipv6_policy_sha256": expected_ipv6_policy_sha256,
+        "observed_ipv6_policy_sha256": observed_sha256,
+        "sample_set_sha256": _sha(sorted(sample_hashes)),
+        "sample_count": len(normalized_samples),
+        "unique_policy_identity_count": unique_count,
+        "whole_policy_relation_class": relation,
+        "docker_user_chain_class": docker_class,
+        "docker_user_declaration_count": docker_declaration_count,
+        "docker_user_rule_count": docker_rule_count,
+        "forward_jump_count": forward_jump_count,
+        "forward_jump_position_class": forward_position,
+        "project_owned_chain_count": owned_chain_count,
+        "project_owned_jump_count": owned_jump_count,
+        "project_owned_comment_count": owned_comment_count,
+        "policy_comment_line_count": policy_comment_line_count,
+        "parse_complete": parse_complete,
+        "parse_failure_classes": parse_failure_classes,
+        "project_scope_nonmutation_confirmed": project_scope_nonmutation_confirmed,
+        "rebaseline_eligible": rebaseline_eligible,
+    }
 
 
 def _normalize_nft(data: bytes) -> bytes:
@@ -798,9 +1155,15 @@ def collect_server_snapshot(
     ipv4_policy = _normalize_policy(
         run_checked_command(["/usr/sbin/iptables-save"], runner=runner)
     )
-    ipv6_policy = _normalize_policy(
+    ipv6_samples = [
         run_checked_command(["/usr/sbin/ip6tables-save"], runner=runner)
+        for _ in range(3)
+    ]
+    ipv6_diagnostic = classify_ipv6_policy_samples(
+        ipv6_samples, request["expected_ipv6_policy_sha256"]
     )
+    if not ipv6_diagnostic["rebaseline_eligible"]:
+        raise ValueError("IPv6 structural non-mutation differs")
     nft_policy = _normalize_nft(run_nft_ruleset_command(runner=runner))
     policy_state = (
         run_checked_command(
@@ -811,7 +1174,7 @@ def collect_server_snapshot(
         .strip()
     )
     host_policy_hash = _sha(ipv4_policy)
-    ipv6_policy_hash = _sha(ipv6_policy)
+    ipv6_policy_hash = ipv6_diagnostic["observed_ipv6_policy_sha256"]
     firewall_hash = _sha(
         {
             "host_policy_sha256": host_policy_hash,
@@ -833,7 +1196,10 @@ def collect_server_snapshot(
         "listener_identity_sha256": listener_hash,
         "host_policy_loaded": policy_state == "active",
         "host_policy_sha256": host_policy_hash,
-        "ipv6_non_mutation": ipv6_policy_hash == request["expected_ipv6_policy_sha256"],
+        "ipv6_non_mutation": (
+            ipv6_diagnostic["project_scope_nonmutation_confirmed"]
+            and ipv6_policy_hash == request["expected_ipv6_policy_sha256"]
+        ),
         "ipv6_policy_sha256": ipv6_policy_hash,
         "peer_fingerprint_sha256": live_peers,
         "persistent_config_sha256": _sha(config_bytes),

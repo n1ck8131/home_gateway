@@ -821,7 +821,6 @@ function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries,
         [string]$InputObject.confirmation_challenge -cne [string]$approvedPlan.confirmation_challenge) {
         throw 'prerequisite observation approval differs'
     }
-    $now = ([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
     $server = & $Boundaries.ObserverRunner $manifest $trust $AgentReceipt ([string]$InputObject.nonce)
     $serverProperties = @('schema', 'server_baseline', 'server_baseline_sha256', 'payload_sha256', 'protocol_sha256',
         'nonce_sha256', 'live_mutation_performed', 'raw_identity_exposed')
@@ -841,9 +840,11 @@ function Invoke-P3PrerequisiteObserve([object]$InputObject, [object]$Boundaries,
             [string]$item.authority_sha256 -cne [string]$authority -or
             [string]$item.source_cidr_sha256 -cne [string]$manifest.management_source_cidr_sha256 -or
             [string]$item.source_cidr_sha256 -ceq [string]$manifest.droplet_resource_sha256) { throw 'egress management source differs' }
+        $now = ([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
         $null = Assert-P3PrerequisiteFresh $item.observed_at_utc $now 'egress observation'
         $egress += $item
     }
+    $now = ([DateTime](& $Boundaries.ClockRunner)).ToUniversalTime()
     return [pscustomobject][ordered]@{
         schema='home-gateway/p3-prelive-observation-batch/v1';server_baseline=$server.server_baseline
         server_baseline_sha256=[string]$server.server_baseline_sha256;egress=@($egress)

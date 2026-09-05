@@ -103,6 +103,9 @@ $script:P3InstallReceiptProperties = @(
 if (-not ('HomeGateway.P3.NativeFileIdentity' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -126,6 +129,104 @@ namespace HomeGateway.P3 {
         public static extern bool GetFileInformationByHandle(
             SafeFileHandle file,
             out ByHandleFileInformation information);
+    }
+
+    public sealed class RuntimeDirectoryLease : IDisposable {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UnicodeString { public ushort Length, MaximumLength; public IntPtr Buffer; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ObjectAttributes {
+            public int Length;
+            public IntPtr RootDirectory, ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor, SecurityQualityOfService;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IoStatusBlock { public IntPtr Status; public UIntPtr Information; }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(string path, uint access, uint share,
+            IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("ntdll.dll")]
+        private static extern int NtCreateFile(out SafeFileHandle handle, uint access,
+            ref ObjectAttributes attributes, out IoStatusBlock status, IntPtr allocation,
+            uint fileAttributes, uint share, uint disposition, uint options, IntPtr ea, uint eaLength);
+        [DllImport("ntdll.dll")]
+        private static extern uint RtlNtStatusToDosError(int status);
+
+        private readonly List<SafeFileHandle> handles = new List<SafeFileHandle>();
+
+        private void PinParent(string path) {
+            // Deny delete sharing so neither this ancestor nor the final root can be replaced.
+            SafeFileHandle handle = CreateFileW(path, 0x80, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+            if (handle.IsInvalid) {
+                int error = Marshal.GetLastWin32Error(); handle.Dispose();
+                throw new Win32Exception(error, "runtime parent could not be pinned");
+            }
+            handles.Add(handle);
+            ByHandleFileInformation info;
+            if (!NativeFileIdentity.GetFileInformationByHandle(handle, out info) ||
+                (info.FileAttributes & 0x10) == 0 || (info.FileAttributes & 0x400) != 0) {
+                throw new IOException("runtime parent identity differs");
+            }
+        }
+
+        public static RuntimeDirectoryLease Create(string path, byte[] securityDescriptor) {
+            RuntimeDirectoryLease lease = new RuntimeDirectoryLease();
+            try {
+                path = path.TrimEnd(Path.DirectorySeparatorChar);
+                string volume = Path.GetPathRoot(path);
+                string parent = Path.GetDirectoryName(path);
+                string cursor = volume;
+                lease.PinParent(cursor);
+                foreach (string part in parent.Substring(volume.Length).Split(new char[] { '\\' }, StringSplitOptions.RemoveEmptyEntries)) {
+                    cursor = Path.Combine(cursor, part); lease.PinParent(cursor);
+                }
+                string name = Path.GetFileName(path);
+                IntPtr nameBuffer = Marshal.StringToHGlobalUni(name);
+                IntPtr namePointer = IntPtr.Zero;
+                GCHandle descriptor = new GCHandle();
+                try {
+                    UnicodeString unicode = new UnicodeString {
+                        Length = checked((ushort)(name.Length * 2)),
+                        MaximumLength = checked((ushort)((name.Length + 1) * 2)), Buffer = nameBuffer
+                    };
+                    namePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UnicodeString)));
+                    Marshal.StructureToPtr(unicode, namePointer, false);
+                    descriptor = GCHandle.Alloc(securityDescriptor, GCHandleType.Pinned);
+                    ObjectAttributes attributes = new ObjectAttributes {
+                        Length = Marshal.SizeOf(typeof(ObjectAttributes)),
+                        RootDirectory = lease.handles[lease.handles.Count - 1].DangerousGetHandle(),
+                        ObjectName = namePointer, Attributes = 0x40,
+                        SecurityDescriptor = descriptor.AddrOfPinnedObject()
+                    };
+                    SafeFileHandle created;
+                    IoStatusBlock status;
+                    // https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
+                    // FILE_CREATE atomically creates the directory and returns its non-delete-shared
+                    // handle. FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT.
+                    int result = NtCreateFile(out created, 0x00100081, ref attributes, out status,
+                        IntPtr.Zero, 0x10, 3, 2, 0x00200021, IntPtr.Zero, 0);
+                    if (result < 0) {
+                        if (created != null) { created.Dispose(); }
+                        throw new Win32Exception((int)RtlNtStatusToDosError(result), "runtime directory exclusive creation failed");
+                    }
+                    lease.handles.Add(created);
+                    return lease;
+                }
+                finally {
+                    if (descriptor.IsAllocated) { descriptor.Free(); }
+                    if (namePointer != IntPtr.Zero) { Marshal.FreeHGlobal(namePointer); }
+                    Marshal.FreeHGlobal(nameBuffer);
+                }
+            }
+            catch { lease.Dispose(); throw; }
+        }
+
+        public void Dispose() {
+            for (int index = handles.Count - 1; index >= 0; index--) { handles[index].Dispose(); }
+            handles.Clear();
+        }
     }
 }
 '@
@@ -513,6 +614,9 @@ function Invoke-P3RuntimePrepare([object]$Trust, [string]$RuntimeRoot, [string]$
     $plan = New-P3ManifestPlan -Trust $Trust -RuntimeRoot $RuntimeRoot
     if ($plan.manifest_sha256 -cne $ExpectedManifestSHA256 -or $Confirmation -cne $plan.confirmation_challenge -or
         $Confirmation -cnotmatch '^P3-PRELIVE-RUNTIME-[0-9A-F]{16}$') { throw 'runtime approval differs' }
+    $resolved = Resolve-P3FixedCleanPath -Path $RuntimeRoot -Label 'runtime root'
+    if ([IO.File]::Exists($resolved) -or [IO.Directory]::Exists($resolved)) { throw 'runtime root already exists' }
+    if (-not [IO.Directory]::Exists((Split-Path -Parent $resolved))) { throw 'runtime parent is missing' }
     $prerequisite = Assert-P3ProtectedPrerequisiteReceiptState $Trust ([string]$Trust.expected_prerequisite_receipt_sha256)
     $consumption = [pscustomobject][ordered]@{
         prerequisite_receipt_sha256=[string]$Trust.expected_prerequisite_receipt_sha256
@@ -525,8 +629,7 @@ function Invoke-P3RuntimePrepare([object]$Trust, [string]$RuntimeRoot, [string]$
         $null = Install-P3ExactRuntimeFile $consumptionBytes $prerequisite.consumed_path $consumptionSHA256
     }
     catch { throw 'prerequisite receipt is already consumed' }
-    $consumed = $true
-    $resolved = Resolve-P3FixedCleanPath -Path $RuntimeRoot -Label 'runtime root'
+    $directoryLease = $null
     try {
         $reopenedConsumption = Open-P3BoundedStableJson $prerequisite.consumed_path 4096 $script:P3PrerequisiteConsumptionProperties
         if ((Get-P3ExactFileSHA256 $prerequisite.consumed_path 'prerequisite consumption') -cne $consumptionSHA256 -or
@@ -534,11 +637,8 @@ function Invoke-P3RuntimePrepare([object]$Trust, [string]$RuntimeRoot, [string]$
             throw 'prerequisite consumption differs'
         }
         $null = Assert-P3ProtectedPrerequisiteReceiptState $Trust ([string]$Trust.expected_prerequisite_receipt_sha256) -AllowConsumed
-        if ([IO.File]::Exists($resolved) -or [IO.Directory]::Exists($resolved)) { throw 'runtime root already exists' }
-        $parent = Split-Path -Parent $resolved
-        if (-not [IO.Directory]::Exists($parent)) { throw 'runtime parent is missing' }
-        $item = [IO.Directory]::CreateDirectory($resolved)
-        Set-Acl -LiteralPath $resolved -AclObject (New-P3RuntimeAcl) -ErrorAction Stop
+        $directoryLease = [HomeGateway.P3.RuntimeDirectoryLease]::Create(
+            $resolved, (New-P3RuntimeAcl).GetSecurityDescriptorBinaryForm())
         $markerBytes = [Text.UTF8Encoding]::new($false).GetBytes($script:P3RuntimeMarkerText)
         $null = Install-P3ExactRuntimeFile -Bytes $markerBytes -Destination (Join-Path $resolved $script:P3RuntimeMarkerName) -ExpectedSHA256 (Get-P3SHA256Bytes -Bytes $markerBytes)
         $trustBytes = ConvertTo-P3CanonicalJson -Value $Trust
@@ -547,13 +647,10 @@ function Invoke-P3RuntimePrepare([object]$Trust, [string]$RuntimeRoot, [string]$
         $null = Install-P3ExactRuntimeFile -Bytes $manifestBytes -Destination (Join-Path $resolved 'manifest.json') -ExpectedSHA256 $plan.manifest_sha256
         $null = Invoke-P3RuntimeValidate -RuntimeRoot $resolved -ExpectedManifestSHA256 $plan.manifest_sha256
     }
-    catch {
-        if ([IO.Directory]::Exists($resolved)) { [IO.Directory]::Delete($resolved, $true) }
-        if ($consumed -and [IO.File]::Exists($prerequisite.consumed_path) -and
-            (Get-P3ExactFileSHA256 $prerequisite.consumed_path 'prerequisite consumption') -ceq $consumptionSHA256) {
-            [IO.File]::Delete($prerequisite.consumed_path)
-        }
-        throw
+    finally {
+        if ($null -ne $directoryLease) { $directoryLease.Dispose() }
+        # Failure retains all partial state and the consumption marker. Recovery needs an
+        # independently reviewed exact candidate; never delete uncertain content or enable replay.
     }
     return [pscustomobject][ordered]@{
         schema = 'home-gateway/p3-prelive-runtime-receipt/v1'

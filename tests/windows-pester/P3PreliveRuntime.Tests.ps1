@@ -275,6 +275,108 @@ Describe 'P3 protected pre-live runtime' {
         Test-Path -LiteralPath $script:Trust.known_hosts_path | Should -BeTrue
     }
 
+    It 'preserves a pre-existing runtime directory and its sentinel without consuming the prerequisite' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        $null = [IO.Directory]::CreateDirectory($script:Root)
+        $sentinel = Join-Path $script:Root 'foreign.txt'
+        [IO.File]::WriteAllText($sentinel, 'foreign-runtime')
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw
+        [IO.File]::ReadAllText($sentinel) | Should -BeExactly 'foreign-runtime'
+        Test-Path -LiteralPath (Join-Path (Split-Path -Parent $script:Trust.prerequisite_receipt_path) 'prerequisite-receipt.consumed.json') | Should -BeFalse
+    }
+
+    It 'preserves a pre-existing runtime file without consuming the prerequisite' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        [IO.File]::WriteAllText($script:Root, 'foreign-runtime-file')
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw
+        [IO.File]::ReadAllText($script:Root) | Should -BeExactly 'foreign-runtime-file'
+        Test-Path -LiteralPath (Join-Path (Split-Path -Parent $script:Trust.prerequisite_receipt_path) 'prerequisite-receipt.consumed.json') | Should -BeFalse
+    }
+
+    It 'retains an owned partial root and consumption after runtime validation failure' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        Mock Invoke-P3RuntimeValidate { throw 'injected runtime validation failure' }
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw '*injected runtime validation failure*'
+        Test-Path -LiteralPath $script:Root -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path (Split-Path -Parent $script:Trust.prerequisite_receipt_path) 'prerequisite-receipt.consumed.json') | Should -BeTrue
+        { New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot ($script:Root + '-retry') } | Should -Throw '*already consumed*'
+    }
+
+    It 'preserves foreign content introduced during failed runtime preparation' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        Mock Invoke-P3RuntimeValidate {
+            $foreign = Join-Path $RuntimeRoot 'foreign-child'
+            $null = [IO.Directory]::CreateDirectory($foreign)
+            [IO.File]::WriteAllText((Join-Path $foreign 'sentinel.txt'), 'foreign-content')
+            throw 'injected foreign runtime content'
+        }
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw '*injected foreign runtime content*'
+        [IO.File]::ReadAllText((Join-Path $script:Root 'foreign-child/sentinel.txt')) | Should -BeExactly 'foreign-content'
+        Test-Path -LiteralPath (Join-Path (Split-Path -Parent $script:Trust.prerequisite_receipt_path) 'prerequisite-receipt.consumed.json') | Should -BeTrue
+    }
+
+    It 'rejects a directory collision after preflight without adopting or deleting foreign content' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        $script:RuntimeCreationAcl = New-P3RuntimeAcl
+        Mock New-P3RuntimeAcl {
+            $null = [IO.Directory]::CreateDirectory($script:Root)
+            [IO.File]::WriteAllText((Join-Path $script:Root 'raced.txt'), 'raced-directory')
+            return $script:RuntimeCreationAcl
+        }
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw '*exclusive creation failed*'
+        [IO.File]::ReadAllText((Join-Path $script:Root 'raced.txt')) | Should -BeExactly 'raced-directory'
+        @(Get-ChildItem -LiteralPath $script:Root -Force).Count | Should -Be 1
+        Test-Path -LiteralPath (Join-Path (Split-Path -Parent $script:Trust.prerequisite_receipt_path) 'prerequisite-receipt.consumed.json') | Should -BeTrue
+    }
+
+    It 'pins the created runtime directory against replacement until failure handling ends' {
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        Mock Invoke-P3RuntimeValidate { [IO.Directory]::Move($RuntimeRoot, ($RuntimeRoot + '-moved')) }
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw
+        Test-Path -LiteralPath $script:Root -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath ($script:Root + '-moved') | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $script:Root 'manifest.json') -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path (Split-Path -Parent $script:Trust.prerequisite_receipt_path) 'prerequisite-receipt.consumed.json') | Should -BeTrue
+    }
+
+    It 'pins runtime ancestors against replacement during preparation' {
+        $script:Root = Join-Path $script:Fixture 'runtime-child'
+        $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
+        Mock Invoke-P3RuntimeValidate {
+            $parent = Split-Path -Parent $RuntimeRoot
+            [IO.Directory]::Move($parent, ($parent + '-moved'))
+        }
+        { Invoke-P3RuntimePrepare -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root `
+                -ExpectedManifestSHA256 $plan.manifest_sha256 -Confirmation $plan.confirmation_challenge } | Should -Throw
+        Test-Path -LiteralPath $script:Root -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath ($script:Fixture + '-moved') | Should -BeFalse
+        Test-Path -LiteralPath $script:Trust.prerequisite_receipt_path -PathType Leaf | Should -BeTrue
+    }
+
+    It 'creates a native protected directory exclusively and releases every pinned handle' {
+        $descriptor = (New-P3RuntimeAcl).GetSecurityDescriptorBinaryForm()
+        $foreignFile = $script:Root + '.file'
+        [IO.File]::WriteAllText($foreignFile, 'foreign-file')
+        { [HomeGateway.P3.RuntimeDirectoryLease]::Create($foreignFile, $descriptor) } | Should -Throw '*exclusive creation failed*'
+        [IO.File]::ReadAllText($foreignFile) | Should -BeExactly 'foreign-file'
+        $lease = [HomeGateway.P3.RuntimeDirectoryLease]::Create(($script:Root + '\'), $descriptor)
+        try {
+            (Get-Acl -LiteralPath $script:Root).AreAccessRulesProtected | Should -BeTrue
+            [IO.File]::WriteAllText((Join-Path $script:Root 'sentinel.txt'), 'owned-directory')
+            { [HomeGateway.P3.RuntimeDirectoryLease]::Create($script:Root, $descriptor) } | Should -Throw '*exclusive creation failed*'
+            { [IO.Directory]::Move($script:Root, ($script:Root + '-moved')) } | Should -Throw
+            Test-Path -LiteralPath $script:Root -PathType Container | Should -BeTrue
+        } finally { $lease.Dispose() }
+        [IO.Directory]::Move($script:Root, ($script:Root + '-moved'))
+        [IO.File]::ReadAllText((Join-Path ($script:Root + '-moved') 'sentinel.txt')) | Should -BeExactly 'owned-directory'
+    }
+
     It 'keeps prerequisite validation read-only and consumes it once only in Prepare' {
         $plan = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root
         $null = New-P3ManifestPlan -Trust ([pscustomobject]$script:Trust) -RuntimeRoot $script:Root

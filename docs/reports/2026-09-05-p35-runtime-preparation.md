@@ -151,3 +151,31 @@ Teardown завершён: агент, ssh-add и принадлежащие з�
 Это доказанный недостаток устойчивости IPv4 identity, **но не доказательство counter-only причины live drift**: исторические IPv4 rules не сохранены. Независимый review результата: **GO для diagnostic evidence; NO_GO для baseline promotion и продолжения runtime**. Проверены canonical hashes, nonce/payload/protocol, diff, защищённые ACL/file sets, отсутствие agent processes и promotion. Runtime Prepare, helper installation и сетевые изменения не выполнялись.
 
 Следующий разрешённый offline шаг — подготовить отдельный policy diagnostic candidate с несколькими bounded IPv4/nft samples, раздельными structural/counter identities и project invariants. Его SSH требует нового exact approval. Автоматическое принятие baseline по совпадению synthetic pattern запрещено.
+
+## Подготовка policy diagnostic
+
+Следующий сценарий ограничен одним SSH-сеансом с тремя парами read-only IPv4/nft samples, без HTTPS. Новый candidate должен отдельно связывать фактические payload, loader, SSH argv и stdin frame hashes; прежний prerequisite plan не считается разрешением для нового payload. Исходные driver files и evidence не изменяются.
+
+Classifier разделяет structural/counter hashes и проверяет стабильность samples. Его parse scope ограничен framing, формой counters и наблюдаемыми признаками project rules; это не полная грамматика firewall и не полная приёмка policy invariants. Opaque noncounter значения целиком участвуют в structural hash. Даже совпавшие структурные samples не доказывают исторический counter-only drift; baseline promotion остаётся отдельным закрытым gate.
+
+Первичные локальные fixtures подтвердили invariant structural hashes при росте counters, обнаружение изменения правила и отклонение неподдерживаемых форматов. Live policy-наблюдение не выполнялось; сначала требуются финальная фиксация candidate, независимый review и его отдельное exact approval.
+
+Ruff check и format check прошли только для пяти новых Python-файлов. Fixtures подтвердили counter-only invariance, changed-rule detection и отклонение трёх unsupported cases. PowerShell parser прошёл; PowerShell и Python дали одинаковый protocol SHA для вложенных command arrays. AST семи включённых guard functions совпадает с исходным production code. Полный repository suite повторно не запускался: production файлы не менялись. Статический review нового payload/transport/runner/builder завершён без must-fix; финальный GO требует readback собранного package.
+
+Первый policy package V1 не прошёл локальный Windows PowerShell 5.1 preflight: `ConvertTo-Json` по-разному экранирует quoted remote command в PowerShell 5.1 и 7, поэтому argv-template SHA различался при одинаковых аргументах. Agent/network actions не выполнялись. V1 сохраняется как superseded. Для V2 transport identity рассчитывается по явно обозначенному NUL-separated UTF-8 представлению с запретом NUL внутри аргументов; сами SSH arguments не меняются. До фиксации V2 требуется равенство emitted invocation hashes в обеих версиях PowerShell.
+
+Финальный policy V2 собран в `.p3-vps-run/p35-policy-candidate-v2/`. Exact argv/frame hashes совпали в PowerShell 5.1 и 7; NUL injection отклонён. Windows PowerShell 5.1 preflight с правильным supplied `PolicyConfirmation` прошёл; неправильный отклонён с SSH0/HTTPS0/agent starts0. Пять защищённых файлов прочитаны обратно, future observation/claim roots отсутствуют.
+
+| Policy V2 identity | SHA-256 или challenge |
+| --- | --- |
+| Candidate | `7a246839e0f8c0f7a68f7e66968e20a63fcc4fa56c0ff1f11b4e9861d60776eb` |
+| Challenge | `P35-POLICY-0AE7B886B8D0A19D` |
+| Runner | `c6147ab889dc78b49479badcc82bae79935551a18c7df38f2385a5db05b60f3d` |
+| Builder | `0d63f651fba225e824cc36c2bdefcdc8c71d67e846df6ddea0b9e9cb078bc59c` |
+| Transport | `e91e29ce01a1e97bb3e9a50d720d263128130f4a3309a92e75ef9804f743933b` |
+| Payload | `c799eebf860686dfbebe8f8358fb1443c127bb157cba296390131ddfb01e41cf` |
+| Loader | `317fef9808970cf6bf28a11d7af11f83ae7d7d6f17e93e6bac73af6c441cf922` |
+
+Контракт разрешает один SSH, ноль HTTPS, три пары `/usr/sbin/iptables-save` и `/usr/sbin/nft -j list ruleset`. Каждый внутренний вызов ограничен четырьмя секундами и 65536 bytes. Raw остаётся в памяти; сохраняются validated hashes/counts/classes, stability flags и project-marker observations. Baseline promotion, assembly, runtime/helper не разрешены. Перед будущим запуском нужен новый authenticated Cloud record `.p3-vps-run/p35-cloud-evidence-policy-v2/observation.json` с frozen SHA.
+
+Финальный независимый review: **GO только для запроса exact approval policy V2, must-fix 0**. Проверены DPAPI input, canonical plans/challenges, baseline binding, component/driver hashes, actual argv/frame/payload/loader/protocol pins и paths, ACL/file set и отсутствие agent processes. Policy V2 не выполнялся. Фаза 3.5 остаётся открытой; технический NO_GO для baseline/runtime сохраняется.

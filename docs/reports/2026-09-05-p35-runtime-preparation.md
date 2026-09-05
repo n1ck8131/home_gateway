@@ -378,3 +378,33 @@ Runtime V4 подготовлен заранее и привязан к exact mi
 Final-pin PS5/PS7 fixtures: по пять executor cases и шесть builder-proof cases — PASS. Проверены свежий preflight, wrong acknowledgement, receipt binding, stale receipt, copied-proof tamper, hash mismatch, truthful unequal pair, false equality summary, wrong nonce и receipt/sample mismatch. Реальные Prepare/consumption/agent/network calls — 0. Независимый static review migration/runtime templates — GO, 0 must-fix; final immutable readback выполняется отдельно.
 
 Final immutable PS5 readback — **GO, 0 must-fix**. Reviewer проверил candidate `4dd28f…`, ACL/file set5, DPAPI input, byte-exact prerequisite/agent plans, все driver/local pins и реально emitted frame/argv/loader/protocol. Новый nonce и historical/V1/V2 provenance совпали. Runtime V4 содержит фактический migration pin; builder/executor/fixture hashes подтверждены. Новые observation/claim/Cloud/runtime/package roots отсутствуют, agent/add0. Разрешено запросить exact observation approval; future runtime readback, принятие baseline, Prepare и закрытие фазы остаются отдельными gates.
+
+## Migration V3: native process failure до observation envelope
+
+После exact owner approval candidate `4dd28f30be759619ff5792dffc1e46633453cbda4f0722982cecbf39bda48965` / `P35-MIGRATION-F99E84BB25DFF358` выполнен один раз. Fresh authenticated Cloud rules прочитаны `2026-09-05T17:15:11.832Z`, единственная Droplet association — `17:15:39.164Z`. Protected Cloud SHA — `45bcd30c80b6b5fe92ebdca5d4e2b4e1eef77e63750ce99ab5cb7341c0002f51`; правила и identities совпали. Candidate/runner/runtime template hashes до запуска оставались неизменными.
+
+Key load завершился. Runner остановился на проверке native process result (line 79): **SSH1/HTTPS0/agent starts1**, native exit code **2**, stdout **0 bytes**, stderr **64 bytes**, timeout/overflow — false, UTF-8 valid. SSH-agent/add остановлены; operation tool exit1. Standard observation, stability envelope, remote-failure envelope, diff и prerequisite receipt отсутствуют. Raw stderr не сохранялся, поэтому по process audit причина пока не установлена.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `p35-migration-claim-v3/attempt.json` | `df04a00c762c9eec40d3626f69efe126b1906ecdc5fd3111d44397613a25e189` |
+| `ssh-process.json` | `a08331895b49c81882fac3efad21648972521d02857cc6d229b90b732839324c` |
+| Stderr retained-prefix hash | `45ec0788fd363c41c13428404cf17b154443aa44a9f514987c4624df17c63693` |
+
+Claim содержит четыре файла. One-shot budget использован, прямой replay запрещён. Runtime V4 package, Prepare и consumption не создавались. Продолжение требует отдельной диагностики transport, нового exact candidate и его approval; закрытие фазы остаётся NO_GO.
+
+Пересмотр test context выявил ограничение предыдущей full-frame fixture: она проверяла frame/native stdin/loader, но запускала Python `--stdin-loader`, не передавая реальный `invocation.arguments` native child. Byte-exact вычисление argv само по себе не доказывает его передачу через Windows/MSYS и remote shell. Новый loader вырос с 5200 до 6474 bytes (base64 с 6936 до 8632 characters). Это повод проверить length/quoting path, а не доказательство конкретного лимита. Сам native adapter использует `UseShellExecute=false`; участие `cmd.exe` в нём не установлено.
+
+Независимый PS5 review failure evidence — **GO для сохранённого отказа / NO_GO для receipt, baseline и runtime**. Проверены exact claim4/observation3 files и ACL, attempt/process schemas и hashes, nonce/Cloud binding, исходные driver/launcher pins и семь provenance hashes; все совпали. Новых envelopes, receipt/consumption/runtime нет, agent/add0.
+
+Независимо восстановленная известная статическая ошибка Bash о незакрытой двойной кавычке дала точное совпадение всех 64 bytes по SHA `45ec0788…`. Восстановление выполнено из публичного текста diagnostic, без чтения raw stderr или identities. Это устанавливает error class `Bash unterminated double quote`, но само по себе не локализует потерю кавычки. Для проверки новой межсистемной причины использован отдельный профиль `cc_astra_high` по текущему project routing; reviewer — `cc_sol_review`. Новых разрешений на live-действия это не даёт.
+
+## Локальная первопричина native transport
+
+В отдельной fixture воспроизведено усечение quoted argument на границе native Windows parent → установленный MSYS child. Native Python receiver получает полные V1/V2 arguments, а реальный Git Bash/MSYS получает V1 command 7006 bytes целиком и только первые 8186 bytes V2 command длиной 8702 bytes. Теряется конечная двойная кавычка; shell exit2. Значение 8186 относится к проверенному UTF-8 окружению, не ко всем локалям/argv.
+
+Approved SSH trust расшифрован только в памяти и сверен: `git_ssh_sha256` и фактический установленный Git SSH совпали — `ff3de79218b536e7460e14f470cefca2c2516f2320ee8a54114c015254f37cef`. Соседний MSYS DLL SHA — `2ea49553e4c03055dcf1c4a2bef54668081a07663fba283f4b34cf70f2157191`, version `3.6.9-b4195d69133078c498a1bf811c4fb0c61fc3c8af`. В [pinned MSYS glob.cc](https://github.com/git-for-windows/msys2-runtime/blob/b4195d69133078c498a1bf811c4fb0c61fc3c8af/winsup/cygwin/glob.cc#L95) используется fixed `MAXPATHLEN=8192`; [dcrt0.cc](https://github.com/git-for-windows/msys2-runtime/blob/b4195d69133078c498a1bf811c4fb0c61fc3c8af/winsup/cygwin/dcrt0.cc#L194) проводит quoted Windows arguments через `globify`. Это подтверждённый локальный transport defect и сильная причинная связь с live failure. Фактический argv внутри уже завершившегося SSH процесса не наблюдался.
+
+PS5 и PS7 прошли по пять asserted cases: короткий V1 GREEN; длинный V2 и padded V2 RED с проверкой truncation; compact prototype GREEN с byte-exact restored loader; compact full-frame GREEN через реальный native/MSYS/shell/CLI bootstrap/frozen loader/production collector с mocked subprocess. Prototype command длиной 2580 bytes не усекался. Реальные SSH handshake, sudo и remote environment эта fixture не эмулирует. Диагностика и результаты сохранены в `.p3-vps-run/phase35-transport-diagnostic-v1.*`; Ruff/parser checks прошли, production source и прежние frozen scripts не изменены.
+
+Исправление готовится как новый compact transport: заранее сжатые immutable loader bytes, отдельные compressed/decompressed pins и проверка длины remote argument не более 4096 ASCII bytes до claim/agent/network. Общие 30s/64KiB, две выборки, historical pins и отдельные approvals сохраняются; глобальные настройки MSYS не меняются.

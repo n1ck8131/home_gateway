@@ -344,3 +344,37 @@ Payload SHA — `186a69d9cb4ed7ccbe42bff6810cb1da955332e77385a8f510aea9570c6bc25
 Независимый focused source review — **GO, 0 must-fix**. Новый payload требует нового exact observation candidate. Предлагаемый sampler выполняет два полных штатных snapshot в одном SSH с паузой минимум 1 s, прежними общими limits 30 s / 64 KiB и обязательным teardown. Он сохраняет обе sanitized observations до проверки полного равенства, проверяет historical 23 pins и новый payload, а затем допускает три HTTPS/assembly. Предыдущие hashes остаются provenance. Это готовящийся offline contract; новый live запуск и baseline acceptance не разрешены.
 
 Полный `scripts/dev.ps1 -Command verify` после footer fix завершился с exit 0: Go/tests/build и repository gates прошли, gosec — 0 issues, govulncheck — no vulnerabilities, gitleaks — no leaks, governance/toolchain smokes — PASS. Sanitized log сохранён в `.p3-vps-run/p35-footer-final-verify.log`.
+
+## Migration V3: candidate с двумя snapshot
+
+Footer fix и failure checkpoint зафиксированы в `5029aaf904f5a48cd465e8424c7475c6e0496fdd`. Подготовлен новый immutable package `.p3-vps-run/p35-migration-candidate-v3` из пяти protected files. Candidate SHA — `4dd28f30be759619ff5792dffc1e46633453cbda4f0722982cecbf39bda48965`, challenge — `P35-MIGRATION-F99E84BB25DFF358`. Разрешение владельца на этот новый запуск ещё не получено.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Prerequisite plan | `f99e84bb25dff3581d5f2370a1547a8b8c3b002a9b1fb265dcd57ac706547a82` |
+| Agent plan | `234e79e27dad9fbbacd96f837eda00ebd6c1cabe937472b7a4a891ab5c74922b` |
+| Runner V3 | `70f4552282b1fe9f422e3bec7346383247ffde10a6f714cbb1119e27e72bd023` |
+| Builder V3 | `ccb976154ba385f16c3f10d62a5342f2e003b9acdb37e7e334d9676998d2279e` |
+| Support V2 | `cc8058fdda5b069a57748ff0c1627e303badf4d15ebe2aaf066192734d36ec24` |
+| Loader V2 | `1ae8fc1f6e5cfcab7687728c12a22ef8f3626804b467e804c1bec858c0127bcf` |
+| Cloud recorder V3 | `e849855b4d068a47c2cbfc14dc8f4e849c10b21c316512b901d20c03eaff7b0e` |
+
+Frame SHA — `35a1ab7d0f026a0956dfc69af25ae3be57cbdd6ad4e3a6b4d12ffc8a7da3d031`, argv template SHA — `174d7ee8b342abc3665c4607f4bad57162a4d659996934e5a0e2f50fb550d52b`. Payload — reviewed `186a69…`; public protocol и NUL argv framing не менялись. V1 receipt/attempt и failed V2 candidate/attempt закреплены как immutable provenance. Старые baseline hashes не используются как новое принятое состояние.
+
+Scope будущего exact approval — **SSH1 с двумя полными read-only snapshots, HTTPS3, agent starts1 и обязательный teardown**. Loader ждёт 1.05 s между завершением первого snapshot и началом второго; monotonic gap проверяется как integer 1000..30000 ms. Общий native deadline остаётся 30 s, output cap — 64 KiB. Длительность двух реальных collector calls под этим пределом ещё не измерена; timeout прекращает batch. В каждом snapshot сохраняются три штатные IPv6 samples и invariants.
+
+Runner сохраняет sanitized stability envelope до comparison gate. Оба стандартных observation envelopes проходят exact schema/nonce/payload/protocol/selfhash и historical 23 checks; перед первым HTTPS требуется совпадение всех 27 полей. Production Observe получает только второй согласованный стандартный snapshot. При ошибке второго snapshot loader failure/v2 сохраняет доступную первую observation; при общем native timeout сохраняется только доступный bounded process evidence. Любой отказ оставляет one-shot claim и блокирует assembly. Success claim содержит семь файлов, включая `stability-observation.json`; acceptance/runtime/helper flags остаются false.
+
+Offline validation: Python loader success1/failure6/unequal1/invalid frames3; PS5/PS7 production Observe → Assemble → Validate success1 и pre-HTTPS rejects6, replay rejects7. Exact frame → native adapter → loader fixtures дали одинаковые identities между версиями. Полный native adapter не менялся; его ранее проверенные deadline/drain cases не повторялись. Correct frozen preflight прошёл в PS5/PS7, wrong confirmation отклонён с exit23, SSH0/HTTPS0/agent0. Новые live roots не созданы.
+
+Runtime V4 подготовлен заранее и привязан к exact migration V3 SHA. Builder проверяет successful attempt, DPAPI packet pin, содержимое обоих snapshots, historical pins, truthful equality и совпадение receipt baseline со вторым snapshot. В prospective package копируется exact stability proof, всего семь файлов; executor проверяет его SHA перед Prepare. Actual runtime candidate будет создан только после successful свежего receipt. Его отдельный approval требует принятия наблюдаемого baseline и acknowledgement `ACCEPT-OBSERVED-BASELINE-HISTORICAL-POLICY-CAUSE-UNPROVEN`.
+
+| Runtime template | SHA-256 |
+| --- | --- |
+| `phase35-runtime-build-candidate-v4.ps1` | `8a79b024daa42d3893542179c41c7325439230eb91f40d90cc461c89f83f93db` |
+| `phase35-runtime-prepare-v4.ps1` | `1e5599edb16fbb37ceb593000cbf1d8b9d1fab8140a4568d45d43cdec65d58b6` |
+| `phase35-runtime-template-fixtures-v4.ps1` | `2c6a03e31ffe865a631b03f269a177dc2f7cce70e3697d1a8600bdb3d45a22f3` |
+
+Final-pin PS5/PS7 fixtures: по пять executor cases и шесть builder-proof cases — PASS. Проверены свежий preflight, wrong acknowledgement, receipt binding, stale receipt, copied-proof tamper, hash mismatch, truthful unequal pair, false equality summary, wrong nonce и receipt/sample mismatch. Реальные Prepare/consumption/agent/network calls — 0. Независимый static review migration/runtime templates — GO, 0 must-fix; final immutable readback выполняется отдельно.
+
+Final immutable PS5 readback — **GO, 0 must-fix**. Reviewer проверил candidate `4dd28f…`, ACL/file set5, DPAPI input, byte-exact prerequisite/agent plans, все driver/local pins и реально emitted frame/argv/loader/protocol. Новый nonce и historical/V1/V2 provenance совпали. Runtime V4 содержит фактический migration pin; builder/executor/fixture hashes подтверждены. Новые observation/claim/Cloud/runtime/package roots отсутствуют, agent/add0. Разрешено запросить exact observation approval; future runtime readback, принятие baseline, Prepare и закрытие фазы остаются отдельными gates.

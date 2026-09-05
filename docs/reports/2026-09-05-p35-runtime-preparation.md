@@ -69,7 +69,7 @@ The independent reviewer decrypted the V2 input only in memory and verified cano
 
 ## Remaining gates
 
-The V2 refresh budget and one-time resume claim are consumed. The separately approved diagnostic V2 also completed its one SSH and consumed its claim; neither may be replayed. Its retained diff isolates three changed hashes, but does not prove unchanged IPv4/nft rules. A new policy diagnostic candidate requires its own exact approval and fresh Cloud evidence. Baseline promotion and runtime remain NO_GO until the policy evidence is reviewed; historical hashes are expected identities only.
+The V2 refresh and baseline-diagnostic SSH budgets/claims are consumed; neither may be replayed. Their diff isolates three changed hashes but does not prove unchanged IPv4/nft rules. The separately approved policy V2 stopped before SSH because key unlock did not complete before Cloud expiry. Its network budget is unused, but its durable claim is occupied. Do not retry its original runner: inspect the protected zero-SSH attempt and review recovery/resume once interactive key entry is available. Baseline promotion/runtime remain NO_GO; historical hashes are expected identities only.
 
 Only that fresh receipt can produce the exact runtime manifest and challenge. Runtime preparation and helper installation keep their own approval gates. Phase 3.6 profiles, phase 3.7 activation, and later network/recovery work remain outside this report.
 
@@ -164,7 +164,7 @@ Ruff check и format check прошли только для пяти новых 
 
 Первый policy package V1 не прошёл локальный Windows PowerShell 5.1 preflight: `ConvertTo-Json` по-разному экранирует quoted remote command в PowerShell 5.1 и 7, поэтому argv-template SHA различался при одинаковых аргументах. Agent/network actions не выполнялись. V1 сохраняется как superseded. Для V2 transport identity рассчитывается по явно обозначенному NUL-separated UTF-8 представлению с запретом NUL внутри аргументов; сами SSH arguments не меняются. До фиксации V2 требуется равенство emitted invocation hashes в обеих версиях PowerShell.
 
-Финальный policy V2 собран в `.p3-vps-run/p35-policy-candidate-v2/`. Exact argv/frame hashes совпали в PowerShell 5.1 и 7; NUL injection отклонён. Windows PowerShell 5.1 preflight с правильным supplied `PolicyConfirmation` прошёл; неправильный отклонён с SSH0/HTTPS0/agent starts0. Пять защищённых файлов прочитаны обратно, future observation/claim roots отсутствуют.
+При подготовке финальный policy V2 был собран в `.p3-vps-run/p35-policy-candidate-v2/`. Exact argv/frame hashes совпали в PowerShell 5.1 и 7; NUL injection отклонён. Windows PowerShell 5.1 preflight с правильным supplied `PolicyConfirmation` прошёл; неправильный отклонён с SSH0/HTTPS0/agent starts0. Пять защищённых файлов были прочитаны обратно, future observation/claim roots тогда отсутствовали.
 
 | Policy V2 identity | SHA-256 или challenge |
 | --- | --- |
@@ -178,4 +178,18 @@ Ruff check и format check прошли только для пяти новых 
 
 Контракт разрешает один SSH, ноль HTTPS, три пары `/usr/sbin/iptables-save` и `/usr/sbin/nft -j list ruleset`. Каждый внутренний вызов ограничен четырьмя секундами и 65536 bytes. Raw остаётся в памяти; сохраняются validated hashes/counts/classes, stability flags и project-marker observations. Baseline promotion, assembly, runtime/helper не разрешены. Перед будущим запуском нужен новый authenticated Cloud record `.p3-vps-run/p35-cloud-evidence-policy-v2/observation.json` с frozen SHA.
 
-Финальный независимый review: **GO только для запроса exact approval policy V2, must-fix 0**. Проверены DPAPI input, canonical plans/challenges, baseline binding, component/driver hashes, actual argv/frame/payload/loader/protocol pins и paths, ACL/file set и отсутствие agent processes. Policy V2 не выполнялся. Фаза 3.5 остаётся открытой; технический NO_GO для baseline/runtime сохраняется.
+Финальный независимый review перед запуском: **GO только для запроса exact approval policy V2, must-fix 0**. Проверены DPAPI input, canonical plans/challenges, baseline binding, component/driver hashes, actual argv/frame/payload/loader/protocol pins и paths, ACL/file set и отсутствие agent processes. На момент review policy V2 не выполнялся. Фаза 3.5 остаётся открытой; технический NO_GO для baseline/runtime сохраняется.
+
+## Одобренная policy V2: остановка до SSH
+
+Владелец подтвердил `P35-POLICY-0AE7B886B8D0A19D`. Существующий вход DigitalOcean восстановлен через сохранённый Google account; новая регистрация и расширение доступа не выполнялись. Rules наблюдались в `11:55:36.756 UTC`, привязка единственного Droplet — в `11:55:59 UTC` 2026-09-05. Идентичности и union правил совпали с принятыми. Frozen Cloud SHA: `f0159231b9ae62f6fab659cc03b2b8ef15cea3a69957557959d4c8b6e251371a`; expiry — `12:05:36.756 UTC`.
+
+Ввод passphrase не завершился до expiry. В `12:06:08 UTC` controller остановил только принадлежащий этой попытке wrapper PID 18488: проверены parent PID 35140, command/candidate identity, точный `Process.StartTime` `11:56:36.2832526 UTC` и удерживаемый process handle. Parent runner завершил агент через штатный start-failure teardown.
+
+Runner вернул `diagnostic_failed_closed`, **SSH0/HTTPS0/agent starts1**, agent/add processes0; tool process exit1. Protected attempt `.p3-vps-run/p35-policy-claim-v2/attempt.json` имеет SHA `0f5742a7cab7e909750d82258376946c2326b63780aa70e5d4fd16c20133103b`. Error hash `3cecd83f2d364a6e1d3e0f15ea814ede737826931f4e3c6c4620a02a83db137c` относится к незавершённой загрузке ключа. Policy samples и `policy-observation.json` не созданы.
+
+Final readback: claim root содержит marker/claim/attempt, observation root — три начальных manifest files; agent receipt отсутствует. Агент, ssh-add и owned wrapper/runner завершены. Исходный receipt 3.4 `a87dd9aaa441a1e2657ac90e4a1d30a35db5e5ebea672bcf19cacc8cae765101` неизменён, runtime root отсутствует. Сетевые настройки и серверные файлы не менялись.
+
+Одобрение владельца записано; сетевой бюджет этой попыткой не использован, но durable claim создан и сохранён. Прямой повтор исходного runner запрещён. Перед новой попыткой нужны проверка сохранённого zero-SSH состояния и рассмотренный recovery/resume path; старые evidence не удалять и не обновлять их timestamps. Продолжение ожидает доступного интерактивного ввода ключа. Фаза 3.5 остаётся открытой.
+
+Независимый review результата: **GO для фиксации failed-attempt evidence**. Подтверждены attempt SHA, key-load failure, SSH0/HTTPS0, завершение процессов, ACL и оба трёхфайловых root, отсутствие новых samples/receipt/runtime и неизменность receipt 3.4. Новых выводов о policy stability нет; baseline/runtime NO_GO сохранён.

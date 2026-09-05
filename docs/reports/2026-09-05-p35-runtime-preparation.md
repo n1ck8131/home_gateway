@@ -1,6 +1,6 @@
 # Phase 3.5 runtime preparation
 
-Фаза 3.5 открыта: offline runtime/counter corrections и новое migration observation прошли проверки. Новый collector выполнил SSH1/HTTPS3, сохранил 23 исторических поля и вернул четыре ожидаемых hash differences. Receipt принят независимо, но истёк во время подготовки и review runtime candidate; Prepare не выполнялся. Для следующего окна исполнитель готовится заранее. Runtime/helper gates и принятие baseline владельцем остаются открытыми.
+Фаза 3.5 открыта. Compact migration V4 и Runtime V5 templates получили независимый technical GO; новый live запуск не выполнен. Владелец прямо делегировал все оставшиеся разрешения внутри фазы 3.5 без своего участия. Текущий блокер — доступ к свежему Cloud Firewall evidence: прежний авторизованный браузер недоступен через CUA, доступный In-app Browser требует входа, а попытка существующего Google sign-in вернула ошибку. Runtime/helper gates ещё не выполнены; подробное evidence и исторические попытки приведены ниже.
 
 This report serves the P3 controller and independent reviewer. Its single purpose is to record preparation evidence against the [phase execution plan](../superpowers/plans/2026-09-05-p35-runtime-helper-lifecycle.md). It is not runtime acceptance.
 
@@ -408,3 +408,35 @@ Approved SSH trust расшифрован только в памяти и све
 PS5 и PS7 прошли по пять asserted cases: короткий V1 GREEN; длинный V2 и padded V2 RED с проверкой truncation; compact prototype GREEN с byte-exact restored loader; compact full-frame GREEN через реальный native/MSYS/shell/CLI bootstrap/frozen loader/production collector с mocked subprocess. Prototype command длиной 2580 bytes не усекался. Реальные SSH handshake, sudo и remote environment эта fixture не эмулирует. Диагностика и результаты сохранены в `.p3-vps-run/phase35-transport-diagnostic-v1.*`; Ruff/parser checks прошли, production source и прежние frozen scripts не изменены.
 
 Исправление готовится как новый compact transport: заранее сжатые immutable loader bytes, отдельные compressed/decompressed pins и проверка длины remote argument не более 4096 ASCII bytes до claim/agent/network. Общие 30s/64KiB, две выборки, historical pins и отдельные approvals сохраняются; глобальные настройки MSYS не меняются.
+
+Независимый causal-diagnostic review — **GO, 0 must-fix**. PS5/PS7 results совпали по всем пяти cases; проверены реальные binary hashes, import `msys-2.0.dll` в SSH/Bash, pinned source и границы mock subprocess. Прототип не объявлен production fix, а локальное воспроизведение не подменяет новые live postconditions. Full suite, fixtures и сеть reviewer повторно не запускал.
+
+## Compact migration V4 и Runtime V5
+
+Владелец поручил: «Закончи фазу без моего участия, все разрешения есть». Controller принимает оставшиеся exact authorizations внутри 3.5 после независимого technical review. Повторное участие владельца для hash/challenge не требуется. Freshness, one-shot claims, baseline comparison, retention, teardown и независимая приёмка сохраняются.
+
+| Immutable artifact | SHA-256 |
+| --- | --- |
+| Migration V4 candidate | `5af42133ff00fefa0aeb507051f1cbe832075e52f210539935a2a69012e30165` |
+| Support V3 | `39213702a56e1c41611bd6ba7ccca0043202d5f217ad10e604b0cc269505dee4` |
+| Runner V4 | `ae04140cc3cb58d93a8a43685761a8855e848da4d78f9c1f9af6427bd6ff56af` |
+| Candidate builder V4 | `9020fd4b2e673b15aced8f8dbb8eabf2aad28154b27cb29711aaeb676695109e` |
+| Compressed-loader artifact | `9763a6f946d9030e0c3da32fb81767d1a4c90aa9c6c50a4ccd32f9773fdb0186` |
+| Frozen restored loader | `1ae8fc1f6e5cfcab7687728c12a22ef8f3626804b467e804c1bec858c0127bcf` |
+| Runtime candidate builder V5 | `a9821370ffc60d1780e9482bf91350c074f0fa6893455d5956ebe7bfe21641b4` |
+| Runtime executor V5 | `eb219809895362c049983d0480cd491d11913cb5ce1b794072de46b0aaf6808b` |
+| Runtime fixtures V5 | `1f38cef1183f9a023c6c00880f92f0854bc41cc1fc307cf7f76a49e5ac1e6376` |
+
+Challenge — `P35-MIGRATION-382F9A4189150FA8`. В рамках делегированных полномочий controller разрешает этот exact candidate после свежего Cloud readback: SSH1, HTTPS3, agent1, без runtime/helper mutation внутри migration runner. Compact command имеет 2768 ASCII bytes. Сжатие выполнено заранее; local и remote bootstrap проверяют точные длины и hashes restored loader. Аргумент больше 4096 UTF-8 bytes отклоняется до claim/agent/network. MSYS DLL pin проверяется до запуска. Protocol/frame, два полных snapshots, gap, 30s/64KiB и historical23 не изменены.
+
+PS5/PS7: реальные native/MSYS argv переданы byte-exact; compact bootstrap прошёл frozen loader и production collector с mocked subprocess. Проверки небезопасных argv, порчи artifact и конечных stderr classes прошли. Production Observe fixtures: success1 до Assemble/Validate, pre-HTTPS rejects6, replay rejects7. Correct frozen preflight PASS в обеих версиях; wrong challenge в последовательных проверках даёт ожидаемый exit23. Parser/Ruff PASS. Runtime V5: пять executor и шесть builder-proof cases PASS в PS5/PS7; actual migration pin закреплён.
+
+Первоначальные параллельные PS5/PS7 fixture/readback вызвали sharing violation из-за `Read-P3BoundedStableBytes` с `FileShare.None`. Эти неуспешные outputs сохранены. После прекращения конкурирующих чтений последовательные проверки прошли без изменения source. Проверки protected/source files, reviewer readback и executors далее строго сериализованы.
+
+Независимый Sol/high final immutable readback — **TECHNICAL GO, 0 must-fix**: ACL и exact five-file package, DPAPI input, prerequisite/agent plans, 29 argv, frame, compact/compressed/restored loader pins, MSYS DLL, drivers и десять provenance pins совпали. Runtime V5 hashes и фактический migration pin подтверждены. Reviewer прекратил все чтения перед передачей управления. Live roots, runtime package и runtime на этой границе отсутствуют; agent/add0. Это готовность кандидатов, не завершение live gates.
+
+## Доступ к fresh Cloud evidence
+
+После передачи управления CUA inventory содержит только In-app Browser, без прежнего Opera browser connection. Новый переход на Cloud Firewall привёл к DigitalOcean login; вход через предложенный существующий Google account вернул `An unknown error has occurred.`. Новые правила и association не наблюдались. Старые timestamps не изменялись, новый Cloud receipt не создан, Migration V4 не запускался и one-shot budget не использован. Наличие разрешения владельца не заменяет аутентифицированное наблюдение.
+
+Доступная независимая работа продолжается: offline подготовка оставшихся helper executors. Закрытие фазы остаётся **NO_GO** до fresh prerequisite, Prepare и helper install/attestation/reconcile с независимым GO.

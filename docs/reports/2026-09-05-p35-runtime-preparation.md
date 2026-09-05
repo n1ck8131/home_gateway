@@ -69,7 +69,7 @@ The independent reviewer decrypted the V2 input only in memory and verified cano
 
 ## Remaining gates
 
-The V2 observation budget and one-time resume claim are consumed. The SSH1/HTTPS0 resume stopped on baseline hash mismatch; V2 must not be executed again. A new exact diagnostic candidate requires its own owner approval and fresh Cloud evidence. Previously accepted hashes remain expected identities only; observed differences must be retained and reviewed before any baseline acceptance or further prerequisite refresh.
+The V2 refresh budget and one-time resume claim are consumed. The separately approved diagnostic V2 also completed its one SSH and consumed its claim; neither may be replayed. Its retained diff isolates three changed hashes, but does not prove unchanged IPv4/nft rules. A new policy diagnostic candidate requires its own exact approval and fresh Cloud evidence. Baseline promotion and runtime remain NO_GO until the policy evidence is reviewed; historical hashes are expected identities only.
 
 Only that fresh receipt can produce the exact runtime manifest and challenge. Runtime preparation and helper installation keep their own approval gates. Phase 3.6 profiles, phase 3.7 activation, and later network/recovery work remain outside this report.
 
@@ -118,7 +118,7 @@ Teardown завершён: агент, ssh-add и принадлежащие з�
 
 Первый локальный пакет V1 сохранён как superseded и не выполнялся. Независимый reviewer обнаружил, что dot-source production scripts очищает параметр `Confirmation`; первоначальный preflight не проверял этот случай. Исправленная версия использует `DiagnosticConfirmation` и проверяет переданное подтверждение после imports также в `PreflightOnly`. Memory-only synthetic check подтвердил: корректный envelope даёт два synthetic evidence records и ожидаемую остановку; изменение restart count отражается одним отличающимся полем; подменённый nonce отклоняется до любых записей. Эти проверки не выполняют filesystem writes, SSH/HTTPS или agent start.
 
-V2 собран локально в `.p3-vps-run/p35-diagnostic-candidate-v2/`; пять защищённых файлов содержат contract/plans и DPAPI input. Новый observation root, claim и Cloud record для исполнения ещё отсутствуют. Windows PowerShell 5.1 preflight с правильным `DiagnosticConfirmation` прошёл; неверное подтверждение отклонено до agent/network. V1 сохранён побайтно.
+На момент подготовки V2 был собран локально в `.p3-vps-run/p35-diagnostic-candidate-v2/`; пять защищённых файлов содержали contract/plans и DPAPI input. Новый observation root, claim и Cloud record тогда отсутствовали. Windows PowerShell 5.1 preflight с правильным `DiagnosticConfirmation` прошёл; неверное подтверждение отклонено до agent/network. V1 сохранён побайтно.
 
 | Артефакт V2 | SHA-256 или challenge |
 | --- | --- |
@@ -127,6 +127,27 @@ V2 собран локально в `.p3-vps-run/p35-diagnostic-candidate-v2/`; 
 | `phase35-diagnostic-runner-v2.ps1` | `a57b3375aa3d93057aaff36a7c4931743b85388d85061ae71396655849cf0935` |
 | `phase35-build-diagnostic-candidate-v2.ps1` | `f71a4365ed48cbe817537df38b7aaa75c03688c2cc6fb3af8bd85a9e92081729` |
 
-Новый frozen Cloud file для будущего запуска: `.p3-vps-run/p35-cloud-evidence-diagnostic-v2/observation.json`. Кандидат имеет статус `awaiting_exact_diagnostic_approval`; сетевые действия по нему не выполнялись.
+При подготовке будущий frozen Cloud file был определён как `.p3-vps-run/p35-cloud-evidence-diagnostic-v2/observation.json`. Статус immutable candidate contract — `awaiting_exact_diagnostic_approval`; факт последующего одобрения и исполнения записан в следующем разделе и protected attempt, без перезаписи исходного contract.
 
 Независимый финальный review V2: **GO для запроса отдельного exact approval, открытых замечаний 0**. Reviewer подтвердил DPAPI input, canonical plans/challenges, historical baseline binding, пять driver hashes, path pins, защищённый пятифайловый package, отсутствующие observation/claim roots и ноль agent processes. Review не выполнял live-действий. `git diff --check` прошёл.
+
+## Результат diagnostic V2
+
+Владелец подтвердил `P35-DIAGNOSTIC-7073247BC0713953`. Свежие Rules наблюдались в authenticated browser в `11:06:04.633 UTC`, привязка Droplet — в `11:06:23 UTC` 2026-09-05. Идентичности и union правил совпали с принятыми. Hash нового Cloud record: `628ae718cf8b2207002a9ec6f63a80f4e7c8ec7990e6ca44fcaaf5f1fa9d0592`.
+
+Запуск завершился с exit 0, `diagnostic_captured_stopped`: SSH1, HTTPS0, agent starts1, teardown verified. Защищённые evidence находятся в `.p3-vps-run/p35-diagnostic-claim-v2/`; claim использован, повтор этого кандидата не допускается.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `server-observation.json` | `e6c8c36fffd736c925397a9d3595a19e419a1a235c90076fb1b84f08a939df40` |
+| `baseline-diff.json` | `6bed13cc1f832b3ae781061a219decade33da91a3b3ec11a981c7bfdf94a2007` |
+| `attempt.json` | `7592ea88a17a26bcccd5a39fe3386dc0bac6dd49ab2dea34844cea2dc1c5c11a` |
+| Observed baseline | `b773a5bd035dc5a924f3e06effa6378a92e894b124fe834a52c6662c703b5458` |
+
+С историческим baseline `ea611479698f1970704e00b437e7f19769d2fda7927dc3bf7c09eed0d7cd54e9` отличаются ровно три поля: `host_policy_sha256`, `firewall_identity_sha256`, `runtime_identity_sha256`. Остальные 24 поля совпадают. Изменение IPv4 hash может менять оба агрегата, но отдельный nft hash не выводится в baseline: его неизменность отдельно не доказана.
+
+В `scripts/p3-amnezia-peer-guard.py:564` IPv4 `_normalize_policy` сохраняет chain declaration counters вида `:INPUT ACCEPT [n:n]`. Memory-only fixture с одинаковыми правилами и единственным изменением `[10:640]` → `[11:704]` через фактический `collect_server_snapshot` воспроизвёл ровно те же три отличающихся поля. IPv6 normalizer обнуляет такие counters. Проверка выполнена с injected runner, без subprocess/network/filesystem writes; exit 0. Независимый reviewer отдельно подтвердил этот механизм на pure-memory fixture.
+
+Это доказанный недостаток устойчивости IPv4 identity, **но не доказательство counter-only причины live drift**: исторические IPv4 rules не сохранены. Независимый review результата: **GO для diagnostic evidence; NO_GO для baseline promotion и продолжения runtime**. Проверены canonical hashes, nonce/payload/protocol, diff, защищённые ACL/file sets, отсутствие agent processes и promotion. Runtime Prepare, helper installation и сетевые изменения не выполнялись.
+
+Следующий разрешённый offline шаг — подготовить отдельный policy diagnostic candidate с несколькими bounded IPv4/nft samples, раздельными structural/counter identities и project invariants. Его SSH требует нового exact approval. Автоматическое принятие baseline по совпадению synthetic pattern запрещено.

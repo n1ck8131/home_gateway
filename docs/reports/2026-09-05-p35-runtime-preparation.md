@@ -193,3 +193,30 @@ Final readback: claim root содержит marker/claim/attempt, observation ro
 Одобрение владельца записано; сетевой бюджет этой попыткой не использован, но durable claim создан и сохранён. Прямой повтор исходного runner запрещён. Перед новой попыткой нужны проверка сохранённого zero-SSH состояния и рассмотренный recovery/resume path; старые evidence не удалять и не обновлять их timestamps. Продолжение ожидает доступного интерактивного ввода ключа. Фаза 3.5 остаётся открытой.
 
 Независимый review результата: **GO для фиксации failed-attempt evidence**. Подтверждены attempt SHA, key-load failure, SSH0/HTTPS0, завершение процессов, ACL и оба трёхфайловых root, отсутствие новых samples/receipt/runtime и неизменность receipt 3.4. Новых выводов о policy stability нет; baseline/runtime NO_GO сохранён.
+
+## Повтор policy diagnostic V3: ошибка SSH process result
+
+По указанию владельца «Повтори» подготовлен отдельный V3. Его recovery predicate проверяет точные hashes предыдущей SSH0-попытки, защищённые file sets и отсутствие receipt. Старые candidate, claim и observation не изменены. Новый wrapper сразу вызывает `ssh-add`, без предварительного `Read-Host`; ввод passphrase скрыт. Независимый review разрешил один эквивалентный повтор: **GO, 0 must-fix**. Исправление динамического shadowing `agent_manifest` проверено локально под Windows PowerShell 5.1; PS5/PS7 preflight и отклонение неверного confirmation прошли до agent/network.
+
+| Артефакт | SHA-256 |
+| --- | --- |
+| `phase35-policy-runner-v3.ps1` | `f97ba37669a220e862432ebce18b1cb7383c942166cd26419095785f894319d6` |
+| `phase35-policy-build-candidate-v3.ps1` | `572f1dcdb825666ed3886deb75f78ca6bdf2bdd64ea7caa4eb76cbfb90d4cb22` |
+| `phase35-policy-key-unlock-v3.ps1` | `b54465676b075a427c44b01fe1579c8bc565a1bcec67cf8a6bb829bd91fe223d` |
+| `p35-policy-candidate-v3/candidate.json` | `2dee2147a3c9e549abc55dd14533777a3129c8b314b8ce331c0ceba2da14e312` |
+| `p35-cloud-evidence-policy-v3/observation.json` | `e7f1a083d0c002fd46a0dc9feb47177704780aab432260c643f0f204f54387d8` |
+| `p35-policy-claim-v3/attempt.json` | `a7f464e20e3147f55ad9e38d97024026943fb655e1b563ebb97929b323811e48` |
+
+Challenge: `P35-POLICY-75B27502319101AA`. Payload, loader, protocol и argv template сохранены от V2; новый stdin frame SHA — `b261478c4c1be6c058f88cc0d614119fbb61520427bc73b719c12429f5590f60`. Fresh Cloud rules наблюдались `12:22:39.035 UTC`, association — `12:22:58.597 UTC` 2026-09-05; expiry `12:32:39.035 UTC`. Идентичности и правила совпали с принятыми.
+
+Ключ загрузился. Выполнено **SSH1/HTTPS0/agent starts1**; runner вернул `diagnostic_failed_closed`, stage `agent_and_diagnostic`, `RuntimeException` на строке 113. Hash сообщения `policy SSH process failed` — `fad7dc0d1fa82de30f44c64de57cda0cd53517c145be0d9d60acf6f84d8b04c2`. Tool process exit — 1; это не сохранённый exit code удалённого SSH-процесса.
+
+Строка 113 объединяет `TimedOut`, `Oversized`, ненулевой `ExitCode` и непустой `StdErr`. Ни отдельные flags/exit code, ни stdout/stderr не попали в evidence. Поэтому точная причина live-сбоя и число фактически выполненных внутренних policy-команд неизвестны. Успешное получение шести samples не подтверждено; `policy-observation.json` отсутствует. Это также выявляет ограничение диагностического executor: общий exception hash недостаточен для различения transport и remote observer failure.
+
+После завершения отдельно проверены agent/add/owned wrapper/runner0. Claim root содержит marker, claim и attempt; observation root — только marker, manifest и agent manifest. Agent receipt отсутствует, исходный receipt 3.4 сохранил SHA `a87dd9aaa441a1e2657ac90e4a1d30a35db5e5ebea672bcf19cacc8cae765101`. Runtime Prepare/helper actions не выполнялись. Разрешённый payload содержит только read-only команды; серверные или сетевые изменения этой попыткой не выполнялись.
+
+V3 budget использован, durable claim сохранён; повторное исполнение этого runner запрещено. Phase 3.5 остаётся открытой, baseline promotion/runtime — **NO_GO**. Следующий live-запуск требует рассмотренного исправления с безопасной классификацией ошибок и отдельного exact candidate; текущий исход такого запуска не разрешает.
+
+Локальная диагностика implementer без изменения файлов и без сети: exact frozen loader/payload с mocked subprocess прошли для шести команд, включая допустимые nft warnings. Дополнительно Windows PowerShell 5.1 native stdin → frozen loader → frozen payload с mocked `Popen` вернул `ExitCode=0`, `TimedOut=false`, `Oversized=false`, stderr0 и шесть mock calls; SSH/HTTPS/agent0. Детерминированный framing/BOM defect не воспроизведён. Эти проверки не устанавливают причину live-сбоя. Минимальное исправление следующего executor должно сохранять отдельные безопасные flags, exit code и ограниченную классификацию ошибки, без raw policy/stderr.
+
+Независимый review результата: **GO для фиксации evidence, 0 must-fix**. Reviewer проверил шесть hashes таблицы, protected file sets/ACL, сохранённые claims, отсутствие новых receipts/runtime, неизменность receipt 3.4 и завершение процессов. `git diff --check` прошёл. Это не acceptance фазы 3.5; неизвестная live-причина и baseline/runtime NO_GO сохранены.

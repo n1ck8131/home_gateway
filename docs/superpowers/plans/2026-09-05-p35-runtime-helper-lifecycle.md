@@ -2,7 +2,7 @@
 
 **Goal:** Validate one protected runtime and install or attest the exact inert server helper, then reconcile the server baseline.
 
-**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** offline runtime/counter/footer corrections accepted. Migration V1 passed then expired; V2 stopped on drift, V3 failed in native transport before an observation envelope. Compact V4 and Runtime V5 templates have independent technical GO. V4 is NOT EXECUTED: fresh Cloud evidence is unavailable through the currently connected browser. Runtime V5 package/runtime and helper gates remain absent/open.
+**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** offline runtime/counter/footer corrections accepted. Migration V1 passed then expired; V2 stopped on drift, V3 failed in native transport. Compact V4, Runtime V5 and helper templates have independent technical offline GO. Opera access is restored and fresh Cloud matched. V4 stopped during key unlock after freshness elapsed: SSH0/HTTPS0, agent teardown completed. Its claim is consumed; no prerequisite receipt or runtime was created. Phase acceptance remains NO_GO, pending a usable key unlock and a new exact candidate with refreshed bindings.
 
 **Base:** `2bb8171aa7087ca7e4021b64ad115e289a9d5f27`, branch `phase/p3-5-runtime-lifecycle`, existing `p3-redshield-windows` worktree. Preserve the unrelated untracked Python caches and `testResults.xml`.
 
@@ -36,9 +36,9 @@ Protected/source verification и live batches выполняются после�
 | --- | --- | --- |
 | Offline runtime safety | Независимый GO; 248 Pester и repository verification passed | Сохранить принятую реализацию |
 | Причина policy drift | Новый collector сохранил 23 поля; четыре изменения включают новый payload и policy-dependent hashes | Принять текущее наблюдаемое состояние явно, не объявляя исторические rules неизменными |
-| Новый prerequisite | V1 receipt истёк; V2 drift fail; V3 transport fail; compact V4 technical GO, NOT EXECUTED | Получить fresh Cloud evidence; выполнить V4 с полным совпадением 27 полей двух snapshots |
-| 6.4L | Runtime V5 templates technical GO; package/runtime отсутствуют | Из свежего receipt сформировать exact `PreparePlan`, независимо проверить bindings, зафиксировать controller authorization и выполнить Prepare/Validate |
-| 6.4R-pre/P/post | Live не выполнялись; helper templates получили независимый offline GO, PS5/PS7 по 37 cases PASS | После actual Runtime V5 binding/readback выполнить exact controller-authorized pre/install/post plans и сверить baseline |
+| Новый prerequisite | V4 остановлен при key unlock; claim использован, SSH0/HTTPS0 | Доступный штатный unlock, новый exact candidate и fresh Cloud; два snapshots с совпадением 27 полей |
+| 6.4L | Runtime V5 templates technical GO; failed V4 не дал receipt, package/runtime отсутствуют | Обновить bindings под новый candidate; из свежего receipt проверить exact `PreparePlan` и выполнить controller-authorized Prepare/Validate |
+| 6.4R-pre/P/post | Live не выполнялись; helper templates получили независимый offline GO, PS5/PS7 по 37 cases PASS | Обновить actual runtime bindings/readback, выполнить exact controller-authorized pre/install/post plans и сверить baseline |
 | Приёмка фазы | NO_GO | Защищённые receipts, helper identity/owner/mode, согласованный baseline, ноль leftovers/agents и независимый GO |
 
 Каждый кандидат сначала готовится и проверяется локально. По последующему прямому поручению владельца controller самостоятельно фиксирует exact authorization на фактические hash/challenge в пределах фазы 3.5. Новый migration candidate допускает один SSH и три HTTPS. До HTTPS/assembly проверяются 23 исторических baseline поля и точный новый payload hash; три policy-dependent hash сохраняются только как новое наблюдение. Полученный receipt остаётся evidence prerequisite; runtime/helper исполняются собственными проверенными gates. Принятие нового baseline и исторического evidence gap фиксируется в точном runtime Prepare authorization.

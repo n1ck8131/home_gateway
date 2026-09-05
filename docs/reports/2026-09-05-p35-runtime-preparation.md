@@ -1,6 +1,6 @@
 # Phase 3.5 runtime preparation
 
-Фаза 3.5 открыта: offline runtime correction и IPv4 counter normalization прошли verification и независимый review, но runtime/helper gates ещё не выполнены. Receipt 3.4 сохранён и истёк. Read-only refresh остановился на baseline drift; последняя policy diagnostic V3 выполнила SSH1/HTTPS0 и завершилась без policy receipt. По поручению владельца продолжить и закрыть фазу подготовлен отдельный migration prerequisite candidate; baseline/runtime остаются NO_GO до свежих evidence и точных approvals.
+Фаза 3.5 открыта: offline runtime/counter corrections и новое migration observation прошли проверки. Новый collector выполнил SSH1/HTTPS3, сохранил 23 исторических поля и вернул четыре ожидаемых hash differences. Receipt принят независимо, но истёк во время подготовки и review runtime candidate; Prepare не выполнялся. Для следующего окна исполнитель готовится заранее. Runtime/helper gates и принятие baseline владельцем остаются открытыми.
 
 This report serves the P3 controller and independent reviewer. Its single purpose is to record preparation evidence against the [phase execution plan](../superpowers/plans/2026-09-05-p35-runtime-helper-lifecycle.md). It is not runtime acceptance.
 
@@ -262,3 +262,32 @@ Reviewer выявил два соседних deadline дефекта новог
 Frozen package preflight с правильным confirmation прошёл в PS5/PS7. Неверный confirmation отклонён с exit23 и SSH0/HTTPS0/agent0. Пять package files проверены; source receipt 3.4 и V3 attempt сохранили hashes, старые V3 claim/observation содержат прежние три файла каждый. Live observation ещё не выполнялась.
 
 Независимый final immutable readback: **GO для запроса exact SSH1/HTTPS3 approval, 0 must-fix**. Reviewer расшифровал DPAPI input только в памяти, заново сформировал точные plans/frame/argv, проверил пять drivers и все launcher hashes, ACL/file sets и provenance. Historical trust отличается только новым `observer_payload_sha256`; historical baseline сохранён. Observation/claim/Cloud/runtime roots отсутствуют, agent/add0; acceptance/promotion/runtime/helper flags — false. Разрешение на живой запуск и приёмка фазы этим review не выдавались.
+
+## Одобренное migration observation: успех
+
+После подтверждения владельца выполнен точный candidate `P35-MIGRATION-BC7487AD80A8EBFC`. Fresh authenticated Cloud rules прочитаны `2026-09-05T13:24:17.544Z`, единственная привязка Droplet — `13:24:51.575Z`. Обе inbound rules и три outbound rows, management source и resource identities совпали с принятыми. Protected Cloud SHA — `4773fd236ba28407001b04ef5870979fd9984470d2cb1812d9700da4ee1b1eef`; старые records не менялись.
+
+Runner завершился с exit 0: `migration_observed_validated_not_accepted`, **SSH1/HTTPS3/agent starts1**, teardown verified. Receipt наблюдался `13:28:09.4044786 UTC` 2026-09-05; его десятиминутная freshness граница для Prepare — `13:38:09.4044786 UTC`.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `p35-migration-observation-v1/prerequisite-receipt.json` | `ae2c95f4f18d43d0adaed95636fcf7068df6b7d5bf3b5ecf0956346e99fbf889` |
+| Новый server baseline | `f8c9731908e71daef942916fba05eeaf5311bd96abdae9a47f16a03e303b196e` |
+| `p35-migration-claim-v1/server-observation.json` | `f17b92e3f3b93c8b4eb1d64c962921eb9f94ad328fbc13c3956cf7b7baa59e96` |
+| `p35-migration-claim-v1/baseline-diff.json` | `4c5c8093d4cb0cdfa0befdb657e4fe11159927d346b033a82ce46e64212ef93c` |
+| Safe process result | `90467897e3ae03900ad3749396cbf52dbc77f3999574a816f8f2489c55c77e75` |
+| `p35-migration-claim-v1/attempt.json` | `e89783643eb76efa61ba240a9c1553af36c25fdc8901398071e95b29956bacd1` |
+
+Совпали все 23 fixed fields. Четыре различия с историческим baseline — `payload_sha256`, `host_policy_sha256`, `firewall_identity_sha256`, `runtime_identity_sha256`. Новый payload соответствует reviewed normalization fix; остальные три hashes получены штатным collector. Это новое наблюдаемое состояние; историческая причина drift по-прежнему не доказана. `baseline_accepted`, `runtime_prepared`, `helper_installed` — false. Прямой replay migration runner запрещён: one-shot budget использован, claim сохранён.
+
+Независимая проверка receipt — **GO**: Windows PowerShell 5.1 `Validate` прошёл; protected batch/Cloud воспроизвели точный receipt SHA в `13:37:50 UTC`. Подтверждены 23 fixed fields, четыре различия, nonce/payload, ACL/file sets (шесть observation и шесть claim files), исходный receipt 3.4, ноль agent/add/owned runner/wrapper и отсутствие consumption/runtime. PS7 иначе сериализовал DateTime при дополнительной проверке byte reproduction; для точного SHA использован основной PS5 runtime. Ошибочный дополнительный probe reviewer вызвал pre-assembly-only helper на уже собранном root и получил отказ из-за существующего final receipt; это не ошибка рабочего observation.
+
+## Runtime candidate V2 и истечение окна Prepare
+
+За время действия receipt подготовлен `.p3-vps-run/p35-runtime-candidate-v2`: шесть protected files с DPAPI trust, runtime/agent plans и неисполняемым rollback proposal. Candidate SHA `b9c99f65d0a5eea93e2b2f7f129a461fd9048f858ee1f32f74afa5bf054ba624`, manifest SHA `b8fd73abbc0c76a08d0675908f893983dfca9e184bcccf3a7c3e703e98df6c43`, challenge `P3-PRELIVE-RUNTIME-480D02A117CE506D`. Executor SHA `2cbc0bcdcab45fd6c4debb7963af6dea5f68d662fa7c3cb19ef1a26dd31b0f34`, builder SHA `d0459430d6ab63a0cf3c22c2ffc413a429304c1aa1ee13fc2713fa40bcf2623d`.
+
+Executor требует отдельного exact runtime confirmation, принятия baseline `f8c9731908e71daef942916fba05eeaf5311bd96abdae9a47f16a03e303b196e` и явного признания, что historical counter-only cause не доказана. До этого он выполняет только preflight. Исправлена обнаруженная до запуска коллизия `$RuntimeRoot` при dot-source: используется отдельное имя `$proposedRuntimeTarget`. Runtime AgentPlan пересчитывается полностью.
+
+Полный `PreflightOnly` прошёл в PS5/PS7 до expiry. Независимый immutable readback принял package offline: exact DPAPI/trust/manifest/receipt, шесть files/ACL, plans и rollback projection совпали, **GO, 0 must-fix**. Controller не успел закончить подготовку и представить exact approval владельцу до `13:38:09 UTC`; approval на этот Prepare не выдавалось, сам Prepare не выполнялся. Последующий negative-ack probe остановился раньше на штатной freshness; он доказывает stale rejection, а не проверку неверного acknowledgement.
+
+Runtime и consumption отсутствуют. Candidate V2 теперь исторический, **live NO_GO**; его receipt и timestamp не продлеваются. Для следующего окна заранее готовятся paths/pins variants проверенного observation и runtime executor. Следующий refresh будет проверять уже наблюдавшийся normalized baseline на полное равенство, сохраняя отдельное exact approval для runtime. Код и проверяемые templates готовятся до нового сбора, чтобы не расходовать его freshness window на реализацию.

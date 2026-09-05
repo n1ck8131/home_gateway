@@ -2,7 +2,7 @@
 
 **Goal:** Validate one protected runtime and install or attest the exact inert server helper, then reconcile the server baseline.
 
-**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** offline runtime correction accepted; read-only refresh stopped on baseline drift, policy diagnostic V3 failed without a receipt. Runtime/helper gates remain open.
+**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** offline runtime/counter corrections accepted; migration observation passed SSH1/HTTPS3 and independent review. Its receipt expired during runtime candidate preparation/review. Runtime/helper gates remain open.
 
 **Base:** `2bb8171aa7087ca7e4021b64ad115e289a9d5f27`, branch `phase/p3-5-runtime-lifecycle`, existing `p3-redshield-windows` worktree. Preserve the unrelated untracked Python caches and `testResults.xml`.
 
@@ -29,9 +29,9 @@ Management/Guest actions and profile export belong to 3.6. Activation belongs to
 | Условие | Текущее evidence | Что требуется |
 | --- | --- | --- |
 | Offline runtime safety | Независимый GO; 248 Pester и repository verification passed | Сохранить принятую реализацию |
-| Причина policy drift | Совпадают 24 из 27 полей; три hash differences воспроизводятся counters-only fixture | Получить проверяемый текущий результат; не объявлять исторические rules неизменными |
-| Новый prerequisite | Receipt 3.4 истёк; нового accepted receipt нет | Рассмотренное решение по baseline и отдельное точное наблюдение |
-| 6.4L | Runtime отсутствует | Из свежего receipt сформировать, согласовать и выполнить `PreparePlan`; проверить `Validate` |
+| Причина policy drift | Новый collector сохранил 23 поля; четыре изменения включают новый payload и policy-dependent hashes | Принять текущее наблюдаемое состояние явно, не объявляя исторические rules неизменными |
+| Новый prerequisite | Migration receipt принят независимо, затем истёк без Prepare | Повторить exact observation с полным совпадением 27 полей normalized baseline |
+| 6.4L | Runtime отсутствует; executor/package V2 проверены offline, receipt истёк | Заранее подготовить новые bindings; из свежего receipt быстро сформировать и согласовать exact `PreparePlan`, выполнить Prepare/Validate |
 | 6.4R-pre/P/post | Не выполнялись | Прочитать состояние helper, согласовать точный install/attestation plan, выполнить и сверить baseline |
 | Приёмка фазы | NO_GO | Защищённые receipts, helper identity/owner/mode, согласованный baseline, ноль leftovers/agents и независимый GO |
 

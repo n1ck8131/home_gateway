@@ -1,6 +1,6 @@
 # Phase 3.5 runtime preparation
 
-Phase 3.5 is in progress and has not passed its live gates. The protected prerequisite from 3.4 is intact but expired for runtime preparation. The failed-Prepare ownership correction passed final offline verification and independent review. The exact read-only refresh candidate is ready for approval.
+Phase 3.5 is in progress and has not passed its live gates. The protected prerequisite from 3.4 is intact but expired for runtime preparation. The failed-Prepare ownership correction passed final offline verification and independent review. The owner approved read-only refresh candidate V2; its first execution stopped before SSH because key unlocking did not complete before Cloud evidence expired.
 
 This report serves the P3 controller and independent reviewer. Its single purpose is to record preparation evidence against the [phase execution plan](../superpowers/plans/2026-09-05-p35-runtime-helper-lifecycle.md). It is not runtime acceptance.
 
@@ -46,7 +46,7 @@ The local builder `build-phase35-refresh-candidate-v2.ps1` produced a protected 
 
 The contract pins the encrypted input and five production driver hashes. It permits one SSH observation and three HTTPS authorities, requires fresh authenticated Cloud Firewall evidence, and stops on baseline drift. Freeze the new Cloud observation file hash before agent startup and revalidate it before SSH and receipt assembly. Mandatory `finally` teardown applies to the dedicated memory-only agent. The package explicitly excludes runtime preparation and helper installation.
 
-This is an observation-input and approval package, not an executed runner or a fresh receipt. Use the pinned production prerequisite driver after exact approval. A runtime manifest/challenge does not yet exist.
+The package contains observation inputs and approval bindings, not a fresh receipt. The subsequently prepared executor uses the pinned production prerequisite driver. A runtime manifest/challenge does not yet exist.
 
 ## Validation evidence
 
@@ -69,8 +69,27 @@ The independent reviewer decrypted the V2 input only in memory and verified cano
 
 ## Remaining gates
 
-The next eligible action is a separately approved read-only prerequisite refresh. Previously accepted hashes are expected identities only. Fresh authenticated-browser Cloud Firewall evidence, one pinned SSH observation, and three HTTPS authorities must establish a new receipt. Stop on baseline or trust drift.
+The read-only refresh has owner approval, but requires a completed interactive key unlock and fresh Cloud evidence. Previously accepted hashes are expected identities only. One pinned SSH observation and three HTTPS authorities must establish a new receipt. Stop on baseline or trust drift.
 
 Only that fresh receipt can produce the exact runtime manifest and challenge. Runtime preparation and helper installation keep their own approval gates. Phase 3.6 profiles, phase 3.7 activation, and later network/recovery work remain outside this report.
 
-No SSH, HTTPS egress probe, DigitalOcean observation, helper installation, runtime preparation, profile action, or live network change has been executed in this phase preparation.
+## Approved refresh attempt
+
+The owner approved V2 in the task. A new local executor, `phase35-approved-refresh-runner-v2.ps1`, reuses the inspected console-launch code and binds the approved candidate, five driver hashes, encrypted input, system PowerShell, and interactive wrapper. A preflight-only parameter-scope error was corrected before agent startup. Independent review also reproduced and corrected an `AddRunner.GetNewClosure()` function-lookup failure by capturing `CommandInfo`. Final preflight and independent review returned GO.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Reviewed executor | `9161b445eda049d3bfb9fdd890855bd0c3448249f82f869ee666cf1bef88ad4d` |
+| Interactive key wrapper | `ad84341f3e5adfe55350c15870d9fc5f57ce063d8c3f40a36873dde0669c0bd9` |
+| Fresh browser Cloud observation | `2bc3a6ee0d7fb67d7ab77ec21ef4f0e7d70d91d6400d39be241dccc4c9e87ed4` |
+| Protected attempt receipt | `385446c5971612dd0f56a4613016acd831476d12c58f3b658164a92f67ffe0c1` |
+
+Authenticated browser inspection observed the Rules page at `10:16:15.628 UTC` and the Droplets association at `10:16:43 UTC`. The firewall identity, management source, and unique Droplet identity matched the accepted hashes. Two inbound rules and three outbound rows remained unchanged; no inbound IPv6 UDP rule was present. The same Droplet appeared directly and through its tag, yielding one unique association. The protected Cloud record preserves the earlier observation time and expired at `10:26:15.628 UTC`.
+
+Execution began at `10:17:39 UTC` and started one temporary agent. The interactive key-unlock window did not complete. After expiry, the controller stopped only that invocation's wrapper, validating its parent, creation times, and exact command identity. Its console child was identified before cleanup. CIM creation timestamps truncate sub-microsecond precision; the final process-handle check used the separately observed exact `Process.StartTime`, without relaxing identity checks. The parent runner then performed its normal start-failure teardown.
+
+The runner returned exit `23`, `failed_closed`, SSH calls `0`, HTTPS calls `0`, and agent starts `1`. Final readback confirmed zero agent, ssh-add, runner, wrapper, or console processes. The observation root contains only its three initial protected files; no agent receipt, observation batch, or prerequisite receipt exists. The 3.4 receipt hash is unchanged. Runtime and helper actions were not performed.
+
+The unused encrypted V2 candidate input and failed-attempt evidence are retained. Before resuming, inspect the exact three-file root and the zero-SSH attempt receipt; do not delete them or blindly rerun the executor, which rejects an existing observation root. Refresh Cloud evidence when interactive key entry is available. The candidate approval persists within its original scope; runtime preparation and helper installation remain separately gated.
+
+The next runtime-candidate builder has a static independent GO, but has not run because the required fresh prerequisite receipt does not exist. No network configuration, profile, service, firewall, Docker configuration, route, DNS, adapter, RedShield, or Cisco state was changed.

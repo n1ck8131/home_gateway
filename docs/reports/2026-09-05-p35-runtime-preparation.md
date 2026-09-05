@@ -1,6 +1,6 @@
 # Phase 3.5 runtime preparation
 
-Фаза 3.5 открыта: offline runtime correction прошла verification и независимый review, но runtime/helper gates ещё не выполнены. Receipt 3.4 сохранён и истёк. Read-only refresh остановился на baseline drift; последняя policy diagnostic V3 выполнила SSH1/HTTPS0 и завершилась без policy receipt. По поручению владельца продолжить и закрыть фазу готовится исправление IPv4 counter normalization и отдельный migration prerequisite candidate; baseline/runtime остаются NO_GO.
+Фаза 3.5 открыта: offline runtime correction и IPv4 counter normalization прошли verification и независимый review, но runtime/helper gates ещё не выполнены. Receipt 3.4 сохранён и истёк. Read-only refresh остановился на baseline drift; последняя policy diagnostic V3 выполнила SSH1/HTTPS0 и завершилась без policy receipt. По поручению владельца продолжить и закрыть фазу подготовлен отдельный migration prerequisite candidate; baseline/runtime остаются NO_GO до свежих evidence и точных approvals.
 
 This report serves the P3 controller and independent reviewer. Its single purpose is to record preparation evidence against the [phase execution plan](../superpowers/plans/2026-09-05-p35-runtime-helper-lifecycle.md). It is not runtime acceptance.
 
@@ -232,3 +232,33 @@ V3 budget использован, durable claim сохранён; повторн
 Следующий путь — новый migration prerequisite candidate, SSH1/HTTPS3, с новой manifest/agent/trust цепочкой. Шесть дополнительных policy-only samples не являются требованием закрытия. Штатный collector сохраняет свои IPv6 samples и invariants; runner должен до HTTPS/assembly требовать равенство 23 исторических полей и точное соответствие нового payload. Три policy-dependent hash сохраняются как текущее наблюдение. Новое состояние и исторический evidence gap принимаются отдельно вместе с exact runtime Prepare approval; исторические hashes не пересчитываются.
 
 Rollback локального исправления — отдельный revert correction commit после проверки текущего diff; без reset и без изменения historical evidence. Возврат старого payload делает новые source-bound candidates непригодными и требует новой подготовки. Сервер ещё не изменялся этим исправлением. Будущее удаление helper допустимо только по доказательству `installed_by_gate` и отдельному exact removal plan; существующий exact helper сохраняется.
+
+## Migration prerequisite candidate v1
+
+Подготовлен новый защищённый пятифайловый package `.p3-vps-run/p35-migration-candidate-v1`. Он использует исправление из commit `51c9de6` и новую trust/manifest/agent/nonce цепочку. Historical receipt 3.4 и V3 failed attempt сохранены как provenance; их timestamps, hashes и claims не меняются. Candidate разрешает только после собственного exact approval **SSH1/HTTPS3/agent starts1**. Runtime Prepare, helper installation и принятие нового baseline не входят в этот запуск.
+
+| Identity | SHA-256 |
+| --- | --- |
+| Candidate | `73f2bc5d62fa0a273259a5a01bdfa9b46e0547d8dac395e94756d06827af844f` |
+| Prerequisite plan | `bc7487ad80a8ebfcdef1133f50176f6508fea717c8470bff1888aea0db65babe` |
+| Agent plan | `da145b61ecb3361db13f8d165ef7613d0b9e4e941c892b62c3e8cc7f902a7967` |
+| Runner | `781411a2b29063def516c049003612c6980a480fceeacdcd4eec3a62d652b556` |
+| Builder | `c02dc1056cbc2754a67934bd61be37ab8492c2f125e9be552e52884fe5271501` |
+| Support | `f96b399e675261a24055772ddad47540342f7146cb23296352cb85f4e95d493b` |
+| Loader | `d3b64ac054b0d1509550d4c65554caceb931b50f265cd466dfef1b63567e1741` |
+| Key wrapper | `4368a22ea962c972aef6ee7d54e51c30243a0db5a6e33ca6244d5071f30bda62` |
+| Cloud recorder | `e3da894b45856934b43649c36695bdcc8e4f24e6e2ced2ca64d21a40407a21a4` |
+
+Challenge — `P35-MIGRATION-BC7487AD80A8EBFC`. Новый payload SHA — `ee7407fc16dbb4ab72fd02b3cd5f1f8f637ad9497bef51e05de73aa08ff17191`; public protocol SHA сохранён: `efa9e5c6d152dfa3dd41cc3f80972792618265c3b00a927a580e808862ed626c`. Frame SHA — `c4040507453a409e98ae5bf581b5fc881af63e309f125726ffeef06acd339f0a`; argv template SHA — `17c2373031b25c0f07cbe3cbbde26a8d5cad6e4cc3da5707df36e446a3db86e9`, encoding `utf8-count-nul-argv-terminal-nul/v1`.
+
+Runner сначала сохраняет protected safe process metadata: exit code, timeout/overflow flags, размеры и prefix hashes stdout/stderr. Loader возвращает только ограниченные error classes, без raw policy или текста exception. Затем runner проверяет envelope, nonce/payload/protocol, canonical baseline и 23 точных historical fields. Drift любого из них прекращает batch до HTTPS и receipt assembly. Новый payload hash проверяется отдельно; три policy-dependent hash только сохраняются. Успех завершается штатными Observe → Assemble → Validate и статусом `migration_observed_validated_not_accepted` после teardown. Durable claim создаётся до agent/network и сохраняется при любом исходе.
+
+Локальные fixtures в Windows PowerShell 5.1 и PowerShell 7 прошли: девять native process случаев, четыре production Observe случая, Assemble/Validate для четырёх обоснованных hash differences, три отказа до HTTPS и четыре replay rejects. Exact transport → loader → production collector проверен с mocked subprocess; frame/argv identities совпали между версиями. Loader fixtures: один success, пять failures, три invalid frames. Реальные SSH/HTTPS/agent starts во всех fixtures — 0.
+
+Reviewer выявил два соседних deadline дефекта нового native adapter: inherited output pipes и pending inherited stdin после выхода parent. Оба воспроизведены RED → GREEN; общий deadline теперь охватывает весь drain/write loop. Это исправления нового executor, не доказанная причина исторической V3 ошибки. Cloud recorder отдельно отклоняет истёкший исторический input в PS5/PS7 до создания root; свежие данные не подставлялись.
+
+На момент freeze observation, claim и Cloud roots отсутствуют. Fresh authenticated Cloud evidence собирается только перед одобренным запуском; время исторического record не обновляется. Окно ввода ключа нового wrapper называется `Home Gateway Phase 3.5 - Prerequisite key unlock`, сразу вызывает `ssh-add` и скрывает ввод passphrase.
+
+Frozen package preflight с правильным confirmation прошёл в PS5/PS7. Неверный confirmation отклонён с exit23 и SSH0/HTTPS0/agent0. Пять package files проверены; source receipt 3.4 и V3 attempt сохранили hashes, старые V3 claim/observation содержат прежние три файла каждый. Live observation ещё не выполнялась.
+
+Независимый final immutable readback: **GO для запроса exact SSH1/HTTPS3 approval, 0 must-fix**. Reviewer расшифровал DPAPI input только в памяти, заново сформировал точные plans/frame/argv, проверил пять drivers и все launcher hashes, ACL/file sets и provenance. Historical trust отличается только новым `observer_payload_sha256`; historical baseline сохранён. Observation/claim/Cloud/runtime roots отсутствуют, agent/add0; acceptance/promotion/runtime/helper flags — false. Разрешение на живой запуск и приёмка фазы этим review не выдавались.

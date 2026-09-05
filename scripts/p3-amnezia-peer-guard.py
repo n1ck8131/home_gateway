@@ -573,6 +573,9 @@ def _normalize_policy(data: bytes) -> bytes:
     for line in text.splitlines():
         if generated.fullmatch(line):
             continue
+        chain = re.fullmatch(r"(:[^ ]+ (?:ACCEPT|DROP|REJECT|-) )\[\d+:\d+\]", line)
+        if chain is not None:
+            line = chain.group(1) + "[0:0]"
         if re.match(r"^\[\d+:\d+\]", line):
             raise ValueError("host policy counters differ")
         result.append(line)

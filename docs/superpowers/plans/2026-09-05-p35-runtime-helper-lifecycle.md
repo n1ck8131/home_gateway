@@ -2,7 +2,7 @@
 
 **Goal:** Validate one protected runtime and install or attest the exact inert server helper, then reconcile the server baseline.
 
-**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** offline preparation in progress; live gates have not run.
+**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** offline runtime correction accepted; read-only refresh stopped on baseline drift, policy diagnostic V3 failed without a receipt. Runtime/helper gates remain open.
 
 **Base:** `2bb8171aa7087ca7e4021b64ad115e289a9d5f27`, branch `phase/p3-5-runtime-lifecycle`, existing `p3-redshield-windows` worktree. Preserve the unrelated untracked Python caches and `testResults.xml`.
 
@@ -21,6 +21,25 @@ Management/Guest actions and profile export belong to 3.6. Activation belongs to
 - Implementer: `scripts/p3-prelive-runtime.ps1` and `tests/windows-pester/P3PreliveRuntime.Tests.ps1`, limited to failed-Prepare ownership and retention safety.
 - Controller: this plan, the phase preparation report, and the current status link. Operational candidates stay under ignored `.p3-vps-run/` with restrictive ACLs.
 - Independent reviewer: read-only review of the complete change and candidate boundary after implementation.
+
+## Текущий путь к закрытию
+
+Владелец поручил продолжить и закрыть фазу 3.5. Предыдущие V2/V3 evidence сохраняются; их claims не допускают повторного использования. Ближайшая разрешённая локальная работа — отдельный migration prerequisite candidate с безопасной регистрацией process result. Ownership implementer дополнен новыми operational artifacts под `.p3-vps-run/`, исправлением IPv4 chain-counter normalization в `scripts/p3-amnezia-peer-guard.py` и соответствующими Python regression tests. Остальные правила parser и historical evidence сохраняются. Дополнительный policy-only live diagnostic не является обязательным gate; штатный collector сохраняет свои IPv6 samples и invariants.
+
+| Условие | Текущее evidence | Что требуется |
+| --- | --- | --- |
+| Offline runtime safety | Независимый GO; 248 Pester и repository verification passed | Сохранить принятую реализацию |
+| Причина policy drift | Совпадают 24 из 27 полей; три hash differences воспроизводятся counters-only fixture | Получить проверяемый текущий результат; не объявлять исторические rules неизменными |
+| Новый prerequisite | Receipt 3.4 истёк; нового accepted receipt нет | Рассмотренное решение по baseline и отдельное точное наблюдение |
+| 6.4L | Runtime отсутствует | Из свежего receipt сформировать, согласовать и выполнить `PreparePlan`; проверить `Validate` |
+| 6.4R-pre/P/post | Не выполнялись | Прочитать состояние helper, согласовать точный install/attestation plan, выполнить и сверить baseline |
+| Приёмка фазы | NO_GO | Защищённые receipts, helper identity/owner/mode, согласованный baseline, ноль leftovers/agents и независимый GO |
+
+Общий запрос продолжить фазу не заменяет hash/challenge approvals, прямо предусмотренные execution steps и runbook. Каждый кандидат сначала готовится и проверяется локально. Новый migration candidate допускает после exact approval один SSH и три HTTPS. До HTTPS/assembly проверяются 23 исторических baseline поля и точный новый payload hash; три policy-dependent hash сохраняются только как новое наблюдение. Полученный receipt не разрешает runtime/helper mutation. Принятие нового baseline и исторического evidence gap включается в последующее точное runtime Prepare approval.
+
+Исправление нормализации меняет hash guard payload. Поэтому следующая цепочка использует новые `ssh_trust`, prerequisite manifest, agent manifest, plan, nonce и root. SSH/key/toolchain/Cloud/egress/expected-IPv6 identities сохраняются. Receipt 3.4 служит только историческим provenance. Для будущего baseline comparison ожидаются 23 неизменных поля; `payload_sha256` и три policy-dependent hash рассматриваются отдельно по текущему evidence. Исторический baseline не преобразуется в новый и не получает обновлённый timestamp. Helper installation не входит в 27-field baseline и сама по себе не требует rebaseline.
+
+После runtime Prepare потребуются свежие evidence для отдельных actions: helper context ограничивает egress возрастом 120 секунд; Reconcile — local observation 300 секундами и Cloud observation 900 секундами. Их собирают перед соответствующим действием, не продлевая старые receipts.
 
 ## Execution steps
 

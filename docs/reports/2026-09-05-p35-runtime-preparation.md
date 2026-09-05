@@ -1,6 +1,6 @@
 # Phase 3.5 runtime preparation
 
-Phase 3.5 is in progress and has not passed its live gates. The protected prerequisite from 3.4 is intact but expired for runtime preparation. The failed-Prepare ownership correction passed final offline verification and independent review. The owner approved read-only refresh candidate V2; its first execution stopped before SSH because key unlocking did not complete before Cloud evidence expired.
+Фаза 3.5 открыта: offline runtime correction прошла verification и независимый review, но runtime/helper gates ещё не выполнены. Receipt 3.4 сохранён и истёк. Read-only refresh остановился на baseline drift; последняя policy diagnostic V3 выполнила SSH1/HTTPS0 и завершилась без policy receipt. По поручению владельца продолжить и закрыть фазу готовится исправление IPv4 counter normalization и отдельный migration prerequisite candidate; baseline/runtime остаются NO_GO.
 
 This report serves the P3 controller and independent reviewer. Its single purpose is to record preparation evidence against the [phase execution plan](../superpowers/plans/2026-09-05-p35-runtime-helper-lifecycle.md). It is not runtime acceptance.
 
@@ -69,9 +69,9 @@ The independent reviewer decrypted the V2 input only in memory and verified cano
 
 ## Remaining gates
 
-The V2 refresh and baseline-diagnostic SSH budgets/claims are consumed; neither may be replayed. Their diff isolates three changed hashes but does not prove unchanged IPv4/nft rules. The separately approved policy V2 stopped before SSH because key unlock did not complete before Cloud expiry. Its network budget is unused, but its durable claim is occupied. Do not retry its original runner: inspect the protected zero-SSH attempt and review recovery/resume once interactive key entry is available. Baseline promotion/runtime remain NO_GO; historical hashes are expected identities only.
+Предыдущие refresh и diagnostic claims сохранены. Policy V2 остановилась до SSH; её отдельно рассмотренный повтор V3 использовал SSH-бюджет и завершился ошибкой. Прямой replay запрещён. Baseline diff выделяет три изменённых hash, но не доказывает неизменность IPv4/nft rules. Независимая проверка допускает после normalization fix сразу штатный prerequisite collector с новым payload и безопасной регистрацией отказов; дополнительные policy-only samples не обязательны. Принятие baseline и runtime остаются NO_GO до соответствующих evidence и approvals.
 
-Only that fresh receipt can produce the exact runtime manifest and challenge. Runtime preparation and helper installation keep their own approval gates. Phase 3.6 profiles, phase 3.7 activation, and later network/recovery work remain outside this report.
+Точный runtime manifest и challenge можно получить только из нового принятого свежего prerequisite receipt. Runtime preparation и helper installation сохраняют свои approval gates. Путь до приёмки записан в [phase plan](../superpowers/plans/2026-09-05-p35-runtime-helper-lifecycle.md#текущий-путь-к-закрытию). Профили 3.6 и активация 3.7 остаются вне этой фазы.
 
 ## Approved refresh attempt
 
@@ -220,3 +220,15 @@ V3 budget использован, durable claim сохранён; повторн
 Локальная диагностика implementer без изменения файлов и без сети: exact frozen loader/payload с mocked subprocess прошли для шести команд, включая допустимые nft warnings. Дополнительно Windows PowerShell 5.1 native stdin → frozen loader → frozen payload с mocked `Popen` вернул `ExitCode=0`, `TimedOut=false`, `Oversized=false`, stderr0 и шесть mock calls; SSH/HTTPS/agent0. Детерминированный framing/BOM defect не воспроизведён. Эти проверки не устанавливают причину live-сбоя. Минимальное исправление следующего executor должно сохранять отдельные безопасные flags, exit code и ограниченную классификацию ошибки, без raw policy/stderr.
 
 Независимый review результата: **GO для фиксации evidence, 0 must-fix**. Reviewer проверил шесть hashes таблицы, protected file sets/ACL, сохранённые claims, отсутствие новых receipts/runtime, неизменность receipt 3.4 и завершение процессов. `git diff --check` прошёл. Это не acceptance фазы 3.5; неизвестная live-причина и baseline/runtime NO_GO сохранены.
+
+## Исправление IPv4 counter normalization и переход к новому prerequisite
+
+По поручению владельца продолжить и закрыть фазу исправлен доказанный локальный дефект `_normalize_policy`: только decimal counters точных chain declarations заменяются на `[0:0]`. Имена цепочек, policy, правила и их порядок сохраняются; counter-prefixed IPv4 rules по-прежнему отклоняются. Три строки production code не меняют public protocol или 27-field schema. Новый guard SHA — `ee7407fc16dbb4ab72fd02b3cd5f1f8f637ad9497bef51e05de73aa08ff17191`; tests SHA — `7f8e24fe2f19d109f32eb535e9995d83f1f93e33dc1a9fda6729a55f2bdc57df`.
+
+Две целевые проверки сначала воспроизвели проблему, затем прошли. Regression сравнивает полный результат production collector при counter-only изменении и проверяет изменение host/firewall/runtime identity при изменении правила. Дополнительно проверена чувствительность к policy, chain name, order и неподдерживаемой counter форме. Scoped module: 54 passed; все Python tests: 57 passed. Scoped Ruff check/format и общий `ruff check .` прошли. Общий `ruff format --check .` сохраняет единственную прежнюю ошибку в неизменённом `2026-08-30-p3-task6a-prelive-guard.md:372`.
+
+`scripts/dev.ps1 -Command verify` завершился с exit 0: 248 Pester passed, остальные Go/build/static/security/governance/toolchain gates прошли; gosec issues0, govulncheck vulnerabilities0, secret scan leaks0. Независимый reviewer принял source/tests и изменения plan/spec/report: **GO, 0 must-fix**. Это приёмка локального исправления, не live candidate и не фазы.
+
+Следующий путь — новый migration prerequisite candidate, SSH1/HTTPS3, с новой manifest/agent/trust цепочкой. Шесть дополнительных policy-only samples не являются требованием закрытия. Штатный collector сохраняет свои IPv6 samples и invariants; runner должен до HTTPS/assembly требовать равенство 23 исторических полей и точное соответствие нового payload. Три policy-dependent hash сохраняются как текущее наблюдение. Новое состояние и исторический evidence gap принимаются отдельно вместе с exact runtime Prepare approval; исторические hashes не пересчитываются.
+
+Rollback локального исправления — отдельный revert correction commit после проверки текущего diff; без reset и без изменения historical evidence. Возврат старого payload делает новые source-bound candidates непригодными и требует новой подготовки. Сервер ещё не изменялся этим исправлением. Будущее удаление helper допустимо только по доказательству `installed_by_gate` и отдельному exact removal plan; существующий exact helper сохраняется.

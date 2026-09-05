@@ -166,13 +166,16 @@ The collector hashes command output only after strict parsing:
 
 - Docker inspect is decoded from exact JSON fields, not delimiter-concatenated templates. Repo digests are validated strings, sorted ordinally, and deduplicated. Container identity is the SHA-256 of the exact container ID; image identity is the SHA-256 of canonical JSON containing image ID plus sorted repo digests.
 - Docker port output must normalize to exactly two bindings for `udp/38556`: `all_ipv4` and `all_ipv6`. Lines are parsed, converted to these classes, sorted ordinally, and hashed as compact canonical JSON. Any specific address, other port/protocol, duplicate, or unparsed line stops.
-- `iptables-save` and `ip6tables-save` run without `-c`. Normalize CRLF to LF, remove only exact generated/completed timestamp comment lines, preserve all remaining line order and whitespace, require one terminal LF, and reject counter-prefixed or unparsed timestamp variants.
+- IPv4 `iptables-save` runs without `-c`. Normalize CRLF to LF, remove only exact generated/completed timestamp comment lines, and replace decimal packet/byte counters in exact chain declarations with `[0:0]`. Preserve chain names, policies, rule content, remaining line order and whitespace; require one terminal LF and reject counter-prefixed rules or unparsed timestamp variants.
+- IPv6 retains its separately qualified normalization/classification: normalize chain counters, remove comment lines and supported decimal rule-counter prefixes, and require the existing parser/classification checks. The phase 3.5 IPv4 correction does not change this behavior.
 - `nft list ruleset` normalizes CRLF to LF and replaces only the decimal values in exact `counter packets <n> bytes <n>` clauses with fixed zero tokens. It preserves line order, all other text, and one terminal LF; an unsupported volatile token stops.
 - `ss -H -lntu` is parsed into protocol, state, receive queue, send queue, local endpoint, and peer endpoint. Queue values must be decimal and are normalized to zero. The remaining exact tuples are sorted ordinally; duplicates or additional columns stop.
 - `host_policy_sha256` hashes normalized IPv4 `iptables-save`; `ipv6_policy_sha256` hashes normalized IPv6 output; `firewall_identity_sha256` hashes canonical JSON of those two hashes plus the normalized nft hash; `listener_identity_sha256` hashes canonical listener tuples.
 - `runtime_identity_sha256` hashes canonical JSON of the container/image/restart, UDP publication, listener, firewall, and loaded-policy identities already present in the snapshot. It never hashes a second independently collected sample.
 
 Golden raw fixtures for every command define accepted line grammar and prove that only the listed volatile values normalize away.
+
+Amendment 2026-09-05, phase 3.5: chain-declaration counter normalization also applies to IPv4, whose previous implementation retained those counters. This changes payload and dependent policy identities. Keep the 27-field schema and public protocol only while their shapes remain unchanged; bind the new exact payload in new trust/manifest/agent/receipt artifacts. Preserve historical receipts unchanged and accept new baseline hashes only from a reviewed fresh observation. A historical aggregate hash cannot prove unchanged rules or reconstruct a new baseline.
 
 ## Decision 4: independent prerequisite observation
 

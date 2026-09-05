@@ -111,3 +111,22 @@ Rules наблюдались через authenticated browser в `10:48:47.052 U
 Teardown завершён: агент, ssh-add и принадлежащие запуску wrapper/runner отсутствуют. Исходный receipt 3.4 неизменён. В root остались три начальных файла, batch и новый receipt отсутствуют. Claim сохранён; контрольный `PreflightOnly` отклонил повтор на строке 193 до agent/network, с SSH0/HTTPS0/agent starts0. Runtime Prepare и helper не выполнялись. Фаза 3.5 остаётся открытой.
 
 Следующий шаг — отдельный точный read-only diagnostic candidate с новым nonce и одним SSH-наблюдением, которое сохраняет обезличенный baseline и различия. Принятие нового baseline и повторное выполнение refresh не разрешены автоматически после stop-on-drift.
+
+## Подготовка diagnostic candidate
+
+Диагностический сценарий использует прежние pinned host/key/payload и отдельные nonce, observation root и durable claim. Он допускает один SSH и ноль HTTPS, проверяет envelope, nonce, payload/protocol и canonical baseline hash, сохраняет защищённый обезличенный ответ и различия с историческим baseline, затем останавливается. Production `finally` завершает агент. Сценарий не принимает новый baseline, не собирает prerequisite receipt и не выполняет runtime/helper actions. Для запуска нужны свежий Cloud record и отдельное exact approval.
+
+Первый локальный пакет V1 сохранён как superseded и не выполнялся. Независимый reviewer обнаружил, что dot-source production scripts очищает параметр `Confirmation`; первоначальный preflight не проверял этот случай. Исправленная версия использует `DiagnosticConfirmation` и проверяет переданное подтверждение после imports также в `PreflightOnly`. Memory-only synthetic check подтвердил: корректный envelope даёт два synthetic evidence records и ожидаемую остановку; изменение restart count отражается одним отличающимся полем; подменённый nonce отклоняется до любых записей. Эти проверки не выполняют filesystem writes, SSH/HTTPS или agent start.
+
+V2 собран локально в `.p3-vps-run/p35-diagnostic-candidate-v2/`; пять защищённых файлов содержат contract/plans и DPAPI input. Новый observation root, claim и Cloud record для исполнения ещё отсутствуют. Windows PowerShell 5.1 preflight с правильным `DiagnosticConfirmation` прошёл; неверное подтверждение отклонено до agent/network. V1 сохранён побайтно.
+
+| Артефакт V2 | SHA-256 или challenge |
+| --- | --- |
+| Diagnostic candidate | `69cb0397d6176b8e1e0e74f06bfc3fb0e8212b7f0873b0f9439ff13d3c13029a` |
+| Diagnostic challenge | `P35-DIAGNOSTIC-7073247BC0713953` |
+| `phase35-diagnostic-runner-v2.ps1` | `a57b3375aa3d93057aaff36a7c4931743b85388d85061ae71396655849cf0935` |
+| `phase35-build-diagnostic-candidate-v2.ps1` | `f71a4365ed48cbe817537df38b7aaa75c03688c2cc6fb3af8bd85a9e92081729` |
+
+Новый frozen Cloud file для будущего запуска: `.p3-vps-run/p35-cloud-evidence-diagnostic-v2/observation.json`. Кандидат имеет статус `awaiting_exact_diagnostic_approval`; сетевые действия по нему не выполнялись.
+
+Независимый финальный review V2: **GO для запроса отдельного exact approval, открытых замечаний 0**. Reviewer подтвердил DPAPI input, canonical plans/challenges, historical baseline binding, пять driver hashes, path pins, защищённый пятифайловый package, отсутствующие observation/claim roots и ноль agent processes. Review не выполнял live-действий. `git diff --check` прошёл.

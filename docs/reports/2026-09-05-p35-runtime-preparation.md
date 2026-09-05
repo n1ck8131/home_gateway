@@ -280,7 +280,7 @@ Runner завершился с exit 0: `migration_observed_validated_not_accepte
 
 Совпали все 23 fixed fields. Четыре различия с историческим baseline — `payload_sha256`, `host_policy_sha256`, `firewall_identity_sha256`, `runtime_identity_sha256`. Новый payload соответствует reviewed normalization fix; остальные три hashes получены штатным collector. Это новое наблюдаемое состояние; историческая причина drift по-прежнему не доказана. `baseline_accepted`, `runtime_prepared`, `helper_installed` — false. Прямой replay migration runner запрещён: one-shot budget использован, claim сохранён.
 
-Независимая проверка receipt — **GO**: Windows PowerShell 5.1 `Validate` прошёл; protected batch/Cloud воспроизвели точный receipt SHA в `13:37:50 UTC`. Подтверждены 23 fixed fields, четыре различия, nonce/payload, ACL/file sets (шесть observation и шесть claim files), исходный receipt 3.4, ноль agent/add/owned runner/wrapper и отсутствие consumption/runtime. PS7 иначе сериализовал DateTime при дополнительной проверке byte reproduction; для точного SHA использован основной PS5 runtime. Ошибочный дополнительный probe reviewer вызвал pre-assembly-only helper на уже собранном root и получил отказ из-за существующего final receipt; это не ошибка рабочего observation.
+Независимая проверка receipt — **GO**: Windows PowerShell 5.1 `Validate` прошёл с текущим временем `13:37:50 UTC`. Отдельный integrity recomputation из неизменных protected batch/Cloud и исходного receipt time воспроизвёл точный SHA; это не refresh и не продление freshness. Подтверждены 23 fixed fields, четыре различия, nonce/payload, ACL/file sets (шесть observation и шесть claim files), исходный receipt 3.4, ноль agent/add/owned runner/wrapper и отсутствие consumption/runtime. PS7 иначе сериализовал DateTime при дополнительной проверке byte reproduction; для точного SHA использован основной PS5 runtime. Ошибочный дополнительный probe reviewer вызвал pre-assembly-only helper на уже собранном root и получил отказ из-за существующего final receipt; это не ошибка рабочего observation.
 
 ## Runtime candidate V2 и истечение окна Prepare
 
@@ -291,3 +291,22 @@ Executor требует отдельного exact runtime confirmation, при�
 Полный `PreflightOnly` прошёл в PS5/PS7 до expiry. Независимый immutable readback принял package offline: exact DPAPI/trust/manifest/receipt, шесть files/ACL, plans и rollback projection совпали, **GO, 0 must-fix**. Controller не успел закончить подготовку и представить exact approval владельцу до `13:38:09 UTC`; approval на этот Prepare не выдавалось, сам Prepare не выполнялся. Последующий negative-ack probe остановился раньше на штатной freshness; он доказывает stale rejection, а не проверку неверного acknowledgement.
 
 Runtime и consumption отсутствуют. Candidate V2 теперь исторический, **live NO_GO**; его receipt и timestamp не продлеваются. Для следующего окна заранее готовятся paths/pins variants проверенного observation и runtime executor. Следующий refresh будет проверять уже наблюдавшийся normalized baseline на полное равенство, сохраняя отдельное exact approval для runtime. Код и проверяемые templates готовятся до нового сбора, чтобы не расходовать его freshness window на реализацию.
+
+## Следующий refresh и заранее проверенный Prepare
+
+Подготовлен отдельный `.p3-vps-run/p35-migration-candidate-v2`, SHA `3dc4497fb921ca59c17dd8a7738ac107b958d22d89ed9a35526ec5b06e6beffd`, challenge `P35-MIGRATION-B5A1E349DEF11EF1`. Scope после exact approval: SSH1/HTTPS3/agent starts1, обязательный teardown. Runner `e92c514d62b195cb5640c4f36415c718ea5acfb6b428769b9c64aec26c6cfe3c`, builder `9639990045fcdb30aca986f0fe90dcbdf74d708d6caa2c79e0de144b22405e29`. Новый plan SHA `b5a1e349def11ef18526c88cd37fae0ac29e8220611882164421d29428d956a5`, frame SHA `e2785bfb7832a8b0007e6e17467d61b1a6676765a1d7be7b3d658f50a827aa62`; agent plan и argv template сохранены от V1.
+
+Дельта исполнителя ограничена новыми roots/pins и дополнительным полным совпадением normalized baseline `f8c9731908e71daef942916fba05eeaf5311bd96abdae9a47f16a03e303b196e` до HTTPS/assembly. V1 receipt/attempt pinned как immutable provenance; continuity не означает принятие baseline владельцем. Новые observation/claim/Cloud roots имеют суффикс `v2`. Cloud recorder SHA `eeb5c82bada20c6f602d0151f8142fa46353e6c24373da8187c998fce4f0d68a` отличается от V1 только root. Предыдущие artifacts не изменялись.
+
+Migration V2 preflight с правильным и неправильным confirmation проверен в PS5/PS7 без сетевых вызовов или agent. Отдельная fixture подтвердила, что drift normalized baseline останавливает batch до HTTPS/assembly. Независимый immutable readback: **GO, 0 must-fix**; проверены пять protected files/ACL, DPAPI plans, frame/argv, все pins, новый nonce и сохранённые manifests/provenance. Новые рабочие roots отсутствуют.
+
+Заранее проверены runtime V3 templates, привязанные только к exact migration V2 candidate:
+
+| Файл | SHA-256 |
+| --- | --- |
+| `phase35-runtime-build-candidate-v3.ps1` | `80037d01050a2ed378c312505eb6dbfb6cb13d3b02d8f568d78d7e98eac29d4e` |
+| `phase35-runtime-prepare-v3.ps1` | `7d581c3e54682ed6ffa91712528343c333cc18ce4f9bf0e2ae98e52fcc4a4f79` |
+
+Их дельта — новые paths и exact migration pin. Runtime target — `p35-protected-runtime-v3`, будущий package — `p35-runtime-candidate-v3`. После successful observation builder получает фактические `SourceReceiptSHA256` и `MigrationAttemptSHA256`; code edits не требуются. Будущие runtime candidate/manifest/challenge зависят от свежего receipt и ещё не созданы.
+
+AST-selected executor preflight на новых synthetic receipts: PS5 4/4 и PS7 4/4 — fresh input, wrong acknowledgement, receipt mismatch и stale receipt. Fixture явно задаёт artifact root/self pin; исправлены только harness context и длина synthetic path. Реальные historical timestamps не менялись, Prepare/consumption/agent/SSH/HTTPS — 0. Это предварительная проверка templates; actual fresh runtime package всё ещё требует readback и отдельного exact owner approval вместе с принятием baseline и historical evidence gap.

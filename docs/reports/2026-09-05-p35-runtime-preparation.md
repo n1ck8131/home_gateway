@@ -312,3 +312,35 @@ Migration V2 preflight с правильным и неправильным confi
 AST-selected executor preflight на новых synthetic receipts: PS5 4/4 и PS7 4/4 — fresh input, wrong acknowledgement, receipt mismatch и stale receipt. Fixture явно задаёт artifact root/self pin; исправлены только harness context и длина synthetic path. Реальные historical timestamps не менялись, Prepare/consumption/agent/SSH/HTTPS — 0. Это предварительная проверка templates; actual fresh runtime package всё ещё требует readback и отдельного exact owner approval вместе с принятием baseline и historical evidence gap.
 
 Final scoped review migration V2 и runtime V3 templates — **GO, 0 must-fix**. Последний fixture gap закрыт без изменения frozen builder/executor. Разрешено запросить exact migration V2 approval; будущее runtime approval и приёмка фазы не выданы.
+
+## Migration V2: отказ на normalized baseline continuity
+
+После exact owner approval выполнен candidate `3dc4497fb921ca59c17dd8a7738ac107b958d22d89ed9a35526ec5b06e6beffd` / `P35-MIGRATION-B5A1E349DEF11EF1`. Authenticated Cloud association прочитана `2026-09-05T14:30:39.928Z`, rules — `14:31:17.858Z`; identities и rules совпали. Frozen Cloud SHA — `164ddaf5a571627f4c4b313dc00556586447a86da4e248a2310f8808b764efa0`. Предыдущее чтение rules с истёкшим временем не использовалось; новые данные получены повторным чтением UI.
+
+Ключ загрузился до expiry. Native SSH завершился с exit 0, timeout/overflow — false, stderr — 0 bytes, UTF-8 valid. Runner сохранил process evidence, server observation и diff, затем остановился на `normalized observation continuity drifted` (line 89). Итог — `diagnostic_failed_closed`, **SSH1/HTTPS0/agent starts1**, agent/add0. Tool session завершилась с exit 1; внутренний failure outcome сохранён. Receipt assembly не выполнялась, one-shot claim сохранён, прямой replay запрещён.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| `p35-migration-claim-v2/attempt.json` | `e89e8b5216741044e2744f4cd1e83e49e57b4d14819cb4cefbc5755a68e80d06` |
+| `server-observation.json` | `cc51e7da1d46b1fbfc903a244b83e779c2eb5cef60caaf8abc7daa2510790ca6` |
+| `baseline-diff.json` | `fad76ce28a472bd81c56ca80e193d870d6fdd4df38d73c947c539ea0ba92727c` |
+| `ssh-process.json` | `63905e165a48cc9f2c05abbf635b884c3410b16ebde1d21dba6b2589764b4bb9` |
+| Новый observed baseline | `fecfd5d2739189e0db7b00af1ce32b104340af0c0b6284bf6b26c33d29a0aa5a` |
+
+Относительно successful migration V1 совпали **24/27 fields**. Изменились `host_policy_sha256` (`88afd674f14a5b1a4c8c243c93a666a47e5e06c484a1bb87844d39d1f174f5ab`), `firewall_identity_sha256` (`eeb32d04ec3cf2041ab52a14f056cb2ad23ec82d89e650cf93122bf276cd87fc`) и `runtime_identity_sha256` (`37ad6870267e65db38ca51f7ebb98d24ca451f16444743ede9d3d7360661f08c`). Payload не менялся. Сохранённый historical diff отдельно подтверждает 23 исходных fixed fields и четыре различия относительно фазы 3.4; он не является diff между V1 и V2.
+
+Observation root содержит три файла, claim root — шесть. Runtime V3 package, runtime и consumption не созданы. Свежий сбор опроверг continuity предположение для baseline `f8c973…`; он не устанавливает причину изменения policy. Одних aggregate hashes недостаточно, чтобы отличить оставшуюся volatility от реального изменения правил. Baseline promotion/Prepare и закрытие фазы остаются **NO_GO** до отдельной проверки причины и нового exact candidate.
+
+Независимый PS5 readback — **GO для failure evidence / NO_GO для continuity и runtime**: все четыре hashes, nonce/Cloud bindings, ACL и file sets совпали. Подтверждены 24 одинаковых fields относительно V1 и 23 historical pins; исходные receipt 3.4, V1 receipt/attempt не менялись. Agent/add и exact runner/wrapper — 0; новых receipt/consumption/runtime/package нет.
+
+При source review найден отдельный normalization gap: regex удалял `# Completed by … on …`, но сохранял стандартный footer `# Completed on <ctime>`. Формат подтверждён [исходными fixtures Netfilter](https://git.netfilter.org/iptables/commit/tests/options-ipv4.rules?h=v1.4.19.1&id=6a74dc80fcdf48e2b149e92aee08f3445055ea3b). Он входит в IPv4 policy hash и затем в firewall/runtime hashes, поэтому смена времени способна менять ровно эту тройку. Проверка и точечное исправление выполняются offline; это не доказывает причину конкретных исторических live differences.
+
+## Исправление стандартного completion footer
+
+`scripts/p3-amnezia-peer-guard.py` теперь удаляет стандартный `# Completed on <ctime>` только при точном соответствии weekday/month/day/time/year. Malformed ctime-like строки с известным weekday отклоняются; произвольные и near-match policy comments сохраняются. Правила, chain-counter normalization и IPv6 behavior не менялись. Legacy `Generated/Completed by` regex остаётся permissive: эта отдельная существующая граница не исправлялась и не объявляется квалифицированной.
+
+Payload SHA — `186a69d9cb4ed7ccbe42bff6810cb1da955332e77385a8f510aea9570c6bc25a`; test file SHA — `fae1bf3f0a3e871812cdec88919c37c540349c559bfc12fe10549b0f65c14021`. Два focused regression cases воспроизведены RED → GREEN. Один проверяет grammar/сохранение comments и чувствительность к реальному rule change; другой сравнивает все 27 полей полного collector при изменении только footer time. Все Python tests — **58 passed**. `ruff check .` и format-check двух затронутых Python files прошли. Global `ruff format --check .` сохранил известный отказ только в неизменённом historical markdown `2026-08-30-p3-task6a-prelive-guard.md:372` (59 files already formatted).
+
+Независимый focused source review — **GO, 0 must-fix**. Новый payload требует нового exact observation candidate. Предлагаемый sampler выполняет два полных штатных snapshot в одном SSH с паузой минимум 1 s, прежними общими limits 30 s / 64 KiB и обязательным teardown. Он сохраняет обе sanitized observations до проверки полного равенства, проверяет historical 23 pins и новый payload, а затем допускает три HTTPS/assembly. Предыдущие hashes остаются provenance. Это готовящийся offline contract; новый live запуск и baseline acceptance не разрешены.
+
+Полный `scripts/dev.ps1 -Command verify` после footer fix завершился с exit 0: Go/tests/build и repository gates прошли, gosec — 0 issues, govulncheck — no vulnerabilities, gitleaks — no leaks, governance/toolchain smokes — PASS. Sanitized log сохранён в `.p3-vps-run/p35-footer-final-verify.log`.

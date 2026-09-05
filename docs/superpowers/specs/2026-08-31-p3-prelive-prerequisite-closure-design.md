@@ -177,6 +177,8 @@ Golden raw fixtures for every command define accepted line grammar and prove tha
 
 Amendment 2026-09-05, phase 3.5: chain-declaration counter normalization also applies to IPv4, whose previous implementation retained those counters. This changes payload and dependent policy identities. Keep the 27-field schema and public protocol only while their shapes remain unchanged; bind the new exact payload in new trust/manifest/agent/receipt artifacts. Preserve historical receipts unchanged and accept new baseline hashes only from a reviewed fresh observation. A historical aggregate hash cannot prove unchanged rules or reconstruct a new baseline.
 
+Second amendment 2026-09-05, phase 3.5: the standard `iptables-save` footer is `# Completed on <ctime>`, without `by`. Normalize only this exact generated footer; reject malformed ctime-like variants and preserve arbitrary policy comments. This corrects a separate source of time-dependent IPv4 hashes without changing IPv6 behavior or the 27-field schema. The legacy `Generated/Completed by` parser remains permissive; this bounded footer correction does not qualify all historical timestamp variants. A fresh observation must bind the new payload, and historical aggregate differences remain unattributed.
+
 ## Decision 4: independent prerequisite observation
 
 Add a tracked prerequisite driver separate from the protected runtime. It has four offline-testable actions:

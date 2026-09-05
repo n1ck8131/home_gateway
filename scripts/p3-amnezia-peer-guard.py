@@ -570,9 +570,16 @@ def _normalize_policy(data: bytes) -> bytes:
         raise ValueError("host policy line ending differs")
     result = []
     generated = re.compile(r"^# (?:Generated|Completed) by .+ on .+$")
+    completed = re.compile(
+        r"# Completed on (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+        r"(?: [1-9]|[12][0-9]|3[01]) (?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}"
+    )
     for line in text.splitlines():
-        if generated.fullmatch(line):
+        if generated.fullmatch(line) or completed.fullmatch(line):
             continue
+        if re.match(r"# Completed on (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b", line):
+            raise ValueError("host policy completion timestamp differs")
         chain = re.fullmatch(r"(:[^ ]+ (?:ACCEPT|DROP|REJECT|-) )\[\d+:\d+\]", line)
         if chain is not None:
             line = chain.group(1) + "[0:0]"

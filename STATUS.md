@@ -1,7 +1,7 @@
 # Project Status
 
-Current phase: P3 self-hosted Windows pilot bootstrap
-Release level: P2-software-verified; P3-gate65c-rollback-complete; self-hosted-client-field-not-run
+Current phase: Phase 3.5 accepted; successor phases not started
+Release level: P2-software-verified; P3-runtime-helper-accepted; self-hosted-client-field-not-run
 
 ## P0A Foundation
 
@@ -32,7 +32,9 @@ Release level: P2-software-verified; P3-gate65c-rollback-complete; self-hosted-c
 
 ## P3 self-hosted Windows pilot
 
-- State: `gate65c-rollback-complete`; the corrected pre-live prerequisite, durable rollback, and protected management/Guest evidence contracts are implemented offline and await consolidated review; `LIVE_ACTION_PERFORMED=NO`. A separately approved read-only prerequisite observation must precede Gate 6.4L and helper installation. The Gate 6.5C Admin candidate was removed and the baseline peer-set hash restored; no protected PC profile exists. All Windows client, network, recovery and `pc-core-ready` field gates remain open
+The dated entries below retain historical checkpoints. Earlier open/NO_GO statements are superseded by the current state and the Phase 3.5 closed entry.
+
+- State: `phase35-runtime-helper-accepted`, 2026-09-06, independent FINAL ACCEPTANCE GO0. Gates 6.4L, 6.4R-pre, 6.4P and 6.4R-post passed: protected runtime, exact inert helper installation and final server-baseline reconciliation are accepted. The historical Gate 6.5C Admin candidate remains removed and the baseline peer set is preserved; no protected PC profile exists. Management/Guest/profile export (3.6), activation (3.7), Windows client/network/recovery and `pc-core-ready` field gates remain open and have not been started by this phase
 - Plan: [P3 Windows implementation plan](docs/superpowers/plans/2026-08-24-p03-redshield-windows.md) and [self-hosted DigitalOcean bootstrap plan](docs/superpowers/plans/2026-08-27-p3-self-hosted-digitalocean-bootstrap.md)
 - Architecture: [ADR-0011](docs/adr/ADR-0011-pc-first-platform-tunnel-boundary.md) keeps policy/API semantics independent from platform/provider; [ADR-0016](docs/adr/ADR-0016-p3-self-hosted-digitalocean-bootstrap.md) moves the first own VPS and static PC peer into P3 while leaving automation, mobile lifecycle and telemetry in P8
 - Offline mutation architecture: [ADR-0012](docs/adr/ADR-0012-windows-offline-mutation-ownership.md) defines strict project ownership, qualified endpoint binding, additive-first fail-closed ordering, durable commit-confirm/recovery states and exact restoration boundaries
@@ -63,7 +65,7 @@ Release level: P2-software-verified; P3-gate65c-rollback-complete; self-hosted-c
 - Новый migration V3 candidate подготовлен: `4dd28f30be759619ff5792dffc1e46633453cbda4f0722982cecbf39bda48965` / `P35-MIGRATION-F99E84BB25DFF358`. Scope — SSH1 с двумя полными read-only snapshots и equality всех 27 полей до HTTPS3, общий deadline30s/64KiB, teardown. Runtime V4 templates заранее проверяют stability proof; PS5/PS7 fixtures и frozen preflights прошли. Новый live запуск, baseline acceptance и Prepare ещё не разрешены; фаза 3.5 остаётся открытой.
 - Final immutable review migration V3 и runtime V4 templates — GO, 0 must-fix. Candidate/DPAPI/plans/frame/argv/provenance, ACL и final hashes подтверждены; новые live roots отсутствуют, agent/add0. Можно запросить exact observation approval. Фаза не закрыта, runtime/helper gates остаются впереди.
 - Migration V3 затем одобрен и выполнен: SSH1/HTTPS0, native exit2, stdout0/stderr64 bytes, timeout/overflow false, agent/add0. Отказ до observation envelope; attempt `df04a00c762c9eec40d3626f69efe126b1906ecdc5fd3111d44397613a25e189`, claim4 и process audit сохранены. Runtime/consumption не созданы; использованный candidate не повторять. Причина затем исследована локально, как записано ниже.
-- Phase 3.5 latest, 2026-09-06: reviewed dotenv askpass загрузил рабочий ключ без вывода секрета. Migration V7 SSH1/HTTPS3 и runtime Prepare/Validate/actual readback получили independent GO; historical-gap acknowledgement и consumption сохранены. Helper V4 установлен и независимо принят: exact payload, root:root0755, leftovers0, agent/add0; install receipt `0ac52e24de92c81224f5a047c4dd364297c31894d2cd089389bd3c3acb4ae542`. POSTV4 остановился локально до SSH на трёх пустых CIM descriptions. Native resolution сохранил все 21 записи и выявил отдельный generic WireGuard-интерфейс без доказанной provider identity; текущий classifier требует его отсутствия. Runtime/helper/claims сохранены, VPN не менялся. Итоговый reconcile и phase closure остаются NO_GO до authoritative third-party attribution либо отдельно разрешённого изменения фактического baseline; повторного общего разрешения не требуется. Подробности в [preparation report](docs/reports/2026-09-05-p35-runtime-preparation.md).
+- Phase 3.5 closed, 2026-09-06: independent FINAL ACCEPTANCE GO0. Migration V7, runtime Prepare/Validate, Helper V4 pre/install и Final Observe/Post V4 приняты. Final result `0bfb3b8ff0deff4c1d469fa88081401a75cfecc25dc73673883089da71165dbd` совпал по всем 24 полям с accepted baseline. Explicit Python и отдельный accepted HOST pin исправили финальный вызов; Cloud receipt validation сохранена. Existing WG атрибутирован как `current existing_non_target`, provider UNKNOWN; loaded module и historical identity остаются UNPROVEN. Helper root:root0755/exact, container без restart, leftovers0, agent/add/env0; temporary receipts exact-архивированы, runtime содержит пять stable files, profile отсутствует. VPN/Cisco/routes/DNS/firewall/services/Docker configuration не менялись. Failed claims/evidence сохранены; 3.6/3.7 не начаты. Полные hashes, checks и nonblocking evidence limits: [phase report](docs/reports/2026-09-05-p35-runtime-preparation.md).
 - Branch: `phase/p3-5-runtime-lifecycle`, based on `2bb8171aa7087ca7e4021b64ad115e289a9d5f27` in the P3 Windows worktree
 
 ## External gates

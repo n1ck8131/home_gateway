@@ -2,7 +2,7 @@
 
 **Goal:** Validate one protected runtime and install or attest the exact inert server helper, then reconcile the server baseline.
 
-**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** Migration V7, actual runtime package and Prepare/Validate passed with independent GO. The approved dotenv askpass loads the real key without secret output. Helper V4 installation and actual readback passed independent review: exact payload, root:root0755, no temporary leftovers, agent/add0. POSTV4 stopped locally before SSH on empty adapter descriptions. Native resolution preserves all 21 rows but exposes a generic WireGuard interface with unknown provider identity; the current classifier rejects that baseline. Runtime, helper and consumed claims remain intact; final reconcile and phase acceptance remain NO_GO.
+**Audience:** P3 controller, implementer, and independent reviewer. **Content type:** execution plan. **Evidence status:** CLOSED, 2026-09-06, FINAL ACCEPTANCE GO0. Migration V7, runtime Prepare/Validate, Helper V4 pre/install, Final Observe V4 and corrected POST V4 passed independent review. All 24 final receipt fields match the accepted baseline. Runtime temporary receipts are archived and absent, agent/add/env0, profile absent. The [phase report](../../reports/2026-09-05-p35-runtime-preparation.md) records exact receipts, tested corrections and retained evidence limits. Phase 3.6/3.7 has not started.
 
 **Base:** `2bb8171aa7087ca7e4021b64ad115e289a9d5f27`, branch `phase/p3-5-runtime-lifecycle`, existing `p3-redshield-windows` worktree. Preserve the unrelated untracked Python caches and `testResults.xml`.
 
@@ -22,7 +22,7 @@ Management/Guest actions and profile export belong to 3.6. Activation belongs to
 - Controller: this plan, the phase preparation report, and the current status link. Operational candidates stay under ignored `.p3-vps-run/` with restrictive ACLs.
 - Independent reviewer: read-only review of the complete change and candidate boundary after implementation.
 
-## Текущий путь к закрытию
+## Выполненный путь к закрытию
 
 ### Уточнение полномочий владельцем, 2026-09-05
 
@@ -30,7 +30,7 @@ Management/Guest actions and profile export belong to 3.6. Activation belongs to
 
 Protected/source verification и live batches выполняются последовательно: `Read-P3BoundedStableBytes` открывает файлы с `FileShare.None`. Одновременные чтения из разных PS processes/reviewer могут вызвать fail-closed sharing violation. Reviewer получает отдельное окно readback; controller начинает следующий executor только после завершения его чтений. Обычная работа с независимыми docs и browser UI может идти параллельно.
 
-Владелец поручил продолжить и закрыть фазу 3.5. Migration V7, runtime Prepare и Helper V4 installation уже приняты; повторять их не требуется. Предыдущие evidence и consumed claims сохраняются. Текущий blocker — неизвестная provider identity одного generic WireGuard-интерфейса в local POST baseline. Новый POST не допускается до authoritative attribution в отдельном reviewed collector contract либо отдельно разрешённого изменения фактического baseline. Operational POST supplement сохраняет полный inventory и строгий отказ; фазу 3.6/3.7, profile export и VPN mutation он не разрешает.
+Владелец поручил продолжить и закрыть фазу 3.5. Migration V7, runtime Prepare и Helper V4 installation приняты; Final Observe/Post V4 завершили оставшийся gate. Fresh доказательство `current existing_non_target` использует неравенство peer key и обоих authoritative target endpoints; provider остаётся UNKNOWN. Operational supplement сохраняет полный inventory и source provenance. Previous evidence и consumed claims сохраняются без replay. Фазы 3.6/3.7, profile export и VPN mutation не выполнялись.
 
 | Условие | Текущее evidence | Что требуется |
 | --- | --- | --- |
@@ -38,8 +38,18 @@ Protected/source verification и live batches выполняются после�
 | Причина policy drift | V7: 23 исторических поля сохранены; две новые выборки совпали по всем 27 полям | Новый baseline принят с явным historical-gap acknowledgement; историческую причину не считать доказанной |
 | Новый prerequisite | V7 SSH1/HTTPS3, independent receipt GO, agent/add0 | Receipt использован Prepare; сохранить provenance |
 | 6.4L | Runtime V5 package/Prepare/Validate и actual readback получили GO | Сохранить runtime и consumption |
-| 6.4R-pre/P/post | V4 pre/install и actual receipts приняты; POSTV4 отказал локально до SSH; provider одного generic WireGuard interface не доказан | Authoritative third-party attribution в отдельном reviewed collector contract либо отдельно разрешённое изменение actual baseline; не исключать unknown tunnel |
-| Приёмка фазы | NO_GO | Защищённые receipts, helper identity/owner/mode, согласованный baseline, ноль leftovers/agents и независимый GO |
+| 6.4R-pre/P/post | Helper V4 pre/install и Final Observe/Post V4 независимо приняты; final result `0bfb3b8ff0deff4c1d469fa88081401a75cfecc25dc73673883089da71165dbd` | Выполнено; сохранить exact receipts/claims и rollback evidence |
+| Приёмка фазы | FINAL ACCEPTANCE GO0, 2026-09-06 | Выполнено: helper identity/owner/mode, baseline equality, leftovers/agents0, exact cleanup, independent GO |
+
+После checkpoint `618c88c` actual UAPI V6 collector получил два одинаковых публичных снимка существующего AmneziaWG tunnel через обычный UAC. Source-pinned grammar, native adapter/SCM/query-limited process/protected-pipe binding и secret-buffer zeroing независимо проверены. Final Observe V4 заново собрал UAPI и target public data и доказал неравенство ключа и обоих endpoints относительно local projection. Provider остаётся UNKNOWN, loaded module UNPROVEN; обход OS access controls и service/VPN mutations не выполнялся. Исходные failures, runtime/install и consumed claims сохраняются; фазы 3.6/3.7 не начаты.
+
+Actual V6 сохранил прошедшие V5 held process image/creation/liveness checks (`0x1000`), exact SCM/native adapter binding и добавил owner/DACL/server-PID проверки на удерживаемом UAPI handle. Module enumeration удалена без альтернативного доступа; receipt явно содержит `loaded_module=UNPROVEN`. SCM configuration arguments не читались. Один bounded observation с preconditions перед GET выполнен и независимо принят; отдельного preparatory UAC не было.
+
+Принятый public-only target collector связывает fresh authenticated Cloud Droplet public IPv4 с numeric pinned-key SSH destination, а оба public IPv4/IPv6 — с той же Droplet, exact running container/image, server public key (`awg show awg0 public-key`), listen port и принятой dual-wildcard UDP38556 publication. Два публичных наблюдения и before/after identity checks совпали. Private config и profile export для этой атрибуции не нужны. Консервативный canonical target set включает обе address families даже при blocked Cloud IPv6 inbound; дополнительные известные authoritative addresses/ports включаются либо блокируют классификацию. Полное знание DNS/NAT alternatives не заявляется. Reserved IP проверен через authenticated Droplet Networking.
+
+Совместимость POST оформляется отдельным versioned attribution/compatibility envelope: исходный native inventory и raw v1 classifier receipt (`selfhosted=1`) сохраняются. Единственное допустимое доказанное уточнение — exact adapter `selfhosted → existing_non_target`, provider UNKNOWN, при неравенстве и peer key, и каждого authoritative target endpoint. Все остальные adapters/classes неизменны; второй generic WG, extra peer или drift дают NO_GO. Exact POST plan связывает raw receipt, attribution, UAPI/target/native evidence и derivation implementation hashes; eight-field wire projection передаётся frozen reconciler только после проверки envelope. Projection не выдаётся за необработанный результат regex classifier. Freshness определяется самым старым source observation и ограничена существующим local TTL300s, с повторной проверкой перед действием.
+
+POST wire projection и Cloud receipt в RuntimeRoot существуют только для одного controlled guard action. Их expected hashes/owned paths и envelope/plan bindings записываются в protected claim до exposure. На любом выходе exact-owned receipts архивируются в claim, отсутствие runtime paths проверяется и фиксируется typed consumption/cleanup evidence. Это предотвращает позднее standalone чтение projection как raw v1 receipt. Cleanup failure блокирует закрытие, сохраняет claim и не разрешает удалять подменённый файл; teardown агента остаётся обязательным.
 
 Каждый кандидат сначала готовится и проверяется локально. По последующему прямому поручению владельца controller самостоятельно фиксирует exact authorization на фактические hash/challenge в пределах фазы 3.5. Новый migration candidate допускает один SSH и три HTTPS. До HTTPS/assembly проверяются 23 исторических baseline поля и точный новый payload hash; три policy-dependent hash сохраняются только как новое наблюдение. Полученный receipt остаётся evidence prerequisite; runtime/helper исполняются собственными проверенными gates. Принятие нового baseline и исторического evidence gap фиксируется в точном runtime Prepare authorization.
 
